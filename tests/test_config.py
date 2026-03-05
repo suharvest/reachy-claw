@@ -30,4 +30,19 @@ def test_load_config_reads_environment_overrides(monkeypatch):
     assert config.stt_backend == "faster-whisper"
     assert config.whisper_model == "small"
     assert config.wake_word == "hey reachy"
-    assert config.gateway_url == "ws://10.0.0.9:19999"
+    assert config.gateway_url == "ws://10.0.0.9:19999/desktop-robot"
+
+
+def test_config_has_motion_defaults():
+    config = Config()
+    assert config.motion_emotion_intensity == 0.7
+    assert config.motion_head_tracking_smoothing == 0.3
+    assert config.motion_idle_animation_interval == 5.0
+
+
+def test_config_has_vision_defaults():
+    config = Config()
+    assert config.vision_tracker_type == "mediapipe"
+    assert config.vision_camera_index == 0
+    assert config.enable_face_tracker is True
+    assert config.enable_motion is True

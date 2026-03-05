@@ -1,4 +1,4 @@
-"""OpenClaw Gateway client for sending/receiving messages."""
+"""Desktop-robot WebSocket client for OpenClaw."""
 
 from __future__ import annotations
 
@@ -6,11 +6,10 @@ import asyncio
 import json
 import logging
 import uuid
-from dataclasses import dataclass
-from typing import AsyncIterator, Callable
+from dataclasses import dataclass, field
+from typing import Any, Callable
 
 import websockets
-from websockets.client import WebSocketClientProtocol
 
 from clawd_reachy_mini.config import Config
 
@@ -18,75 +17,99 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class Message:
-    """A message to/from OpenClaw."""
+class StreamEvent:
+    """A streaming event from the server."""
 
-    content: str
-    role: str = "user"  # "user" or "assistant"
-    channel: str = "reachy-mini"
-    session_id: str | None = None
+    type: str  # stream_start, stream_delta, stream_end, stream_abort, tool_start, ...
+    run_id: str = ""
+    text: str = ""
+    full_text: str = ""
+    reason: str = ""
+    tool_name: str = ""
+    task_label: str = ""
+    task_run_id: str = ""
+    summary: str = ""
+    state: str = ""
 
 
-class GatewayClient:
-    """Client for communicating with OpenClaw Gateway."""
+@dataclass
+class StreamCallbacks:
+    """Callbacks for streaming events."""
+
+    on_stream_start: Callable[[str], Any] | None = None  # run_id
+    on_stream_delta: Callable[[str, str], Any] | None = None  # text, run_id
+    on_stream_end: Callable[[str, str], Any] | None = None  # full_text, run_id
+    on_stream_abort: Callable[[str, str], Any] | None = None  # reason, run_id
+    on_tool_start: Callable[[str, str], Any] | None = None  # tool_name, run_id
+    on_tool_end: Callable[[str, str], Any] | None = None  # tool_name, run_id
+    on_task_spawned: Callable[[str, str], Any] | None = None  # label, task_run_id
+    on_task_completed: Callable[[str, str], Any] | None = None  # summary, task_run_id
+    on_state_change: Callable[[str], Any] | None = None  # state
+    on_error: Callable[[str], Any] | None = None  # message
+
+
+class DesktopRobotClient:
+    """Client for the desktop-robot WebSocket channel."""
 
     def __init__(self, config: Config):
         self.config = config
-        self._ws: WebSocketClientProtocol | None = None
+        self._ws = None  # websockets client connection
         self._session_id: str = str(uuid.uuid4())
         self._connected = False
-        self._authenticated = False
-        self._auth_event: asyncio.Event | None = None
-        self._register_event: asyncio.Event | None = None
-        self._response_handlers: dict[str, asyncio.Future] = {}
+        self._welcome_event: asyncio.Event = asyncio.Event()
         self._listener_task: asyncio.Task | None = None
+
+        # Per-run completion tracking
+        self._run_futures: dict[str, asyncio.Future[str]] = {}
+        self._run_buffers: dict[str, str] = {}
+
+        # Global stream callbacks (set by the interface)
+        self.callbacks = StreamCallbacks()
 
     @property
     def is_connected(self) -> bool:
         return self._connected and self._ws is not None
 
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
     async def connect(self) -> None:
-        """Connect to the OpenClaw Gateway."""
+        """Connect and perform the hello handshake."""
         if self.is_connected:
             return
 
-        headers = {}
-        if self.config.gateway_token:
-            headers["Authorization"] = f"Bearer {self.config.gateway_token}"
+        url = self.config.desktop_robot_url
+        token = self.config.gateway_token
+
+        # Append token as query param if set
+        if token:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}token={token}"
 
         try:
-            self._ws = await websockets.connect(
-                self.config.gateway_url,
-                additional_headers=headers,
-            )
+            self._ws = await websockets.connect(url)
             self._connected = True
-            self._auth_event = asyncio.Event()
-            self._register_event = asyncio.Event()
+            self._welcome_event.clear()
             self._listener_task = asyncio.create_task(self._listen())
 
-            # Wait for authentication challenge to be handled
-            try:
-                await asyncio.wait_for(self._auth_event.wait(), timeout=10.0)
-            except asyncio.TimeoutError:
-                # No challenge received, proceed without authentication
-                logger.debug("No authentication challenge received, proceeding")
-                self._authenticated = True
+            # Send hello
+            await self._send({"type": "hello", "sessionId": self._session_id})
 
-            # Wait for server to acknowledge the connect request
+            # Wait for welcome
             try:
-                await asyncio.wait_for(self._register_event.wait(), timeout=10.0)
-                logger.debug("Connection established successfully")
+                await asyncio.wait_for(self._welcome_event.wait(), timeout=10.0)
             except asyncio.TimeoutError:
-                logger.warning("No connect response received, connection may fail")
+                logger.warning("No welcome received, proceeding anyway")
 
-            logger.info(f"Connected to OpenClaw Gateway at {self.config.gateway_url}")
+            logger.info(f"Connected to desktop-robot at {self.config.desktop_robot_url}")
 
         except Exception as e:
-            logger.error(f"Failed to connect to Gateway: {e}")
+            logger.error(f"Failed to connect: {e}")
             raise
 
     async def disconnect(self) -> None:
-        """Disconnect from the Gateway."""
+        """Disconnect from the server."""
         if self._listener_task:
             self._listener_task.cancel()
             try:
@@ -99,356 +122,176 @@ class GatewayClient:
             self._ws = None
             self._connected = False
 
-        logger.info("Disconnected from OpenClaw Gateway")
+        logger.info("Disconnected from desktop-robot")
 
-    async def send_message(self, text: str, image_path: str | None = None) -> str:
-        """
-        Send a message to OpenClaw and wait for response.
+    async def send_message(self, text: str) -> str:
+        """Send a user message and wait for the complete response.
 
-        Args:
-            text: The user's message text
-            image_path: Optional path to an image to include
-
-        Returns:
-            The assistant's response text
+        Returns the full response text after stream_end.
         """
         if not self.is_connected:
-            raise RuntimeError("Not connected to Gateway")
+            raise RuntimeError("Not connected")
 
-        message_id = str(uuid.uuid4())
+        await self._send({"type": "message", "text": text})
 
-        # Use OpenClaw protocol format: req/res with chat.send method
-        request = {
-            "type": "req",
-            "id": message_id,
-            "method": "chat.send",
-            "params": {
-                "message": text,
-                "sessionKey": f"reachy-mini:{self._session_id}",
-                "idempotencyKey": message_id,
-            },
-        }
+        # We'll get a stream_start event with a run_id — but we don't know it yet.
+        # Use a single-slot future that the listener fills on stream_end.
+        future: asyncio.Future[str] = asyncio.Future()
+        self._run_futures["_next"] = future
 
-        if image_path:
-            # Include image as attachment
-            request["params"]["attachments"] = [{"type": "image", "path": image_path}]
-
-        # Create future for the initial response (runId)
-        init_future: asyncio.Future[dict] = asyncio.Future()
-        self._response_handlers[message_id] = init_future
-
-        await self._send_raw(request)
-
-        run_id = None
         try:
-            # Wait for initial response with runId
-            init_response = await asyncio.wait_for(init_future, timeout=30.0)
-            run_id = init_response.get("runId")
-
-            if not run_id:
-                # Direct response without async run
-                return init_response.get("text", init_response.get("content", str(init_response)))
-
-            logger.debug(f"Chat run started: {run_id}")
-
-            # Create handler dict to accumulate text and store future
-            result_future: asyncio.Future[str] = asyncio.Future()
-            self._response_handlers[run_id] = {
-                "future": result_future,
-                "text": "",
-            }
-
-            # Wait for the AI to complete
-            result = await asyncio.wait_for(result_future, timeout=120.0)
-            return result
-
+            return await asyncio.wait_for(future, timeout=120.0)
         except asyncio.TimeoutError:
-            logger.error("Timeout waiting for Gateway response")
+            logger.error("Timeout waiting for response")
             raise
         finally:
-            self._response_handlers.pop(message_id, None)
-            if run_id:
-                self._response_handlers.pop(run_id, None)
+            self._run_futures.pop("_next", None)
 
-    async def stream_message(
-        self,
-        text: str,
-        on_chunk: Callable[[str], None] | None = None,
-    ) -> AsyncIterator[str]:
-        """
-        Send a message and stream the response.
+    async def send_message_streaming(self, text: str) -> None:
+        """Send a user message; responses arrive via callbacks.
 
-        Args:
-            text: The user's message text
-            on_chunk: Optional callback for each chunk
-
-        Yields:
-            Response text chunks
+        Use self.callbacks to handle stream_start / stream_delta / stream_end.
+        Does NOT block for the full response.
         """
         if not self.is_connected:
-            raise RuntimeError("Not connected to Gateway")
+            raise RuntimeError("Not connected")
+        await self._send({"type": "message", "text": text})
 
-        message_id = str(uuid.uuid4())
+    async def send_interrupt(self) -> None:
+        """Send barge-in interrupt."""
+        if not self.is_connected:
+            return
+        await self._send({"type": "interrupt"})
+        logger.info("Sent interrupt (barge-in)")
 
-        payload = {
-            "type": "message.send",
-            "id": message_id,
-            "session_id": self._session_id,
-            "channel": "reachy-mini",
-            "content": text,
-            "stream": True,
-        }
+    async def send_state_change(self, state: str) -> None:
+        """Notify server of local state change."""
+        if not self.is_connected:
+            return
+        await self._send({"type": "state_change", "state": state})
 
-        # Queue for streaming chunks
-        chunk_queue: asyncio.Queue[str | None] = asyncio.Queue()
-        self._response_handlers[message_id] = chunk_queue  # type: ignore
+    async def send_ping(self) -> None:
+        if not self.is_connected:
+            return
+        import time
+        await self._send({"type": "ping", "ts": int(time.time() * 1000)})
 
-        await self._send_raw(payload)
+    # ── Internal ──────────────────────────────────────────────────────
 
-        try:
-            while True:
-                chunk = await asyncio.wait_for(chunk_queue.get(), timeout=120.0)
-                if chunk is None:  # End of stream
-                    break
-                if on_chunk:
-                    on_chunk(chunk)
-                yield chunk
-        finally:
-            self._response_handlers.pop(message_id, None)
-
-    async def _send_raw(self, data: dict) -> None:
-        """Send raw JSON to the Gateway."""
+    async def _send(self, data: dict) -> None:
         if not self._ws:
             raise RuntimeError("WebSocket not connected")
         await self._ws.send(json.dumps(data))
 
     async def _listen(self) -> None:
-        """Listen for incoming messages from the Gateway."""
         if not self._ws:
             return
-
         try:
-            async for raw_message in self._ws:
+            async for raw in self._ws:
                 try:
-                    data = json.loads(raw_message)
-                    await self._handle_message(data)
+                    msg = json.loads(raw)
+                    await self._handle(msg)
                 except json.JSONDecodeError:
-                    logger.warning(f"Invalid JSON from Gateway: {raw_message}")
+                    logger.warning(f"Invalid JSON: {raw}")
         except websockets.ConnectionClosed:
-            logger.info("Gateway connection closed")
+            logger.info("Connection closed")
             self._connected = False
         except Exception as e:
-            logger.error(f"Error in Gateway listener: {e}")
+            logger.error(f"Listener error: {e}")
             self._connected = False
 
-    async def _handle_message(self, data: dict) -> None:
-        """Handle an incoming message from the Gateway."""
-        msg_type = data.get("type", "")
-        msg_id = data.get("reply_to") or data.get("id")
+    async def _handle(self, msg: dict) -> None:
+        t = msg.get("type", "")
+        run_id = msg.get("runId", "")
 
-        if msg_type == "event":
-            # Handle event wrapper messages
-            event_name = data.get("event", "")
-            await self._handle_event(event_name, data)
-            return
+        if t == "welcome":
+            self._session_id = msg.get("sessionId", self._session_id)
+            self._welcome_event.set()
+            logger.debug(f"Welcome: session={self._session_id}")
 
-        if msg_type == "res":
-            # Handle response to our requests
-            ok = data.get("ok", False)
-            payload = data.get("payload", {})
-            error = data.get("error")
+        elif t == "stream_start":
+            # Associate this run_id with the pending _next future
+            if "_next" in self._run_futures:
+                f = self._run_futures.pop("_next")
+                self._run_futures[run_id] = f
+            self._run_buffers[run_id] = ""
+            if self.callbacks.on_stream_start:
+                await _maybe_await(self.callbacks.on_stream_start(run_id))
 
-            if ok:
-                payload_type = payload.get("type", "")
-                if payload_type == "hello-ok":
-                    # Connect handshake successful
-                    logger.info("Gateway handshake successful")
-                    if self._register_event:
-                        self._register_event.set()
-                elif msg_id and msg_id in self._response_handlers:
-                    handler = self._response_handlers[msg_id]
-                    if isinstance(handler, asyncio.Future):
-                        handler.set_result(payload)
-                    elif isinstance(handler, asyncio.Queue):
-                        await handler.put(payload)
-            else:
-                logger.error(f"Request failed: {error}")
-                if msg_id and msg_id in self._response_handlers:
-                    handler = self._response_handlers[msg_id]
-                    if isinstance(handler, asyncio.Future):
-                        handler.set_exception(RuntimeError(str(error)))
-            return
+        elif t == "stream_delta":
+            text = msg.get("text", "")
+            if run_id in self._run_buffers:
+                self._run_buffers[run_id] += text
+            if self.callbacks.on_stream_delta:
+                await _maybe_await(self.callbacks.on_stream_delta(text, run_id))
 
-        if msg_type == "message.response":
-            # Complete response
-            if msg_id and msg_id in self._response_handlers:
-                handler = self._response_handlers[msg_id]
-                if isinstance(handler, asyncio.Future):
-                    handler.set_result(data.get("content", ""))
-                elif isinstance(handler, asyncio.Queue):
-                    await handler.put(data.get("content", ""))
-                    await handler.put(None)  # Signal end
+        elif t == "stream_end":
+            full_text = msg.get("fullText", "")
+            if not full_text and run_id in self._run_buffers:
+                full_text = self._run_buffers[run_id]
+            if self.callbacks.on_stream_end:
+                await _maybe_await(self.callbacks.on_stream_end(full_text, run_id))
+            # Resolve the future
+            if run_id in self._run_futures:
+                fut = self._run_futures.pop(run_id)
+                if not fut.done():
+                    fut.set_result(full_text)
+            self._run_buffers.pop(run_id, None)
 
-        elif msg_type == "message.chunk":
-            # Streaming chunk
-            if msg_id and msg_id in self._response_handlers:
-                handler = self._response_handlers[msg_id]
-                if isinstance(handler, asyncio.Queue):
-                    await handler.put(data.get("content", ""))
+        elif t == "stream_abort":
+            reason = msg.get("reason", "unknown")
+            if self.callbacks.on_stream_abort:
+                await _maybe_await(self.callbacks.on_stream_abort(reason, run_id))
+            # Resolve the future — check both run_id and _next (abort may arrive
+            # before stream_start, so _next was never reassigned).
+            fut_key = run_id if run_id in self._run_futures else ("_next" if "_next" in self._run_futures else None)
+            if fut_key:
+                fut = self._run_futures.pop(fut_key)
+                if not fut.done():
+                    fut.set_result(self._run_buffers.get(run_id, ""))
+            self._run_buffers.pop(run_id, None)
 
-        elif msg_type == "message.end":
-            # End of stream
-            if msg_id and msg_id in self._response_handlers:
-                handler = self._response_handlers[msg_id]
-                if isinstance(handler, asyncio.Queue):
-                    await handler.put(None)
+        elif t == "state":
+            state = msg.get("state", "")
+            if self.callbacks.on_state_change:
+                await _maybe_await(self.callbacks.on_state_change(state))
 
-        elif msg_type == "tool.request":
-            # Gateway requesting tool execution (e.g., move robot)
-            await self._handle_tool_request(data)
+        elif t == "tool_start":
+            tool_name = msg.get("toolName", "")
+            if self.callbacks.on_tool_start:
+                await _maybe_await(self.callbacks.on_tool_start(tool_name, run_id))
 
-        elif msg_type == "error":
-            logger.error(f"Gateway error: {data.get('message', 'Unknown error')}")
-            if msg_id and msg_id in self._response_handlers:
-                handler = self._response_handlers[msg_id]
-                if isinstance(handler, asyncio.Future):
-                    handler.set_exception(RuntimeError(data.get("message", "Gateway error")))
+        elif t == "tool_end":
+            tool_name = msg.get("toolName", "")
+            if self.callbacks.on_tool_end:
+                await _maybe_await(self.callbacks.on_tool_end(tool_name, run_id))
 
-    async def _handle_event(self, event_name: str, data: dict) -> None:
-        """Handle event messages from the Gateway."""
-        payload = data.get("payload", {})
-        logger.debug(f"Received event: {event_name}, payload: {payload}")
+        elif t == "task_spawned":
+            label = msg.get("taskLabel", "")
+            task_run_id = msg.get("taskRunId", "")
+            if self.callbacks.on_task_spawned:
+                await _maybe_await(self.callbacks.on_task_spawned(label, task_run_id))
 
-        if event_name == "connect.challenge":
-            # Respond to authentication challenge with proper connect request
-            nonce = payload.get("nonce", "")
-            ts = payload.get("ts", "")
+        elif t == "task_completed":
+            summary = msg.get("summary", "")
+            task_run_id = msg.get("taskRunId", "")
+            if self.callbacks.on_task_completed:
+                await _maybe_await(self.callbacks.on_task_completed(summary, task_run_id))
 
-            logger.debug(f"Handling connect.challenge: nonce={nonce}, ts={ts}")
+        elif t == "error":
+            message = msg.get("message", "unknown error")
+            logger.error(f"Server error: {message}")
+            if self.callbacks.on_error:
+                await _maybe_await(self.callbacks.on_error(message))
 
-            if not self.config.gateway_token:
-                logger.warning(
-                    "No gateway token configured - connection may be rejected. "
-                    "Set --gateway-token or OPENCLAW_TOKEN environment variable."
-                )
-
-            # Send connect request per OpenClaw protocol
-            # client.id must be one of the allowed constants
-            connect_request = {
-                "type": "req",
-                "id": str(uuid.uuid4()),
-                "method": "connect",
-                "params": {
-                    "minProtocol": 3,
-                    "maxProtocol": 3,
-                    "client": {
-                        "id": "gateway-client",  # Must be an allowed client ID
-                        "version": "0.1.0",
-                        "platform": "python",
-                        "mode": "backend",
-                    },
-                    "role": "operator",
-                    "auth": {
-                        "token": self.config.gateway_token or "",
-                    },
-                },
-            }
-
-            await self._send_raw(connect_request)
-            logger.debug("Sent connect request")
-
-            self._authenticated = True
-
-            if self._auth_event:
-                self._auth_event.set()
-
-        elif event_name == "connect.accepted":
-            logger.info("Connection accepted by Gateway")
-            self._authenticated = True
-            if self._auth_event:
-                self._auth_event.set()
-            if self._register_event:
-                self._register_event.set()
-
-        elif event_name == "connect.rejected":
-            logger.error("Connection rejected by Gateway")
-            self._authenticated = False
-            if self._auth_event:
-                self._auth_event.set()
-
-        elif event_name == "agent":
-            # Agent events contain the AI response
-            run_id = payload.get("runId")
-            stream_type = payload.get("stream")
-            data = payload.get("data", {})
-
-            if stream_type == "lifecycle":
-                phase = data.get("phase")
-                if phase == "end":
-                    # Run completed - get final text from accumulated response
-                    logger.debug(f"Agent run {run_id} completed")
-                    # The final text should have been accumulated
-                    if run_id and run_id in self._response_handlers:
-                        handler = self._response_handlers.get(run_id)
-                        if isinstance(handler, dict):
-                            # We stored accumulated text in a dict
-                            final_text = handler.get("text", "")
-                            future = handler.get("future")
-                            if future and not future.done():
-                                future.set_result(final_text)
-                            self._response_handlers.pop(run_id, None)
-
-            elif stream_type == "assistant":
-                # Streaming text from assistant
-                text = data.get("text", "")  # Accumulated text
-                if run_id and run_id in self._response_handlers:
-                    handler = self._response_handlers[run_id]
-                    if isinstance(handler, dict):
-                        handler["text"] = text  # Update accumulated text
-
-        elif event_name == "chat":
-            # Chat state updates
-            run_id = payload.get("runId")
-            state = payload.get("state")
-            message = payload.get("message", {})
-
-            if state == "complete":
-                # Chat completed
-                content = message.get("content", [])
-                text = ""
-                for item in content:
-                    if item.get("type") == "text":
-                        text = item.get("text", "")
-                        break
-
-                logger.debug(f"Chat complete for {run_id}: {text[:100] if text else '(empty)'}...")
-
-                if run_id and run_id in self._response_handlers:
-                    handler = self._response_handlers.pop(run_id)
-                    if isinstance(handler, dict):
-                        future = handler.get("future")
-                        if future and not future.done():
-                            future.set_result(text)
-                    elif isinstance(handler, asyncio.Future) and not handler.done():
-                        handler.set_result(text)
+        elif t == "pong":
+            logger.debug(f"Pong: ts={msg.get('ts')}")
 
         else:
-            logger.debug(f"Unhandled event: {event_name}")
+            logger.debug(f"Unknown message type: {t}")
 
-    async def _handle_tool_request(self, data: dict) -> None:
-        """Handle tool execution requests from the Gateway."""
-        tool_name = data.get("tool")
-        tool_args = data.get("arguments", {})
-        request_id = data.get("id")
 
-        logger.info(f"Tool request: {tool_name}({tool_args})")
-
-        # Tool execution will be handled by the main interface
-        # This is a placeholder - actual implementation connects to ReachyInterface
-        result = {"status": "error", "message": "Tool handler not registered"}
-
-        await self._send_raw({
-            "type": "tool.response",
-            "id": request_id,
-            "result": result,
-        })
+async def _maybe_await(result: Any) -> None:
+    """Await if the result is a coroutine."""
+    if asyncio.iscoroutine(result):
+        await result

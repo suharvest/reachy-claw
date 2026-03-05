@@ -8,12 +8,11 @@ import logging
 import signal
 import sys
 
+from clawd_reachy_mini.app import ClawdApp
 from clawd_reachy_mini.config import Config, load_config
-from clawd_reachy_mini.interface import ReachyInterface
 
 
 def setup_logging(verbose: bool = False) -> None:
-    """Configure logging."""
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
@@ -23,34 +22,24 @@ def setup_logging(verbose: bool = False) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description="Reachy Mini interface for OpenClaw",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
     parser.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
+        "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
 
     # Connection options
     parser.add_argument(
-        "--gateway-host",
-        default="127.0.0.1",
-        help="OpenClaw Gateway host",
+        "--gateway-host", default="127.0.0.1", help="OpenClaw desktop-robot host"
     )
     parser.add_argument(
-        "--gateway-port",
-        type=int,
-        default=18789,
-        help="OpenClaw Gateway port",
+        "--gateway-port", type=int, default=18790, help="OpenClaw desktop-robot port"
     )
-    parser.add_argument(
-        "--gateway-token",
-        help="OpenClaw Gateway authentication token",
-    )
+    parser.add_argument("--gateway-path", default="/desktop-robot", help="WebSocket path")
+    parser.add_argument("--gateway-token", help="Authentication token")
 
     # Reachy options
     parser.add_argument(
@@ -74,48 +63,67 @@ def parse_args() -> argparse.Namespace:
         help="Whisper model size",
     )
 
-    # Audio options
+    # TTS options
     parser.add_argument(
-        "--audio-device",
-        help="Audio input device name (e.g., 'RØDE NT-USB Mini')",
+        "--tts",
+        choices=["elevenlabs", "macos-say", "piper", "none"],
+        default="elevenlabs",
+        help="Text-to-speech backend",
     )
+    parser.add_argument("--tts-voice", help="TTS voice ID (backend-specific)")
+    parser.add_argument("--tts-model", help="TTS model path (for Piper backend)")
+
+    # Audio options
+    parser.add_argument("--audio-device", help="Audio input device name")
 
     # Behavior options
+    parser.add_argument("--wake-word", help="Wake word to activate listening")
     parser.add_argument(
-        "--wake-word",
-        help="Wake word to activate listening (e.g., 'hey reachy')",
+        "--no-emotions", action="store_true", help="Disable emotion animations"
     )
     parser.add_argument(
-        "--no-emotions",
-        action="store_true",
-        help="Disable emotion animations",
+        "--no-idle", action="store_true", help="Disable idle animations"
     )
     parser.add_argument(
-        "--no-idle",
-        action="store_true",
-        help="Disable idle animations",
+        "--no-barge-in", action="store_true", help="Disable barge-in"
     )
     parser.add_argument(
         "--standalone",
         action="store_true",
-        help="Run in standalone mode without OpenClaw Gateway (for testing robot)",
+        help="Run in standalone mode without OpenClaw",
     )
     parser.add_argument(
-        "--demo",
+        "--demo", action="store_true", help="Run a quick demo of robot capabilities"
+    )
+
+    # Vision / face tracking options
+    parser.add_argument(
+        "--no-face-tracking",
         action="store_true",
-        help="Run a quick demo of robot capabilities",
+        help="Disable face tracking",
+    )
+    parser.add_argument(
+        "--tracker-type",
+        choices=["mediapipe", "none"],
+        default="mediapipe",
+        help="Face tracker backend",
+    )
+    parser.add_argument(
+        "--camera-index",
+        type=int,
+        default=0,
+        help="Camera device index for face tracking",
     )
 
     return parser.parse_args()
 
 
 def create_config(args: argparse.Namespace) -> Config:
-    """Create config from command line arguments."""
     config = load_config()
 
-    # Override with CLI arguments
     config.gateway_host = args.gateway_host
     config.gateway_port = args.gateway_port
+    config.gateway_path = args.gateway_path
     if args.gateway_token:
         config.gateway_token = args.gateway_token
 
@@ -123,10 +131,20 @@ def create_config(args: argparse.Namespace) -> Config:
     config.audio_device = args.audio_device
     config.stt_backend = args.stt
     config.whisper_model = args.whisper_model
+    config.tts_backend = args.tts
+    config.tts_voice = args.tts_voice
+    config.tts_model = args.tts_model
     config.wake_word = args.wake_word
     config.play_emotions = not args.no_emotions
     config.idle_animations = not args.no_idle
+    config.barge_in_enabled = not args.no_barge_in
     config.standalone_mode = args.standalone
+
+    # Vision / face tracking
+    if args.no_face_tracking:
+        config.enable_face_tracker = False
+    config.vision_tracker_type = args.tracker_type
+    config.vision_camera_index = args.camera_index
 
     return config
 
@@ -148,42 +166,45 @@ async def run_demo() -> int:
         reachy.__enter__()
         logging.info("Connected to Reachy Mini!")
 
-        # Wake up the robot
         logging.info("Waking up robot...")
         reachy.wake_up()
         await asyncio.sleep(1.0)
 
-        # Move head - nod yes
+        # Nod yes
         logging.info("Moving head - nodding yes...")
         for _ in range(2):
-            head_pose = create_head_pose(roll=0, pitch=10, degrees=True)
-            reachy.goto_target(head=head_pose, duration=0.3)
+            reachy.goto_target(
+                head=create_head_pose(roll=0, pitch=10, degrees=True), duration=0.3
+            )
             await asyncio.sleep(0.4)
-            head_pose = create_head_pose(roll=0, pitch=-10, degrees=True)
-            reachy.goto_target(head=head_pose, duration=0.3)
+            reachy.goto_target(
+                head=create_head_pose(roll=0, pitch=-10, degrees=True), duration=0.3
+            )
             await asyncio.sleep(0.4)
 
-        # Return to center
-        head_pose = create_head_pose(roll=0, pitch=0, degrees=True)
-        reachy.goto_target(head=head_pose, duration=0.5)
+        reachy.goto_target(
+            head=create_head_pose(roll=0, pitch=0, degrees=True), duration=0.5
+        )
         await asyncio.sleep(0.6)
 
-        # Move head - shake no
+        # Shake no
         logging.info("Moving head - shaking no...")
         for _ in range(2):
-            head_pose = create_head_pose(roll=10, pitch=0, degrees=True)
-            reachy.goto_target(head=head_pose, duration=0.3)
+            reachy.goto_target(
+                head=create_head_pose(roll=10, pitch=0, degrees=True), duration=0.3
+            )
             await asyncio.sleep(0.4)
-            head_pose = create_head_pose(roll=-10, pitch=0, degrees=True)
-            reachy.goto_target(head=head_pose, duration=0.3)
+            reachy.goto_target(
+                head=create_head_pose(roll=-10, pitch=0, degrees=True), duration=0.3
+            )
             await asyncio.sleep(0.4)
 
-        # Return to center
-        head_pose = create_head_pose(roll=0, pitch=0, degrees=True)
-        reachy.goto_target(head=head_pose, duration=0.5)
+        reachy.goto_target(
+            head=create_head_pose(roll=0, pitch=0, degrees=True), duration=0.5
+        )
         await asyncio.sleep(0.6)
 
-        # Move antennas (takes a list: [left, right])
+        # Antennas
         logging.info("Moving antennas...")
         reachy.set_target_antenna_joint_positions([30.0, -30.0])
         await asyncio.sleep(0.5)
@@ -197,6 +218,7 @@ async def run_demo() -> int:
     except Exception as e:
         logging.error(f"Demo failed: {e}")
         import traceback
+
         traceback.print_exc()
         return 1
     finally:
@@ -207,8 +229,25 @@ async def run_demo() -> int:
 
 
 async def async_main(config: Config) -> int:
-    """Async main function."""
-    interface = ReachyInterface(config)
+    app = ClawdApp(config)
+
+    # Connect robot
+    app.connect_robot()
+
+    # Register plugins in order: motion -> face tracker -> conversation
+    from clawd_reachy_mini.plugins.motion_plugin import MotionPlugin
+
+    if config.enable_motion:
+        app.register(MotionPlugin(app))
+
+    if config.enable_face_tracker:
+        from clawd_reachy_mini.plugins.face_tracker_plugin import FaceTrackerPlugin
+
+        app.register(FaceTrackerPlugin(app))
+
+    from clawd_reachy_mini.plugins.conversation_plugin import ConversationPlugin
+
+    app.register(ConversationPlugin(app))
 
     # Handle shutdown signals
     loop = asyncio.get_running_loop()
@@ -222,8 +261,7 @@ async def async_main(config: Config) -> int:
         loop.add_signal_handler(sig, signal_handler)
 
     try:
-        # Run interface until shutdown
-        run_task = asyncio.create_task(interface.run())
+        run_task = asyncio.create_task(app.run())
         shutdown_task = asyncio.create_task(shutdown_event.wait())
 
         done, pending = await asyncio.wait(
@@ -242,17 +280,15 @@ async def async_main(config: Config) -> int:
         logging.error(f"Fatal error: {e}")
         return 1
     finally:
-        await interface.stop()
+        await app.shutdown()
 
     return 0
 
 
 def main() -> None:
-    """Main entry point."""
     args = parse_args()
     setup_logging(args.verbose)
 
-    # Handle demo mode
     if args.demo:
         logging.info("Running Reachy Mini demo")
         exit_code = asyncio.run(run_demo())
@@ -264,11 +300,16 @@ def main() -> None:
         logging.info("Starting Reachy Mini in standalone mode (no gateway)")
     else:
         logging.info("Starting Reachy Mini OpenClaw interface")
-        logging.info(f"Gateway: {config.gateway_url}")
+        logging.info(f"Server: {config.desktop_robot_url}")
 
     logging.info(f"STT: {config.stt_backend} ({config.whisper_model})")
+    logging.info(f"TTS: {config.tts_backend}")
     if config.wake_word:
         logging.info(f"Wake word: {config.wake_word}")
+    if config.barge_in_enabled:
+        logging.info("Barge-in: enabled")
+    if config.enable_face_tracker:
+        logging.info(f"Face tracking: {config.vision_tracker_type}")
 
     exit_code = asyncio.run(async_main(config))
     sys.exit(exit_code)

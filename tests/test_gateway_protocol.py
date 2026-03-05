@@ -1,102 +1,104 @@
-"""Protocol-focused tests for GatewayClient."""
+"""Protocol-focused tests for DesktopRobotClient."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
 from clawd_reachy_mini.config import Config
-from clawd_reachy_mini.gateway import GatewayClient
+from clawd_reachy_mini.gateway import DesktopRobotClient
 
 
 @pytest.mark.asyncio
-async def test_handle_connect_challenge_sends_connect_request():
-    client = GatewayClient(Config(gateway_token="secret-token"))
-    client._auth_event = asyncio.Event()
-    sent: list[dict] = []
+async def test_handle_welcome_sets_session_id():
+    client = DesktopRobotClient(Config())
 
-    async def fake_send_raw(data: dict) -> None:
-        sent.append(data)
+    await client._handle({"type": "welcome", "sessionId": "abc-123"})
 
-    client._send_raw = fake_send_raw  # type: ignore[method-assign]
-
-    await client._handle_event("connect.challenge", {"payload": {"nonce": "n", "ts": "t"}})
-
-    assert client._authenticated is True
-    assert client._auth_event.is_set()
-    assert sent
-    assert sent[0]["type"] == "req"
-    assert sent[0]["method"] == "connect"
-    assert sent[0]["params"]["auth"]["token"] == "secret-token"
+    assert client._session_id == "abc-123"
+    assert client._welcome_event.is_set()
 
 
 @pytest.mark.asyncio
-async def test_handle_res_hello_ok_sets_register_event():
-    client = GatewayClient(Config())
-    client._register_event = asyncio.Event()
+async def test_stream_lifecycle_resolves_future():
+    """stream_start → stream_delta → stream_end resolves the _next future."""
+    client = DesktopRobotClient(Config())
 
-    await client._handle_message(
-        {
-            "type": "res",
-            "ok": True,
-            "payload": {"type": "hello-ok"},
-        }
+    future: asyncio.Future[str] = asyncio.Future()
+    client._run_futures["_next"] = future
+
+    await client._handle({"type": "stream_start", "runId": "run-1"})
+    await client._handle({"type": "stream_delta", "text": "Hello ", "runId": "run-1"})
+    await client._handle({"type": "stream_delta", "text": "world", "runId": "run-1"})
+    await client._handle({"type": "stream_end", "runId": "run-1", "fullText": "Hello world"})
+
+    assert future.done()
+    assert future.result() == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_stream_abort_resolves_with_partial_text():
+    client = DesktopRobotClient(Config())
+
+    future: asyncio.Future[str] = asyncio.Future()
+    client._run_futures["_next"] = future
+
+    await client._handle({"type": "stream_start", "runId": "run-2"})
+    await client._handle({"type": "stream_delta", "text": "Partial", "runId": "run-2"})
+    await client._handle({"type": "stream_abort", "runId": "run-2", "reason": "interrupt"})
+
+    assert future.done()
+    assert future.result() == "Partial"
+
+
+@pytest.mark.asyncio
+async def test_callbacks_fire_on_stream_events():
+    client = DesktopRobotClient(Config())
+    events: list[tuple[str, ...]] = []
+
+    client.callbacks.on_stream_start = lambda rid: events.append(("start", rid))
+    client.callbacks.on_stream_delta = lambda t, rid: events.append(("delta", t, rid))
+    client.callbacks.on_stream_end = lambda t, rid: events.append(("end", t, rid))
+
+    await client._handle({"type": "stream_start", "runId": "r1"})
+    await client._handle({"type": "stream_delta", "text": "hi", "runId": "r1"})
+    await client._handle({"type": "stream_end", "runId": "r1", "fullText": "hi"})
+
+    assert ("start", "r1") in events
+    assert ("delta", "hi", "r1") in events
+    assert ("end", "hi", "r1") in events
+
+
+@pytest.mark.asyncio
+async def test_task_spawned_and_completed_callbacks():
+    client = DesktopRobotClient(Config())
+    events: list[tuple] = []
+
+    client.callbacks.on_task_spawned = lambda l, r: events.append(("spawned", l, r))
+    client.callbacks.on_task_completed = lambda s, r: events.append(("completed", s, r))
+
+    await client._handle(
+        {"type": "task_spawned", "taskLabel": "search", "taskRunId": "t1"}
+    )
+    await client._handle(
+        {"type": "task_completed", "taskRunId": "t1", "summary": "Found 3 results"}
     )
 
-    assert client._register_event.is_set()
-
-
-@pytest.mark.asyncio
-async def test_send_message_uses_chat_send_protocol_and_returns_text():
-    client = GatewayClient(Config())
-    client._connected = True
-    client._ws = object()  # type: ignore[assignment]
-    sent: list[dict] = []
-
-    async def fake_send_raw(data: dict) -> None:
-        sent.append(data)
-        if data.get("method") == "chat.send":
-            message_id = data["id"]
-            future = client._response_handlers[message_id]
-            future.set_result({"text": "pong"})
-
-    client._send_raw = fake_send_raw  # type: ignore[method-assign]
-
-    response = await client.send_message("ping")
-
-    assert response == "pong"
-    assert sent
-    assert sent[0]["type"] == "req"
-    assert sent[0]["method"] == "chat.send"
-    params = sent[0]["params"]
-    assert params["message"] == "ping"
-    assert params["sessionKey"].startswith("reachy-mini:")
-    assert params["idempotencyKey"] == sent[0]["id"]
-
-
-@pytest.mark.asyncio
-async def test_tool_request_placeholder_returns_error_response():
-    client = GatewayClient(Config())
-    sent: list[dict] = []
-
-    async def fake_send_raw(data: dict) -> None:
-        sent.append(data)
-
-    client._send_raw = fake_send_raw  # type: ignore[method-assign]
-
-    await client._handle_tool_request(
-        {
-            "id": "tool-1",
-            "tool": "reachy_move_head",
-            "arguments": {"pitch": 10},
-        }
-    )
-
-    assert sent == [
-        {
-            "type": "tool.response",
-            "id": "tool-1",
-            "result": {"status": "error", "message": "Tool handler not registered"},
-        }
+    assert events == [
+        ("spawned", "search", "t1"),
+        ("completed", "Found 3 results", "t1"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_error_callback():
+    client = DesktopRobotClient(Config())
+    errors: list[str] = []
+
+    client.callbacks.on_error = lambda msg: errors.append(msg)
+
+    await client._handle({"type": "error", "message": "bad request"})
+
+    assert errors == ["bad request"]
