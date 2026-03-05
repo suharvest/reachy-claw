@@ -43,6 +43,9 @@ mediapipe-vision = [
 [project.scripts]
 clawd-reachy = "clawd_reachy_mini.main:main"
 
+[project.entry-points."reachy_mini_apps"]
+clawd_reachy_mini = "clawd_reachy_mini.reachy_app:ClawdReachyMiniApp"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

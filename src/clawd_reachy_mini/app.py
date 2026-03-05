@@ -21,7 +21,8 @@ class ClawdApp:
 
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.reachy = None  # ReachyMini instance, set by connect_robot()
+        self.reachy = None  # ReachyMini instance, set by connect_robot() or externally
+        self._owns_reachy = False  # True if we created the connection ourselves
         self.head_targets = HeadTargetBus()
         self.emotions = EmotionMapper(
             intensity=config.motion_emotion_intensity,
@@ -46,6 +47,7 @@ class ClawdApp:
 
             self.reachy = ReachyMini(**kwargs)
             self.reachy.__enter__()
+            self._owns_reachy = True
             logger.info("Connected to Reachy Mini")
 
         except ImportError:
@@ -115,10 +117,12 @@ class ClawdApp:
                 self.reachy.set_target_antenna_joint_positions([0.0, 0.0])
             except Exception:
                 pass
-            try:
-                self.reachy.__exit__(None, None, None)
-            except Exception:
-                pass
+            # Only close the connection if we created it ourselves
+            if self._owns_reachy:
+                try:
+                    self.reachy.__exit__(None, None, None)
+                except Exception:
+                    pass
             self.reachy = None
 
         self._plugins.clear()
