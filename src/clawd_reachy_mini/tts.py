@@ -7,7 +7,8 @@ import os
 import subprocess
 import tempfile
 from abc import ABC, abstractmethod
-from pathlib import Path
+
+from clawd_reachy_mini.backend_registry import register_tts
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ class TTSBackend(ABC):
         """Release any resources held by the backend."""
 
 
+@register_tts("elevenlabs")
 class ElevenLabsTTS(TTSBackend):
     """ElevenLabs cloud TTS."""
 
@@ -57,6 +59,8 @@ class ElevenLabsTTS(TTSBackend):
         )
 
 
+@register_tts("say")
+@register_tts("macos-say")
 class MacOSSayTTS(TTSBackend):
     """macOS built-in `say` command (offline, zero-config)."""
 
@@ -81,6 +85,7 @@ class MacOSSayTTS(TTSBackend):
         return tmp.name
 
 
+@register_tts("piper")
 class PiperTTS(TTSBackend):
     """Piper TTS — fast local neural TTS via the piper CLI.
 
@@ -109,6 +114,7 @@ class PiperTTS(TTSBackend):
         return tmp.name
 
 
+@register_tts("none")
 class NoopTTS(TTSBackend):
     """Dummy backend that prints text instead of speaking."""
 
@@ -136,34 +142,89 @@ class NoopTTS(TTSBackend):
         return tmp.name
 
 
+@register_tts("kokoro")
+class KokoroTTS(TTSBackend):
+    """Remote Kokoro TTS via Jetson speech service (sherpa-onnx, CUDA)."""
+
+    class Settings:
+        speaker_id: int = 50
+        speed: float = 1.0
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8000",
+        speaker_id: int = 50,
+        speed: float = 1.0,
+    ):
+        self._base_url = base_url.rstrip("/")
+        self._speaker_id = speaker_id
+        self._speed = speed
+
+    async def synthesize(self, text: str) -> str:
+        import json
+        import urllib.request
+
+        payload = json.dumps({
+            "text": text,
+            "sid": self._speaker_id,
+            "speed": self._speed,
+        }).encode()
+
+        req = urllib.request.Request(
+            f"{self._base_url}/tts",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=30)
+        wav_bytes = resp.read()
+
+        tmp = tempfile.NamedTemporaryFile(
+            prefix="clawd_reachy_kokoro_", suffix=".wav", delete=False
+        )
+        tmp.write(wav_bytes)
+        tmp.close()
+        return tmp.name
+
+
 def create_tts_backend(
     backend: str = "elevenlabs",
     voice: str | None = None,
     model: str | None = None,
+    config=None,
 ) -> TTSBackend:
-    """Create a TTS backend from a name string.
+    """Create a TTS backend by name using the registry."""
+    from clawd_reachy_mini.backend_registry import get_tts_info, get_tts_names
 
-    Args:
-        backend: One of "elevenlabs", "macos-say", "piper", "none".
-        voice: Backend-specific voice identifier.
-        model: Backend-specific model path or ID.
-    """
     name = backend.lower().strip()
 
-    if name == "elevenlabs":
-        logger.info("Using ElevenLabs cloud TTS")
-        return ElevenLabsTTS(voice_id=voice)
-    elif name in ("macos-say", "say"):
-        logger.info(f"Using macOS say TTS (voice={voice or 'default'})")
-        return MacOSSayTTS(voice=voice)
-    elif name == "piper":
-        logger.info(f"Using Piper TTS (model={model or 'env'})")
-        return PiperTTS(model=model)
-    elif name == "none":
-        logger.info("TTS disabled")
-        return NoopTTS()
-    else:
-        raise ValueError(
-            f"Unknown TTS backend: {backend!r}. "
-            "Choose from: elevenlabs, macos-say, piper, none"
-        )
+    info = get_tts_info(name)
+    if info is None:
+        available = ", ".join(get_tts_names())
+        raise ValueError(f"Unknown TTS backend: {backend!r}. Choose from: {available}")
+
+    # Build kwargs from config's backend-specific settings
+    kwargs = {}
+    if config:
+        for field_name in info.settings_fields:
+            config_key = f"{info.name}_{field_name}"
+            if hasattr(config, config_key):
+                kwargs[field_name] = getattr(config, config_key)
+        if hasattr(config, "speech_service_url"):
+            kwargs.setdefault("base_url", config.speech_service_url)
+
+    # Pass through generic voice/model
+    if voice is not None:
+        kwargs.setdefault("voice", voice)
+        kwargs.setdefault("voice_id", voice)
+    if model is not None:
+        kwargs.setdefault("model", model)
+
+    # Filter to only params the constructor accepts
+    import inspect
+    sig = inspect.signature(info.cls.__init__)
+    valid_params = set(sig.parameters.keys()) - {"self"}
+    filtered = {k: v for k, v in kwargs.items() if k in valid_params}
+
+    logger.info(f"Using TTS backend: {name}")
+    return info.cls(**filtered)

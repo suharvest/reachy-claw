@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
+from clawd_reachy_mini.backend_registry import register_stt
 from clawd_reachy_mini.config import Config
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class STTBackend(ABC):
         pass
 
 
+@register_stt("whisper")
 class WhisperSTT(STTBackend):
     """Local Whisper model for speech-to-text."""
 
@@ -67,6 +69,7 @@ class WhisperSTT(STTBackend):
         return result["text"].strip()
 
 
+@register_stt("faster-whisper")
 class FasterWhisperSTT(STTBackend):
     """Faster-Whisper for optimized local transcription."""
 
@@ -102,6 +105,7 @@ class FasterWhisperSTT(STTBackend):
         return " ".join(segment.text for segment in segments).strip()
 
 
+@register_stt("openai")
 class OpenAISTT(STTBackend):
     """OpenAI Whisper API for cloud transcription."""
 
@@ -138,31 +142,119 @@ class OpenAISTT(STTBackend):
 
     def transcribe_file(self, path: Path) -> str:
         client = self._get_client()
-        logger.info("☁️ Sending audio to OpenAI Cloud Whisper...")
+        logger.info("Sending audio to OpenAI Cloud Whisper...")
         with open(path, "rb") as f:
             response = client.audio.transcriptions.create(
                 model="whisper-1",
                 file=f,
                 language="en",  # Force English transcription
             )
-        logger.info("☁️ OpenAI transcription complete")
+        logger.info("OpenAI transcription complete")
         return response.text.strip()
 
 
+@register_stt("sensevoice")
+class SenseVoiceSTT(STTBackend):
+    """Remote SenseVoice ASR via Jetson Docker service."""
+
+    class Settings:
+        language: str = "auto"
+
+    def __init__(self, base_url: str = "http://localhost:8000", language: str = "auto"):
+        self._base_url = base_url.rstrip("/")
+        self._language = language
+
+    def preload(self) -> None:
+        import urllib.request
+
+        try:
+            resp = urllib.request.urlopen(f"{self._base_url}/health", timeout=5)
+            data = resp.read().decode()
+            logger.info(f"SenseVoice service health: {data}")
+        except Exception as e:
+            logger.warning(f"SenseVoice service not reachable: {e}")
+
+    def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
+        import io
+        import wave
+
+        # Encode audio as WAV bytes
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            if audio.dtype != np.int16:
+                if audio.max() <= 1.0:
+                    audio_int = (audio * 32767).astype(np.int16)
+                else:
+                    audio_int = audio.astype(np.int16)
+            else:
+                audio_int = audio
+            wf.writeframes(audio_int.tobytes())
+        buf.seek(0)
+        return self._post_asr(buf.read(), "audio.wav")
+
+    def transcribe_file(self, path: Path) -> str:
+        with open(path, "rb") as f:
+            return self._post_asr(f.read(), path.name)
+
+    def _post_asr(self, wav_bytes: bytes, filename: str) -> str:
+        import json
+        import urllib.request
+
+        boundary = "----SenseVoiceBoundary"
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+            f"Content-Type: audio/wav\r\n\r\n"
+        ).encode() + wav_bytes + f"\r\n--{boundary}--\r\n".encode()
+
+        url = f"{self._base_url}/asr?language={self._language}"
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=30)
+        result = json.loads(resp.read().decode())
+        return result.get("text", "").strip()
+
+
 def create_stt_backend(config: Config) -> STTBackend:
-    """Create STT backend based on configuration."""
+    """Create STT backend by name using the registry."""
+    from clawd_reachy_mini.backend_registry import get_stt_info, get_stt_names
+
     backend = config.stt_backend.lower()
 
-    if backend == "whisper":
-        logger.info(f"Using local Whisper STT (model: {config.whisper_model})")
-        return WhisperSTT(model_name=config.whisper_model)
-    elif backend == "faster-whisper":
-        logger.info(f"Using local Faster-Whisper STT (model: {config.whisper_model})")
-        return FasterWhisperSTT(model_name=config.whisper_model)
+    info = get_stt_info(backend)
+    if info is None:
+        available = ", ".join(get_stt_names())
+        raise ValueError(f"Unknown STT backend: {backend!r}. Choose from: {available}")
+
+    # Build kwargs from config
+    kwargs = {}
+    for field_name in info.settings_fields:
+        config_key = f"{info.name}_{field_name}"
+        if hasattr(config, config_key):
+            kwargs[field_name] = getattr(config, config_key)
+    if hasattr(config, "speech_service_url"):
+        kwargs.setdefault("base_url", config.speech_service_url)
+
+    # Special cases for built-in backends
+    if backend in ("whisper", "faster-whisper"):
+        kwargs.setdefault("model_name", config.whisper_model)
     elif backend == "openai":
         if not config.openai_api_key:
             raise ValueError("OpenAI API key required for OpenAI STT backend")
-        logger.info("☁️ Using OpenAI Cloud Whisper STT")
-        return OpenAISTT(api_key=config.openai_api_key)
-    else:
-        raise ValueError(f"Unknown STT backend: {backend}")
+        kwargs["api_key"] = config.openai_api_key
+
+    # Filter to valid constructor params
+    import inspect
+    sig = inspect.signature(info.cls.__init__)
+    valid_params = set(sig.parameters.keys()) - {"self"}
+    filtered = {k: v for k, v in kwargs.items() if k in valid_params}
+
+    logger.info(f"Using STT backend: {backend}")
+    return info.cls(**filtered)

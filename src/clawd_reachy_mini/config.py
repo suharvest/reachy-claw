@@ -39,16 +39,19 @@ class Config:
     openai_api_key: str | None = None
 
     # Text-to-speech
-    tts_backend: str = "elevenlabs"  # "elevenlabs", "macos-say", "piper", "melo", "openvoice", "none"
+    tts_backend: str = "elevenlabs"  # "elevenlabs", "macos-say", "piper", "kokoro", "none"
     tts_voice: str | None = None
     tts_model: str | None = None
 
     # Remote ASR/TTS service (Jetson Docker)
     speech_service_url: str = "http://localhost:8000"
+
+    # Backend-specific settings (auto-populated from registry)
+    # These fields are also generated dynamically, but we keep commonly
+    # used ones here for IDE autocompletion and backward compatibility.
     sensevoice_language: str = "auto"
-    melo_speaker_id: int = 0
-    melo_speed: float = 1.0
-    melo_language: str = "EN"
+    kokoro_speaker_id: int = 50  # zm_yunxi (中文男声)
+    kokoro_speed: float = 1.0
 
     # Audio settings
     audio_device: str | None = None
@@ -134,9 +137,6 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("tts", "voice"): "tts_voice",
     ("tts", "model"): "tts_model",
     ("tts", "speech_service_url"): "speech_service_url",
-    ("tts", "melo_speaker_id"): "melo_speaker_id",
-    ("tts", "melo_speed"): "melo_speed",
-    ("tts", "melo_language"): "melo_language",
     ("audio", "device"): "audio_device",
     ("audio", "sample_rate"): "sample_rate",
     ("audio", "silence_threshold"): "silence_threshold",
@@ -175,7 +175,6 @@ _ENV_FIELD_MAP: dict[str, str] = {
     "WAKE_WORD": "wake_word",
     "SPEECH_SERVICE_URL": "speech_service_url",
     "SENSEVOICE_LANGUAGE": "sensevoice_language",
-    "MELO_LANGUAGE": "melo_language",
 }
 
 
@@ -205,13 +204,17 @@ def _load_yaml_file(path: Path) -> dict[str, Any]:
 
 def _apply_yaml(config: Config, data: dict[str, Any]) -> None:
     """Apply YAML data onto a Config instance."""
-    for (section, key), field_name in _YAML_FIELD_MAP.items():
+    from clawd_reachy_mini.backend_registry import get_yaml_mappings
+
+    all_mappings = {**_YAML_FIELD_MAP, **get_yaml_mappings()}
+
+    for (section, key), field_name in all_mappings.items():
         section_data = data.get(section)
         if not isinstance(section_data, dict):
             continue
         if key in section_data:
             value = section_data[key]
-            current = getattr(config, field_name)
+            current = getattr(config, field_name, None)
             if current is not None and not isinstance(current, type(None)):
                 try:
                     value = type(current)(value)
@@ -222,11 +225,15 @@ def _apply_yaml(config: Config, data: dict[str, Any]) -> None:
 
 def _apply_env(config: Config) -> None:
     """Apply environment variables onto a Config instance."""
-    for env_var, field_name in _ENV_FIELD_MAP.items():
+    from clawd_reachy_mini.backend_registry import get_env_mappings
+
+    all_mappings = {**_ENV_FIELD_MAP, **get_env_mappings()}
+
+    for env_var, field_name in all_mappings.items():
         value = os.environ.get(env_var)
         if value is None:
             continue
-        current = getattr(config, field_name)
+        current = getattr(config, field_name, None)
         if isinstance(current, int):
             value = int(value)
         elif isinstance(current, float):

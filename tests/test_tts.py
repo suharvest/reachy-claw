@@ -24,10 +24,13 @@ from clawd_reachy_mini.tts import (
 
 class TestCreateTTSBackend:
     def test_creates_elevenlabs(self):
-        with patch("clawd_reachy_mini.tts.ElevenLabsTTS") as mock_cls:
-            mock_cls.return_value = MagicMock()
+        with patch("clawd_reachy_mini.elevenlabs.load_elevenlabs_config") as mock_cfg:
+            mock_cfg.return_value = MagicMock()
             backend = create_tts_backend(backend="elevenlabs", voice="test-voice")
-            mock_cls.assert_called_once_with(voice_id="test-voice")
+            assert isinstance(backend, ElevenLabsTTS)
+            mock_cfg.assert_called_once_with(
+                api_key=None, voice_id="test-voice", model_id=None, output_format=None
+            )
 
     def test_creates_macos_say(self):
         backend = create_tts_backend(backend="macos-say", voice="Samantha")

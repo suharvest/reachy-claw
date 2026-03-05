@@ -56,9 +56,11 @@ def parse_args() -> argparse.Namespace:
     )
 
     # STT options
+    from clawd_reachy_mini.backend_registry import get_stt_names, get_tts_names
+
     parser.add_argument(
         "--stt",
-        choices=["whisper", "faster-whisper", "openai", "sensevoice"],
+        choices=get_stt_names(),
         default="whisper",
         help="Speech-to-text backend",
     )
@@ -72,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     # TTS options
     parser.add_argument(
         "--tts",
-        choices=["elevenlabs", "macos-say", "piper", "melo", "openvoice", "none"],
+        choices=get_tts_names(),
         default="elevenlabs",
         help="Text-to-speech backend",
     )
@@ -83,18 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--speech-url",
         default=None,
-        help="URL of remote speech service (for sensevoice/melo/openvoice backends)",
-    )
-    parser.add_argument(
-        "--melo-speed",
-        type=float,
-        default=1.0,
-        help="MeloTTS speech speed",
-    )
-    parser.add_argument(
-        "--melo-language",
-        default="EN",
-        help="MeloTTS language (EN, ZH, etc.)",
+        help="URL of remote speech service (for sensevoice/kokoro backends)",
     )
 
     # Audio options
@@ -167,8 +158,6 @@ def create_config(args: argparse.Namespace) -> Config:
     # Remote speech service
     if args.speech_url:
         config.speech_service_url = args.speech_url
-    config.melo_speed = args.melo_speed
-    config.melo_language = args.melo_language
 
     # Vision / face tracking
     if args.no_face_tracking:

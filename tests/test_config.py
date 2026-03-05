@@ -65,8 +65,8 @@ stt:
   backend: sensevoice
   whisper_model: large
 tts:
-  backend: melo
-  melo_speed: 1.5
+  backend: kokoro
+  kokoro_speed: 1.5
 behavior:
   wake_word: hey robot
   play_emotions: false
@@ -84,8 +84,8 @@ plugins:
     assert config.gateway_port == 9999
     assert config.stt_backend == "sensevoice"
     assert config.whisper_model == "large"
-    assert config.tts_backend == "melo"
-    assert config.melo_speed == 1.5
+    assert config.tts_backend == "kokoro"
+    assert config.kokoro_speed == 1.5
     assert config.wake_word == "hey robot"
     assert config.play_emotions is False
     assert config.vision_tracker_type == "none"
