@@ -100,42 +100,48 @@ async def tts_stream_options():
 
 @app.post("/tts/stream")
 async def tts_stream(req: TTSRequest):
-    """Stream TTS as raw PCM: first 4 bytes = sample_rate (uint32 LE), then int16 PCM chunks."""
+    """Stream TTS as raw PCM: first 4 bytes = sample_rate (uint32 LE), then int16 PCM chunks.
+
+    Uses sherpa-onnx's sentence-level callback for true streaming — each
+    sentence's audio is yielded as soon as it's synthesized, before the
+    full text finishes generating.
+    """
+    import asyncio
+    import struct
+    import queue
     import tts_service
 
-    def generate():
-        import struct
+    audio_queue: queue.Queue[bytes | None] = queue.Queue()
+    sr = tts_service.get_sample_rate()
 
+    def _generate_blocking():
         tts = tts_service.get_tts()
         sid = req.sid if req.sid is not None else tts_service.DEFAULT_SPEAKER_ID
-        sample_rate_sent = False
 
         def callback(samples, progress):
-            """Called by sherpa-onnx as audio is generated."""
-            nonlocal sample_rate_sent
-            # Return 1 to continue, 0 to stop
+            # Convert float32 samples to int16 PCM bytes
+            pcm = struct.pack(f"<{len(samples)}h", *(
+                int(max(-1.0, min(1.0, s)) * 32767) for s in samples
+            ))
+            audio_queue.put(pcm)
             return 1
 
-        audio = tts.generate(
-            req.text, sid=sid, speed=req.speed, callback=callback,
-        )
+        tts.generate(req.text, sid=sid, speed=req.speed, callback=callback)
+        audio_queue.put(None)  # sentinel
 
-        # sherpa-onnx callback doesn't yield partial chunks in all builds,
-        # so we chunk the final output into ~256ms pieces for streaming effect
-        # that still reduces time-to-first-byte vs batch WAV encoding
-        sr = audio.sample_rate
+    async def stream():
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, _generate_blocking)
+
         yield struct.pack("<I", sr)
 
-        chunk_size = 4096  # ~256ms at 16kHz
-        samples = audio.samples
-        for i in range(0, len(samples), chunk_size):
-            chunk = samples[i : i + chunk_size]
-            pcm = struct.pack(f"<{len(chunk)}h", *(
-                int(max(-1.0, min(1.0, s)) * 32767) for s in chunk
-            ))
-            yield pcm
+        while True:
+            chunk = await loop.run_in_executor(None, audio_queue.get)
+            if chunk is None:
+                break
+            yield chunk
 
-    return StreamingResponse(generate(), media_type="application/octet-stream")
+    return StreamingResponse(stream(), media_type="application/octet-stream")
 
 
 @app.websocket("/asr/stream")

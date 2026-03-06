@@ -112,5 +112,10 @@ def preload() -> None:
     logger.info("TTS warmup done: %d samples", len(audio.samples))
 
 
+def get_sample_rate() -> int:
+    """Return the model's audio sample rate."""
+    return get_tts().sample_rate
+
+
 def is_ready() -> bool:
     return _tts_instance is not None
