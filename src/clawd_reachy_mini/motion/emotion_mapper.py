@@ -168,7 +168,26 @@ class EmotionMapper:
             logger.debug(f"No mapping for emotion: {emotion}")
             return None
 
-        expr = random.choice(expressions)
+        template = random.choice(expressions)
+        # Clone template to avoid mutating global EMOTION_MAP entries.
+        expr = RobotExpression(
+            head=HeadPose(
+                yaw=template.head.yaw,
+                pitch=template.head.pitch,
+                roll=template.head.roll,
+                duration=template.head.duration,
+            )
+            if template.head
+            else None,
+            antenna=AntennaMotion(
+                left=template.antenna.left,
+                right=template.antenna.right,
+                duration=template.antenna.duration,
+            )
+            if template.antenna
+            else None,
+            description=template.description,
+        )
 
         # Apply intensity scaling
         if expr.head:

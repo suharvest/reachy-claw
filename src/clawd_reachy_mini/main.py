@@ -39,19 +39,19 @@ def parse_args() -> argparse.Namespace:
 
     # Connection options
     parser.add_argument(
-        "--gateway-host", default="127.0.0.1", help="OpenClaw desktop-robot host"
+        "--gateway-host", default=None, help="OpenClaw desktop-robot host"
     )
     parser.add_argument(
-        "--gateway-port", type=int, default=18790, help="OpenClaw desktop-robot port"
+        "--gateway-port", type=int, default=None, help="OpenClaw desktop-robot port"
     )
-    parser.add_argument("--gateway-path", default="/desktop-robot", help="WebSocket path")
+    parser.add_argument("--gateway-path", default=None, help="WebSocket path")
     parser.add_argument("--gateway-token", help="Authentication token")
 
     # Reachy options
     parser.add_argument(
         "--reachy-mode",
         choices=["auto", "localhost_only", "network"],
-        default="auto",
+        default=None,
         help="Reachy Mini connection mode",
     )
 
@@ -113,6 +113,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--standalone",
         action="store_true",
+        default=None,
         help="Run in standalone mode without OpenClaw",
     )
     parser.add_argument(
@@ -128,13 +129,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tracker-type",
         choices=["mediapipe", "none"],
-        default="mediapipe",
+        default=None,
         help="Face tracker backend",
     )
     parser.add_argument(
         "--camera-index",
         type=int,
-        default=0,
+        default=None,
         help="Camera device index for face tracking",
     )
 
@@ -144,14 +145,19 @@ def parse_args() -> argparse.Namespace:
 def create_config(args: argparse.Namespace) -> Config:
     config = load_config(args.config)
 
-    config.gateway_host = args.gateway_host
-    config.gateway_port = args.gateway_port
-    config.gateway_path = args.gateway_path
+    if args.gateway_host is not None:
+        config.gateway_host = args.gateway_host
+    if args.gateway_port is not None:
+        config.gateway_port = args.gateway_port
+    if args.gateway_path is not None:
+        config.gateway_path = args.gateway_path
     if args.gateway_token:
         config.gateway_token = args.gateway_token
 
-    config.reachy_connection_mode = args.reachy_mode
-    config.audio_device = args.audio_device
+    if args.reachy_mode is not None:
+        config.reachy_connection_mode = args.reachy_mode
+    if args.audio_device is not None:
+        config.audio_device = args.audio_device
     if args.stt is not None:
         config.stt_backend = args.stt
     if args.whisper_model is not None:
@@ -160,13 +166,20 @@ def create_config(args: argparse.Namespace) -> Config:
         config.tts_backend = args.tts
     if args.vad is not None:
         config.vad_backend = args.vad
-    config.tts_voice = args.tts_voice
-    config.tts_model = args.tts_model
-    config.wake_word = args.wake_word
-    config.play_emotions = not args.no_emotions
-    config.idle_animations = not args.no_idle
-    config.barge_in_enabled = not args.no_barge_in
-    config.standalone_mode = args.standalone
+    if args.tts_voice is not None:
+        config.tts_voice = args.tts_voice
+    if args.tts_model is not None:
+        config.tts_model = args.tts_model
+    if args.wake_word is not None:
+        config.wake_word = args.wake_word
+    if args.no_emotions:
+        config.play_emotions = False
+    if args.no_idle:
+        config.idle_animations = False
+    if args.no_barge_in:
+        config.barge_in_enabled = False
+    if args.standalone is not None:
+        config.standalone_mode = args.standalone
 
     # Remote speech service
     if args.speech_url:
@@ -175,8 +188,10 @@ def create_config(args: argparse.Namespace) -> Config:
     # Vision / face tracking
     if args.no_face_tracking:
         config.enable_face_tracker = False
-    config.vision_tracker_type = args.tracker_type
-    config.vision_camera_index = args.camera_index
+    if args.tracker_type is not None:
+        config.vision_tracker_type = args.tracker_type
+    if args.camera_index is not None:
+        config.vision_camera_index = args.camera_index
 
     return config
 

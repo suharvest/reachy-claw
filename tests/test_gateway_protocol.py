@@ -54,6 +54,25 @@ async def test_stream_abort_resolves_with_partial_text():
 
 
 @pytest.mark.asyncio
+async def test_send_message_handles_immediate_stream_events_without_race():
+    client = DesktopRobotClient(Config())
+    client._connected = True
+    client._ws = object()
+
+    async def fake_send(_payload):
+        # Simulate server responding immediately while send_message is in-flight.
+        await client._handle({"type": "stream_start", "runId": "run-fast"})
+        await client._handle(
+            {"type": "stream_end", "runId": "run-fast", "fullText": "ok"}
+        )
+
+    client._send = fake_send  # type: ignore[assignment]
+
+    text = await client.send_message("hello")
+    assert text == "ok"
+
+
+@pytest.mark.asyncio
 async def test_callbacks_fire_on_stream_events():
     client = DesktopRobotClient(Config())
     events: list[tuple[str, ...]] = []

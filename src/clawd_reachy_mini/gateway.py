@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import websockets
@@ -116,11 +116,14 @@ class DesktopRobotClient:
                 await self._listener_task
             except asyncio.CancelledError:
                 pass
+            self._listener_task = None
 
         if self._ws:
             await self._ws.close()
             self._ws = None
-            self._connected = False
+        self._connected = False
+        self._fail_pending_runs("desktop-robot disconnected")
+        self._run_buffers.clear()
 
         logger.info("Disconnected from desktop-robot")
 
@@ -132,12 +135,12 @@ class DesktopRobotClient:
         if not self.is_connected:
             raise RuntimeError("Not connected")
 
-        await self._send({"type": "message", "text": text})
-
         # We'll get a stream_start event with a run_id — but we don't know it yet.
         # Use a single-slot future that the listener fills on stream_end.
-        future: asyncio.Future[str] = asyncio.Future()
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
         self._run_futures["_next"] = future
+        await self._send({"type": "message", "text": text})
 
         try:
             return await asyncio.wait_for(future, timeout=120.0)
@@ -183,6 +186,12 @@ class DesktopRobotClient:
             raise RuntimeError("WebSocket not connected")
         await self._ws.send(json.dumps(data))
 
+    def _fail_pending_runs(self, reason: str) -> None:
+        for future in self._run_futures.values():
+            if not future.done():
+                future.set_exception(RuntimeError(reason))
+        self._run_futures.clear()
+
     async def _listen(self) -> None:
         if not self._ws:
             return
@@ -199,6 +208,9 @@ class DesktopRobotClient:
         except Exception as e:
             logger.error(f"Listener error: {e}")
             self._connected = False
+        finally:
+            self._fail_pending_runs("desktop-robot listener stopped")
+            self._run_buffers.clear()
 
     async def _handle(self, msg: dict) -> None:
         t = msg.get("type", "")

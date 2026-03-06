@@ -292,6 +292,18 @@ class TestCallbacks:
         sentinel = plugin._stream_text_queue.get_nowait()
         assert sentinel is None
 
+    @pytest.mark.asyncio
+    async def test_task_completed_queues_notification_for_output_pipeline(
+        self, standalone_app
+    ):
+        plugin = ConversationPlugin(standalone_app)
+        await plugin._on_task_completed("Background search finished", "task-1")
+
+        item = plugin._sentence_queue.get_nowait()
+        assert item is not None
+        assert item.text == "Background search finished"
+        assert item.is_last is True
+
 
 # ── Fire interrupt ────────────────────────────────────────────────────
 

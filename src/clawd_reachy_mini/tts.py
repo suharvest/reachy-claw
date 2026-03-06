@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
@@ -103,7 +104,7 @@ class MacOSSayTTS(TTSBackend):
         if self._rate:
             cmd += ["-r", str(self._rate)]
         cmd += ["-o", tmp.name, "--", text]
-        proc = subprocess.run(cmd, capture_output=True)
+        proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True)
         if proc.returncode != 0:
             raise RuntimeError(f"say failed: {proc.stderr.decode()}")
         return tmp.name
@@ -132,7 +133,12 @@ class PiperTTS(TTSBackend):
         cmd = ["piper", "--model", self._model, "--output_file", tmp.name]
         if self._speaker is not None:
             cmd += ["--speaker", str(self._speaker)]
-        proc = subprocess.run(cmd, input=text.encode(), capture_output=True)
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            input=text.encode(),
+            capture_output=True,
+        )
         if proc.returncode != 0:
             raise RuntimeError(f"piper failed: {proc.stderr.decode()}")
         return tmp.name
@@ -216,8 +222,17 @@ class KokoroTTS(TTSBackend):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        resp = urllib.request.urlopen(req, timeout=30)
-        wav_bytes = resp.read()
+
+        def _request_wav() -> bytes:
+            resp = urllib.request.urlopen(req, timeout=30)
+            try:
+                return resp.read()
+            finally:
+                close = getattr(resp, "close", None)
+                if callable(close):
+                    close()
+
+        wav_bytes = await asyncio.to_thread(_request_wav)
 
         tmp = tempfile.NamedTemporaryFile(
             prefix="clawd_reachy_kokoro_", suffix=".wav", delete=False

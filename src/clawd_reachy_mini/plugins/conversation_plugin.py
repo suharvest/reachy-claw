@@ -14,7 +14,9 @@ import logging
 import os
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
+from typing import Any, Coroutine
 
 import numpy as np
 
@@ -72,6 +74,7 @@ class ConversationPlugin(Plugin):
         self._current_run_id: str | None = None
         self._conversation_active = False
         self._state = ConvState.IDLE
+        self._pending_tasks: set[asyncio.Task] = set()
 
     def setup(self) -> bool:
         return True
@@ -157,6 +160,12 @@ class ConversationPlugin(Plugin):
     async def stop(self):
         self._running = False
 
+        if self._pending_tasks:
+            for task in list(self._pending_tasks):
+                task.cancel()
+            await asyncio.gather(*self._pending_tasks, return_exceptions=True)
+            self._pending_tasks.clear()
+
         if self._wobbler:
             self._wobbler.stop()
 
@@ -184,6 +193,22 @@ class ConversationPlugin(Plugin):
         if self._state != new_state:
             logger.debug(f"State: {self._state.value} → {new_state.value}")
             self._state = new_state
+
+    def _spawn_task(self, coro: Coroutine[Any, Any, Any], *, name: str) -> None:
+        """Track background tasks so they can be cancelled on shutdown."""
+        task = asyncio.create_task(coro, name=name)
+        self._pending_tasks.add(task)
+
+        def _on_done(done: asyncio.Task) -> None:
+            self._pending_tasks.discard(done)
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error(f"Background task '{done.get_name()}' failed: {e}")
+
+        task.add_done_callback(_on_done)
 
     # ── Callbacks from desktop-robot protocol ─────────────────────────
 
@@ -230,9 +255,10 @@ class ConversationPlugin(Plugin):
 
     async def _on_task_completed(self, summary: str, task_run_id: str) -> None:
         logger.info(f"Background task completed: {summary[:100]}")
-        if self._tts:
-            short = summary[:200] if len(summary) > 200 else summary
-            await self._speak_single(short)
+        short = summary[:200] if len(summary) > 200 else summary
+        # Route notifications through the normal output queue to avoid
+        # blocking gateway listener callbacks on TTS playback.
+        await self._sentence_queue.put(SentenceItem(text=short, is_last=True))
 
     # ── Pipeline task 1: Audio loop (mic → VAD → STT → send) ─────────
 
@@ -265,7 +291,7 @@ class ConversationPlugin(Plugin):
             if not isinstance(chunk, np.ndarray):
                 chunk = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
 
-            has_speech = self._audio._detect_speech(chunk)
+            has_speech = await asyncio.to_thread(self._audio._detect_speech, chunk)
 
             # ── SPEAKING state: detect barge-in ──
             if self._state == ConvState.SPEAKING:
@@ -332,7 +358,10 @@ class ConversationPlugin(Plugin):
                         barge_in_count = 0
                         if self._vad:
                             self._vad.reset()
-                        asyncio.create_task(self._process_and_send(text))
+                        self._spawn_task(
+                            self._process_and_send(text),
+                            name="conversation.process_and_send",
+                        )
                     else:
                         # Batch mode — concatenate and transcribe
                         audio_data = np.concatenate(speech_frames)
@@ -343,7 +372,10 @@ class ConversationPlugin(Plugin):
                             self._vad.reset()
                         duration = len(audio_data) / self.app.config.sample_rate
                         logger.info(f"Captured {duration:.2f}s of audio")
-                        asyncio.create_task(self._transcribe_and_send(audio_data))
+                        self._spawn_task(
+                            self._transcribe_and_send(audio_data),
+                            name="conversation.transcribe_and_send",
+                        )
 
     async def _transcribe_and_send(self, audio: np.ndarray) -> None:
         """Transcribe audio (batch) and send to AI."""
@@ -421,13 +453,23 @@ class ConversationPlugin(Plugin):
         """Consume stream text deltas, split into sentences, feed sentence_queue."""
         sentence_ends = {".", "!", "?", "\n", "\u3002", "\uff01", "\uff1f", "\uff1b"}
         buffer = ""
+        last_chunk_ts = time.monotonic()
+        flush_timeout_s = 0.35
+        flush_min_chars = 24
 
         while self._running:
             try:
                 chunk = await asyncio.wait_for(
-                    self._stream_text_queue.get(), timeout=1.0
+                    self._stream_text_queue.get(), timeout=0.1
                 )
             except asyncio.TimeoutError:
+                if (
+                    buffer.strip()
+                    and (time.monotonic() - last_chunk_ts) >= flush_timeout_s
+                    and len(buffer.strip()) >= flush_min_chars
+                ):
+                    await self._sentence_queue.put(SentenceItem(text=buffer.strip()))
+                    buffer = ""
                 continue
 
             if chunk is None:
@@ -444,6 +486,7 @@ class ConversationPlugin(Plugin):
                 continue
 
             buffer += chunk
+            last_chunk_ts = time.monotonic()
 
             # Split on sentence boundaries
             while True:
@@ -660,10 +703,18 @@ class ConversationPlugin(Plugin):
             temp_wav_path = wf.name
 
         try:
-            subprocess.run(
+            await asyncio.to_thread(
+                subprocess.run,
                 [
-                    "ffmpeg", "-y", "-i", audio_path,
-                    "-ar", "16000", "-ac", "1", temp_wav_path,
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    audio_path,
+                    "-ar",
+                    "16000",
+                    "-ac",
+                    "1",
+                    temp_wav_path,
                 ],
                 capture_output=True,
                 check=True,

@@ -70,6 +70,16 @@ class TestIntensityScaling:
         em_low = EmotionMapper(intensity=-1.0)
         assert em_low._intensity == 0.0
 
+    def test_scaling_does_not_mutate_global_templates(self):
+        em = EmotionMapper(intensity=0.5)
+        first = em.map_emotion("surprised")
+        second = em.map_emotion("surprised")
+        third = em.map_emotion("surprised")
+        assert first is not None and second is not None and third is not None
+        assert first.head.pitch == pytest.approx(7.5)
+        assert second.head.pitch == pytest.approx(7.5)
+        assert third.head.pitch == pytest.approx(7.5)
+
 
 class TestEmotionQueue:
     def test_queue_emotion_adds_to_queue(self):
