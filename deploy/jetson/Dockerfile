@@ -33,6 +33,15 @@ RUN pip3 install --no-cache-dir --index-url https://pypi.org/simple "${SHERPA_WH
 COPY scripts/patch_sherpa_ort.py /tmp/
 RUN python3 /tmp/patch_sherpa_ort.py && rm /tmp/patch_sherpa_ort.py
 
+# Install patched sherpa-onnx .so files (Paraformer streaming EOF fix)
+# Pre-built from v1.12.28 source with IsReady/DecodeStream/CIF patches.
+# See patches/README.md for details; to rebuild, see patches/paraformer-eof-fix.patch
+COPY patches/sherpa-onnx-lib/ /tmp/sherpa-onnx-lib/
+RUN SITE_LIB=$(python3 -c "import sherpa_onnx, os; print(os.path.join(os.path.dirname(sherpa_onnx.__file__), 'lib'))") && \
+    cp /tmp/sherpa-onnx-lib/*.so "$SITE_LIB/" && \
+    rm -rf /tmp/sherpa-onnx-lib && \
+    python3 -c "import sherpa_onnx; print(f'sherpa_onnx {sherpa_onnx.__version__} patched OK')"
+
 # Copy application code + model download script
 COPY app/ /app/
 COPY scripts/download_models.sh /opt/scripts/download_models.sh

@@ -60,25 +60,28 @@ def feed_and_decode(stream, samples: np.ndarray, sample_rate: int = 16000):
     while recognizer.is_ready(stream):
         recognizer.decode_stream(stream)
 
-    text = stream.result.text.strip()
+    text = recognizer.get_result(stream).strip()
     # sherpa-onnx OnlineRecognizer: result includes partial until endpoint
     is_endpoint = recognizer.is_endpoint(stream)
 
     return text, is_endpoint
 
 
-def finalize(stream) -> str:
-    """Finalize the stream (flush remaining audio). Returns final text."""
+def finalize(stream, sample_rate: int = 16000) -> str:
+    """Finalize the stream (flush remaining audio). Returns final text.
+
+    With the patched sherpa-onnx (EOF fix), input_finished() alone is
+    sufficient — the patch forces IsReady() to return true for partial
+    final chunks and CIF force-fires residual tokens.  No silence
+    padding is needed (and padding can cause hallucinations).
+    """
     recognizer = get_recognizer()
 
-    # Feed a bit of silence to flush the decoder
-    silence = np.zeros(int(16000 * 0.5), dtype=np.float32)
-    stream.accept_waveform(16000, silence)
-
+    stream.input_finished()
     while recognizer.is_ready(stream):
         recognizer.decode_stream(stream)
 
-    return stream.result.text.strip()
+    return recognizer.get_result(stream).strip()
 
 
 def preload() -> None:
