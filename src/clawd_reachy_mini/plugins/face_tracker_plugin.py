@@ -91,9 +91,12 @@ class FaceTrackerPlugin(Plugin):
             f"Face tracker started (type={self._tracker_type}, camera={self._camera_index})"
         )
 
+        self._face_lost_published = False
+
         try:
             while self._running:
-                ret, frame = self._cap.read()
+                # Run blocking cv2.read() in a thread to avoid stalling the event loop
+                ret, frame = await asyncio.to_thread(self._cap.read)
                 if not ret or frame is None:
                     await asyncio.sleep(0.04)
                     continue
@@ -108,6 +111,7 @@ class FaceTrackerPlugin(Plugin):
                 if eye_center is not None:
                     face_x, face_y = float(eye_center[0]), float(eye_center[1])
                     self._last_face_time = now
+                    self._face_lost_published = False
 
                     if (
                         abs(face_x - self._smooth_x) >= self._deadzone
@@ -135,15 +139,18 @@ class FaceTrackerPlugin(Plugin):
                     )
 
                 elif (now - self._last_face_time) > self._face_lost_delay:
-                    self.app.head_targets.publish(
-                        HeadTarget(
-                            yaw=0.0,
-                            pitch=0.0,
-                            confidence=0.0,
-                            source="face",
-                            timestamp=now,
+                    # Only publish face-lost once to avoid spamming the bus
+                    if not self._face_lost_published:
+                        self.app.head_targets.publish(
+                            HeadTarget(
+                                yaw=0.0,
+                                pitch=0.0,
+                                confidence=0.0,
+                                source="face",
+                                timestamp=now,
+                            )
                         )
-                    )
+                        self._face_lost_published = True
 
                 await asyncio.sleep(0.04)  # ~25Hz
 

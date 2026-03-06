@@ -278,6 +278,7 @@ class ConversationPlugin(Plugin):
                         speech_frames = [chunk]
                         await self._fire_interrupt()
                         if streaming_stt:
+                            self._stt.cancel_stream()
                             await asyncio.to_thread(
                                 self._stt.start_stream, self.app.config.sample_rate
                             )
@@ -478,7 +479,7 @@ class ConversationPlugin(Plugin):
 
             if item.is_last and not item.text:
                 # Empty final marker — done speaking
-                self._finish_speaking()
+                await self._finish_speaking()
                 continue
 
             # Speak this sentence
@@ -491,20 +492,23 @@ class ConversationPlugin(Plugin):
                 # Drain remaining sentences
                 _drain_queue(self._sentence_queue)
                 self._interrupt_event.clear()
-                self._finish_speaking()
+                await self._finish_speaking()
                 continue
 
             if item.is_last:
-                self._finish_speaking()
+                await self._finish_speaking()
 
-    def _finish_speaking(self) -> None:
+    async def _finish_speaking(self) -> None:
         """Clean up after speaking is done."""
         self.app.is_speaking = False
         if self._wobbler:
             self._wobbler.reset()
         self._set_state(ConvState.IDLE)
         if self._client:
-            asyncio.ensure_future(self._client.send_state_change("listening"))
+            try:
+                await self._client.send_state_change("listening")
+            except Exception:
+                pass
         logger.info("Ready for next turn")
 
     # ── Interrupt ─────────────────────────────────────────────────────
@@ -550,11 +554,12 @@ class ConversationPlugin(Plugin):
                 if self._wobbler:
                     self._wobbler.start()
 
+                interrupted = False
                 try:
                     async for chunk, sr in self._tts.synthesize_streaming(text):
                         if self._interrupt_event.is_set():
-                            reachy.media.stop_playing()
-                            return True
+                            interrupted = True
+                            break
                         reachy.media.push_audio_sample(chunk)
                         if self._wobbler:
                             self._wobbler.feed(chunk)
@@ -563,9 +568,10 @@ class ConversationPlugin(Plugin):
                     if self._wobbler:
                         self._wobbler.reset()
                     reachy.set_target_antenna_joint_positions([0.0, 0.0])
-                    await asyncio.sleep(0.3)
+                    if not interrupted:
+                        await asyncio.sleep(0.3)
                     reachy.media.stop_playing()
-                return False
+                return interrupted
             else:
                 # Local playback: collect all streaming chunks, write to temp file, play
                 all_chunks = []
