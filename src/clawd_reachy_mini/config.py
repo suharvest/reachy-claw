@@ -67,6 +67,7 @@ class Config:
     # Barge-in
     barge_in_enabled: bool = True
     barge_in_energy_threshold: float = 0.02
+    barge_in_confirm_frames: int = 3  # consecutive VAD-positive frames before interrupt (~200ms)
 
     # Behavior
     wake_word: str | None = None
@@ -150,6 +151,7 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("audio", "max_recording_duration"): "max_recording_duration",
     ("barge_in", "enabled"): "barge_in_enabled",
     ("barge_in", "energy_threshold"): "barge_in_energy_threshold",
+    ("barge_in", "confirm_frames"): "barge_in_confirm_frames",
     ("behavior", "wake_word"): "wake_word",
     ("behavior", "play_emotions"): "play_emotions",
     ("behavior", "idle_animations"): "idle_animations",

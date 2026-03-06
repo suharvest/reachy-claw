@@ -134,7 +134,7 @@ class TestKokoroTTS:
                 assert "/tts" in req.full_url
                 body = json.loads(req.data.decode())
                 assert body["text"] == "Hello world"
-                assert body["sid"] == 50
+                assert body["sid"] == 3
                 assert body["speed"] == 1.0
             finally:
                 os.unlink(path)
@@ -172,7 +172,7 @@ class TestKokoroTTSFactory:
         backend = create_tts_backend(backend="kokoro")
         assert isinstance(backend, KokoroTTS)
         assert backend._base_url == "http://localhost:8000"
-        assert backend._speaker_id == 50
+        assert backend._speaker_id == 3
 
 
 # ── Config fields ───────────────────────────────────────────────────────
@@ -183,8 +183,8 @@ class TestConfigSpeechFields:
         config = Config()
         assert config.speech_service_url == "http://localhost:8000"
         assert config.sensevoice_language == "auto"
-        assert config.kokoro_speaker_id == 50
-        assert config.kokoro_speed == 1.0
+        assert config.kokoro_speaker_id == 3
+        assert config.kokoro_speed == 1.2
 
     def test_env_override(self):
         with patch.dict(os.environ, {"SPEECH_SERVICE_URL": "http://custom:9000"}):

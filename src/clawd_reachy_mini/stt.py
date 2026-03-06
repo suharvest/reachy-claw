@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -14,8 +15,19 @@ from clawd_reachy_mini.config import Config
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class PartialResult:
+    """A partial or final transcription result from streaming STT."""
+
+    text: str
+    is_final: bool = False
+    is_stable: bool = False  # stable partial — won't change
+
+
 class STTBackend(ABC):
     """Abstract base class for speech-to-text backends."""
+
+    supports_streaming: bool = False
 
     def preload(self) -> None:
         """Preload the model to avoid delay on first transcription."""
@@ -23,12 +35,30 @@ class STTBackend(ABC):
 
     @abstractmethod
     def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
-        """Transcribe audio to text."""
+        """Transcribe audio to text (batch mode)."""
         pass
 
     @abstractmethod
     def transcribe_file(self, path: Path) -> str:
         """Transcribe audio file to text."""
+        pass
+
+    # ── Streaming interface (override in streaming backends) ──────────
+
+    def start_stream(self, sample_rate: int = 16000) -> None:
+        """Begin a new streaming recognition session."""
+        raise NotImplementedError("This backend does not support streaming")
+
+    def feed_chunk(self, chunk: np.ndarray) -> PartialResult | None:
+        """Feed an audio chunk. Returns a PartialResult if available, else None."""
+        raise NotImplementedError("This backend does not support streaming")
+
+    def finish_stream(self) -> str:
+        """Signal end of audio. Returns the final transcription."""
+        raise NotImplementedError("This backend does not support streaming")
+
+    def cancel_stream(self) -> None:
+        """Cancel the current streaming session."""
         pass
 
 
@@ -220,6 +250,201 @@ class SenseVoiceSTT(STTBackend):
         resp = urllib.request.urlopen(req, timeout=30)
         result = json.loads(resp.read().decode())
         return result.get("text", "").strip()
+
+
+@register_stt("paraformer-streaming")
+class ParaformerStreamingSTT(STTBackend):
+    """Streaming Paraformer ASR via Jetson speech service (sherpa-onnx, CUDA).
+
+    Uses WebSocket for streaming: client sends audio chunks, server returns
+    partial/final results in real-time.
+
+    Falls back to batch HTTP /asr endpoint for transcribe() if needed.
+    """
+
+    supports_streaming = True
+
+    class Settings:
+        language: str = "auto"
+
+    def __init__(self, base_url: str = "http://localhost:8000", language: str = "auto"):
+        self._base_url = base_url.rstrip("/")
+        self._language = language
+        self._ws_url = self._base_url.replace("http://", "ws://").replace("https://", "wss://")
+        self._ws = None
+        self._sample_rate = 16000
+        self._partial_text = ""
+        self._final_text = ""
+
+    def preload(self) -> None:
+        import urllib.request
+
+        try:
+            resp = urllib.request.urlopen(f"{self._base_url}/health", timeout=5)
+            data = resp.read().decode()
+            logger.info(f"Paraformer streaming service health: {data}")
+        except Exception as e:
+            logger.warning(f"Paraformer streaming service not reachable: {e}")
+
+    def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
+        """Batch fallback: POST to /asr like SenseVoice."""
+        import io
+        import json
+        import urllib.request
+        import wave
+
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            if audio.dtype != np.int16:
+                if np.abs(audio).max() <= 1.0:
+                    audio_int = (audio * 32767).astype(np.int16)
+                else:
+                    audio_int = audio.astype(np.int16)
+            else:
+                audio_int = audio
+            wf.writeframes(audio_int.tobytes())
+        buf.seek(0)
+        wav_bytes = buf.read()
+
+        boundary = "----ParaformerBoundary"
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
+            f"Content-Type: audio/wav\r\n\r\n"
+        ).encode() + wav_bytes + f"\r\n--{boundary}--\r\n".encode()
+
+        url = f"{self._base_url}/asr?language={self._language}"
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=30)
+        result = json.loads(resp.read().decode())
+        return result.get("text", "").strip()
+
+    def transcribe_file(self, path: Path) -> str:
+        import json
+        import urllib.request
+
+        with open(path, "rb") as f:
+            wav_bytes = f.read()
+
+        boundary = "----ParaformerBoundary"
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{path.name}"\r\n'
+            f"Content-Type: audio/wav\r\n\r\n"
+        ).encode() + wav_bytes + f"\r\n--{boundary}--\r\n".encode()
+
+        url = f"{self._base_url}/asr?language={self._language}"
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=30)
+        result = json.loads(resp.read().decode())
+        return result.get("text", "").strip()
+
+    # ── Streaming interface ───────────────────────────────────────────
+
+    def start_stream(self, sample_rate: int = 16000) -> None:
+        import json
+
+        import websockets.sync.client
+
+        self._sample_rate = sample_rate
+        self._partial_text = ""
+        self._final_text = ""
+        ws_url = f"{self._ws_url}/asr/stream?language={self._language}&sample_rate={sample_rate}"
+        self._ws = websockets.sync.client.connect(ws_url)
+        logger.debug("Paraformer streaming session started")
+
+    def feed_chunk(self, chunk: np.ndarray) -> PartialResult | None:
+        """Send audio chunk, receive partial result if available."""
+        import json
+
+        if self._ws is None:
+            return None
+
+        # Convert to int16 bytes
+        if chunk.dtype != np.int16:
+            if np.abs(chunk).max() <= 1.0:
+                chunk_int = (chunk * 32767).astype(np.int16)
+            else:
+                chunk_int = chunk.astype(np.int16)
+        else:
+            chunk_int = chunk
+
+        self._ws.send(chunk_int.tobytes())
+
+        # Non-blocking receive — check if server sent a result
+        try:
+            self._ws.socket.setblocking(False)
+            raw = self._ws.recv(timeout=0)
+            self._ws.socket.setblocking(True)
+        except Exception:
+            self._ws.socket.setblocking(True)
+            return None
+
+        try:
+            msg = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        text = msg.get("text", "")
+        is_final = msg.get("is_final", False)
+        is_stable = msg.get("is_stable", False)
+
+        if is_final:
+            self._final_text = text
+        else:
+            self._partial_text = text
+
+        return PartialResult(text=text, is_final=is_final, is_stable=is_stable)
+
+    def finish_stream(self) -> str:
+        """Send end-of-stream signal, collect final result."""
+        import json
+
+        if self._ws is None:
+            return self._final_text or self._partial_text
+
+        try:
+            # Send empty bytes to signal end of audio
+            self._ws.send(b"")
+
+            # Wait for final result
+            try:
+                raw = self._ws.recv(timeout=5)
+                msg = json.loads(raw)
+                if msg.get("is_final"):
+                    self._final_text = msg.get("text", "")
+            except Exception:
+                pass
+
+            return self._final_text or self._partial_text
+        finally:
+            self._close_ws()
+
+    def cancel_stream(self) -> None:
+        self._close_ws()
+        self._partial_text = ""
+        self._final_text = ""
+
+    def _close_ws(self) -> None:
+        if self._ws is not None:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
 
 
 def create_stt_backend(config: Config) -> STTBackend:

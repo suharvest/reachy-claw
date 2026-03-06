@@ -218,3 +218,62 @@ class TestEnergyCalculation:
         audio = np.full(1024, 0.015, dtype=np.float32)
         energy = np.abs(audio).mean()
         assert energy > config.silence_threshold
+
+
+# ── Continuous capture ────────────────────────────────────────────────────
+
+
+class TestContinuousCapture:
+    @pytest.mark.asyncio
+    async def test_start_continuous_sets_running(self):
+        config = Config()
+        ac = AudioCapture(config)
+        # Mock _read_local_mic to avoid actual mic access
+        ac._read_local_mic = AsyncMock(return_value=np.zeros(1024, dtype=np.float32))
+        await ac.start_continuous()
+        assert ac._running is True
+        assert ac._continuous is True
+        await ac.stop()
+        assert ac._running is False
+
+    @pytest.mark.asyncio
+    async def test_start_continuous_with_reachy(self):
+        config = Config()
+        mock_reachy = MagicMock()
+        mock_reachy.media = MagicMock()
+        ac = AudioCapture(config, reachy_mini=mock_reachy)
+        await ac.start_continuous()
+        mock_reachy.media.start_recording.assert_called_once()
+        await ac.stop()
+        mock_reachy.media.stop_recording.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_read_chunk_returns_data(self):
+        config = Config()
+        ac = AudioCapture(config)
+        ac._running = True
+        expected = np.random.uniform(-0.5, 0.5, 1024).astype(np.float32)
+        ac._read_local_mic = AsyncMock(return_value=expected)
+        chunk = await ac.read_chunk(1024)
+        assert chunk is not None
+        np.testing.assert_array_equal(chunk, expected)
+
+    @pytest.mark.asyncio
+    async def test_read_chunk_returns_none_when_stopped(self):
+        config = Config()
+        ac = AudioCapture(config)
+        ac._running = False
+        result = await ac.read_chunk()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_read_chunk_with_reachy_media(self):
+        config = Config()
+        mock_reachy = MagicMock()
+        mock_reachy.media = MagicMock()
+        expected = np.random.uniform(-0.5, 0.5, 1024).astype(np.float32)
+        mock_reachy.media.get_audio_sample = MagicMock(return_value=expected)
+        ac = AudioCapture(config, reachy_mini=mock_reachy)
+        ac._running = True
+        chunk = await ac.read_chunk()
+        assert chunk is not None

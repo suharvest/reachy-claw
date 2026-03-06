@@ -1,16 +1,20 @@
-"""ConversationPlugin -- STT/TTS/gateway conversation loop.
+"""ConversationPlugin -- dual-pipeline STT/TTS/gateway conversation loop.
 
-Extracted from interface.py. Handles the full conversation cycle:
-  listen -> STT -> send to gateway -> receive stream -> TTS -> speak
+Three concurrent tasks connected by queues and an interrupt event:
+  _audio_loop:          mic → VAD → state machine → STT → send to AI
+  _sentence_accumulator: stream deltas → sentence splitting → sentence_queue
+  _output_pipeline:     sentence_queue → TTS → interruptible playback
 """
 
 from __future__ import annotations
 
 import asyncio
+import enum
 import logging
 import os
 import subprocess
 import tempfile
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -25,8 +29,28 @@ from ..vad import create_vad_backend
 logger = logging.getLogger(__name__)
 
 
+# ── Data structures ───────────────────────────────────────────────────
+
+
+class ConvState(enum.Enum):
+    IDLE = "idle"
+    LISTENING = "listening"
+    TRANSCRIBING = "transcribing"
+    THINKING = "thinking"
+    SPEAKING = "speaking"
+
+
+@dataclass
+class SentenceItem:
+    text: str
+    is_last: bool = False
+
+
+# ── Plugin ────────────────────────────────────────────────────────────
+
+
 class ConversationPlugin(Plugin):
-    """Conversation loop: STT -> gateway -> TTS -> speak."""
+    """Dual-pipeline conversation: continuous listen + concurrent TTS output."""
 
     name = "conversation"
 
@@ -35,13 +59,19 @@ class ConversationPlugin(Plugin):
         self._client: DesktopRobotClient | None = None
         self._stt = None
         self._tts = None
+        self._vad = None
         self._audio: AudioCapture | None = None
         self._wake_detector: WakeWordDetector | None = None
         self._wobbler: HeadWobbler | None = None
 
+        # Queues connecting the three pipeline stages
         self._stream_text_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._sentence_queue: asyncio.Queue[SentenceItem | None] = asyncio.Queue()
+        self._interrupt_event = asyncio.Event()
+
         self._current_run_id: str | None = None
         self._conversation_active = False
+        self._state = ConvState.IDLE
 
     def setup(self) -> bool:
         return True
@@ -65,11 +95,11 @@ class ConversationPlugin(Plugin):
         logger.info(f"TTS backend: {config.tts_backend}")
 
         # Initialize VAD
-        vad = create_vad_backend(backend=config.vad_backend, config=config)
-        await asyncio.to_thread(vad.preload)
+        self._vad = create_vad_backend(backend=config.vad_backend, config=config)
+        await asyncio.to_thread(self._vad.preload)
 
         # Initialize audio capture
-        self._audio = AudioCapture(config, self.app.reachy, vad=vad)
+        self._audio = AudioCapture(config, self.app.reachy, vad=self._vad)
 
         if config.wake_word:
             self._wake_detector = WakeWordDetector(config.wake_word)
@@ -90,15 +120,14 @@ class ConversationPlugin(Plugin):
         else:
             logger.info("Running in standalone mode - no server connection")
 
-        # Start audio capture
-        await self._audio.start()
+        # Start continuous audio capture
+        await self._audio.start_continuous()
 
         # Wake up the robot
         if self.app.reachy:
             logger.info("Waking up Reachy...")
             await asyncio.to_thread(self.app.reachy.wake_up)
             await asyncio.sleep(0.5)
-            # Startup antenna snap
             try:
                 self.app.reachy.set_target_antenna_joint_positions([0.7, -0.7])
                 await asyncio.sleep(0.2)
@@ -115,12 +144,15 @@ class ConversationPlugin(Plugin):
             logger.info("Speak anytime - always listening!")
         logger.info("=" * 50)
 
-        # Main conversation loop
+        # Run three concurrent pipeline tasks
         try:
-            while self._running:
-                await self._conversation_turn()
+            await asyncio.gather(
+                self._audio_loop(),
+                self._sentence_accumulator(),
+                self._output_pipeline(),
+            )
         except asyncio.CancelledError:
-            logger.info("Conversation loop cancelled")
+            logger.info("Conversation pipeline cancelled")
 
     async def stop(self):
         self._running = False
@@ -146,7 +178,14 @@ class ConversationPlugin(Plugin):
                 return p
         return None
 
-    # -- Callbacks from desktop-robot protocol --
+    # ── State helpers ─────────────────────────────────────────────────
+
+    def _set_state(self, new_state: ConvState) -> None:
+        if self._state != new_state:
+            logger.debug(f"State: {self._state.value} → {new_state.value}")
+            self._state = new_state
+
+    # ── Callbacks from desktop-robot protocol ─────────────────────────
 
     def _setup_callbacks(self) -> None:
         assert self._client is not None
@@ -163,14 +202,13 @@ class ConversationPlugin(Plugin):
     async def _on_stream_start(self, run_id: str) -> None:
         logger.debug(f"Stream started: {run_id}")
         self._current_run_id = run_id
-        while not self._stream_text_queue.empty():
-            try:
-                self._stream_text_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+        self._set_state(ConvState.THINKING)
+        _drain_queue(self._stream_text_queue)
 
     async def _on_stream_delta(self, text: str, run_id: str) -> None:
         logger.debug(f"Delta [{run_id[:8]}]: {text}")
+        if self._state == ConvState.THINKING:
+            self._set_state(ConvState.SPEAKING)
         await self._stream_text_queue.put(text)
 
     async def _on_stream_end(self, full_text: str, run_id: str) -> None:
@@ -194,32 +232,136 @@ class ConversationPlugin(Plugin):
         logger.info(f"Background task completed: {summary[:100]}")
         if self._tts:
             short = summary[:200] if len(summary) > 200 else summary
-            await self._speak(short)
+            await self._speak_single(short)
 
-    # -- Conversation turn --
+    # ── Pipeline task 1: Audio loop (mic → VAD → STT → send) ─────────
 
-    async def _conversation_turn(self) -> None:
+    async def _audio_loop(self) -> None:
+        """Continuous mic read → VAD state machine → STT → send to AI."""
+        speech_frames: list[np.ndarray] = []
+        silence_count = 0
+        barge_in_count = 0
+        max_silence = int(self.app.config.silence_duration * self.app.config.sample_rate / 1024)
+        max_frames = int(self.app.config.max_recording_duration * self.app.config.sample_rate / 1024)
+        confirm_frames = self.app.config.barge_in_confirm_frames
+        streaming_stt = self._stt.supports_streaming
+
+        self._set_state(ConvState.IDLE)
+
         if self._client:
             await self._client.send_state_change("listening")
-        logger.info("Listening... (speak now)")
-        audio = await self._audio.capture_utterance()
 
-        if audio is None:
-            await asyncio.sleep(0.1)
-            return
+        if streaming_stt:
+            logger.info("Listening... (streaming STT mode)")
+        else:
+            logger.info("Listening... (speak now)")
 
-        # Transcribe
-        logger.info("Processing speech...")
+        while self._running:
+            chunk = await self._audio.read_chunk(1024)
+            if chunk is None:
+                await asyncio.sleep(0.01)
+                continue
+
+            if not isinstance(chunk, np.ndarray):
+                chunk = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+
+            has_speech = self._audio._detect_speech(chunk)
+
+            # ── SPEAKING state: detect barge-in ──
+            if self._state == ConvState.SPEAKING:
+                if not self.app.config.barge_in_enabled:
+                    continue
+                if has_speech:
+                    barge_in_count += 1
+                    if barge_in_count >= confirm_frames:
+                        logger.info(f"Barge-in confirmed ({barge_in_count} frames)")
+                        speech_frames = [chunk]
+                        await self._fire_interrupt()
+                        if streaming_stt:
+                            await asyncio.to_thread(
+                                self._stt.start_stream, self.app.config.sample_rate
+                            )
+                            await asyncio.to_thread(self._stt.feed_chunk, chunk)
+                        self._set_state(ConvState.LISTENING)
+                        silence_count = 0
+                        barge_in_count = 0
+                else:
+                    barge_in_count = 0
+                continue
+
+            # ── TRANSCRIBING / THINKING states: wait ──
+            if self._state in (ConvState.TRANSCRIBING, ConvState.THINKING):
+                continue
+
+            # ── IDLE / LISTENING states: accumulate speech ──
+            if has_speech:
+                if self._state == ConvState.IDLE:
+                    self._set_state(ConvState.LISTENING)
+                    logger.info("Speech detected!")
+                    if streaming_stt:
+                        await asyncio.to_thread(
+                            self._stt.start_stream, self.app.config.sample_rate
+                        )
+                speech_frames.append(chunk)
+                silence_count = 0
+
+                # Feed chunk to streaming STT
+                if streaming_stt:
+                    partial = await asyncio.to_thread(self._stt.feed_chunk, chunk)
+                    if partial and partial.text:
+                        logger.debug(f"Partial: \"{partial.text}\" (stable={partial.is_stable})")
+
+            elif self._state == ConvState.LISTENING:
+                silence_count += 1
+                speech_frames.append(chunk)
+
+                # Keep feeding silence to streaming STT (it needs continuity)
+                if streaming_stt:
+                    await asyncio.to_thread(self._stt.feed_chunk, chunk)
+
+                if silence_count >= max_silence or len(speech_frames) >= max_frames:
+                    # End of utterance
+                    self._set_state(ConvState.TRANSCRIBING)
+
+                    if streaming_stt:
+                        # Finish streaming — get final text
+                        text = await asyncio.to_thread(self._stt.finish_stream)
+                        speech_frames = []
+                        silence_count = 0
+                        barge_in_count = 0
+                        if self._vad:
+                            self._vad.reset()
+                        asyncio.create_task(self._process_and_send(text))
+                    else:
+                        # Batch mode — concatenate and transcribe
+                        audio_data = np.concatenate(speech_frames)
+                        speech_frames = []
+                        silence_count = 0
+                        barge_in_count = 0
+                        if self._vad:
+                            self._vad.reset()
+                        duration = len(audio_data) / self.app.config.sample_rate
+                        logger.info(f"Captured {duration:.2f}s of audio")
+                        asyncio.create_task(self._transcribe_and_send(audio_data))
+
+    async def _transcribe_and_send(self, audio: np.ndarray) -> None:
+        """Transcribe audio (batch) and send to AI."""
         try:
             text = await asyncio.to_thread(
                 self._stt.transcribe, audio, self.app.config.sample_rate
             )
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
+            self._set_state(ConvState.IDLE)
             return
 
+        await self._process_and_send(text)
+
+    async def _process_and_send(self, text: str) -> None:
+        """Process transcribed text (wake word check etc.) and send to AI."""
         if not text or not text.strip():
             logger.info("(no speech detected)")
+            self._set_state(ConvState.IDLE)
             return
 
         logger.info(f'You said: "{text}"')
@@ -227,12 +369,10 @@ class ConversationPlugin(Plugin):
         # Check wake word
         if self._wake_detector and not self._conversation_active:
             if not self._wake_detector.detect(text):
-                logger.info(
-                    f'Waiting for wake word "{self.app.config.wake_word}"...'
-                )
+                logger.info(f'Waiting for wake word "{self.app.config.wake_word}"...')
+                self._set_state(ConvState.IDLE)
                 return
             logger.info("Wake word detected!")
-
             if self.app.reachy:
                 try:
                     self.app.reachy.set_target_antenna_joint_positions([0.7, -0.7])
@@ -242,151 +382,241 @@ class ConversationPlugin(Plugin):
                     self.app.reachy.set_target_antenna_joint_positions([0.0, 0.0])
                 except Exception as e:
                     logger.error(f"Antenna animation failed: {e}")
-
             text = text.lower().replace(self.app.config.wake_word.lower(), "").strip()
             self._conversation_active = True
 
         if not text:
+            self._set_state(ConvState.IDLE)
             return
 
         # Standalone mode
         if self.app.config.standalone_mode:
             response = f"I heard you say: {text}"
-            await self._speak(response)
+            await self._sentence_queue.put(SentenceItem(text=response, is_last=True))
+            self._set_state(ConvState.SPEAKING)
             return
 
-        # Send to AI and stream response
+        # Send to AI
         logger.info("Sending to AI...")
+        self._set_state(ConvState.THINKING)
 
-        # Queue thinking emotion
         if self.app.config.play_emotions:
             self.app.emotions.queue_emotion("thinking")
 
+        if self._client:
+            await self._client.send_state_change("thinking")
+
         try:
             await self._client.send_message_streaming(text)
-            full_response = await self._speak_streaming()
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Error sending to AI: {e}")
             if self.app.config.play_emotions:
                 self.app.emotions.queue_emotion("sad")
-            full_response = ""
+            self._set_state(ConvState.IDLE)
 
-        if full_response:
-            logger.info(f'Response: "{full_response[:100]}..."')
+    # ── Pipeline task 2: Sentence accumulator ─────────────────────────
 
+    async def _sentence_accumulator(self) -> None:
+        """Consume stream text deltas, split into sentences, feed sentence_queue."""
+        sentence_ends = {".", "!", "?", "\n", "\u3002", "\uff01", "\uff1f", "\uff1b"}
+        buffer = ""
+
+        while self._running:
+            try:
+                chunk = await asyncio.wait_for(
+                    self._stream_text_queue.get(), timeout=1.0
+                )
+            except asyncio.TimeoutError:
+                continue
+
+            if chunk is None:
+                # End of stream — flush remaining buffer
+                if buffer.strip():
+                    await self._sentence_queue.put(
+                        SentenceItem(text=buffer.strip(), is_last=True)
+                    )
+                else:
+                    await self._sentence_queue.put(
+                        SentenceItem(text="", is_last=True)
+                    )
+                buffer = ""
+                continue
+
+            buffer += chunk
+
+            # Split on sentence boundaries
+            while True:
+                idx = -1
+                for ch in sentence_ends:
+                    pos = buffer.find(ch)
+                    if pos >= 0 and (idx < 0 or pos < idx):
+                        idx = pos
+
+                if idx < 0 or idx < 5:
+                    break
+
+                sentence = buffer[: idx + 1].strip()
+                buffer = buffer[idx + 1 :]
+
+                if sentence:
+                    await self._sentence_queue.put(SentenceItem(text=sentence))
+
+    # ── Pipeline task 3: Output pipeline (TTS + playback) ────────────
+
+    async def _output_pipeline(self) -> None:
+        """Consume sentences, synthesize TTS, play with interrupt support."""
+        while self._running:
+            try:
+                item = await asyncio.wait_for(
+                    self._sentence_queue.get(), timeout=1.0
+                )
+            except asyncio.TimeoutError:
+                continue
+
+            if item is None:
+                continue
+
+            if item.is_last and not item.text:
+                # Empty final marker — done speaking
+                self._finish_speaking()
+                continue
+
+            # Speak this sentence
+            self.app.is_speaking = True
+            self._set_state(ConvState.SPEAKING)
+
+            interrupted = await self._speak_interruptible(item.text)
+
+            if interrupted or self._interrupt_event.is_set():
+                # Drain remaining sentences
+                _drain_queue(self._sentence_queue)
+                self._interrupt_event.clear()
+                self._finish_speaking()
+                continue
+
+            if item.is_last:
+                self._finish_speaking()
+
+    def _finish_speaking(self) -> None:
+        """Clean up after speaking is done."""
+        self.app.is_speaking = False
+        if self._wobbler:
+            self._wobbler.reset()
+        self._set_state(ConvState.IDLE)
         if self._client:
-            await self._client.send_state_change("speaking_done")
-
+            asyncio.ensure_future(self._client.send_state_change("listening"))
         logger.info("Ready for next turn")
 
-    # -- Streaming speech --
+    # ── Interrupt ─────────────────────────────────────────────────────
 
-    async def _speak_streaming(self) -> str:
-        buffer = ""
-        full_text = ""
-        self.app.is_speaking = True
+    async def _fire_interrupt(self) -> None:
+        """Fire barge-in interrupt: stop playback, drain queues, notify server."""
+        logger.info("Firing interrupt")
+        self._interrupt_event.set()
 
-        sentence_ends = {".", "!", "?", "\n", "\u3002", "\uff01", "\uff1f", "\uff1b"}
+        if self._client:
+            await self._client.send_interrupt()
 
-        try:
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(
-                        self._stream_text_queue.get(), timeout=60.0
-                    )
-                except asyncio.TimeoutError:
-                    break
+        _drain_queue(self._stream_text_queue)
+        _drain_queue(self._sentence_queue)
 
-                if chunk is None:
-                    if buffer.strip():
-                        await self._speak(buffer.strip())
-                        full_text += buffer
-                    break
+        self.app.is_speaking = False
+        if self._wobbler:
+            self._wobbler.reset()
 
-                buffer += chunk
+    # ── TTS + interruptible playback ──────────────────────────────────
 
-                while True:
-                    idx = -1
-                    for ch in sentence_ends:
-                        pos = buffer.find(ch)
-                        if pos >= 0 and (idx < 0 or pos < idx):
-                            idx = pos
-
-                    if idx < 0 or idx < 5:
-                        break
-
-                    sentence = buffer[: idx + 1].strip()
-                    buffer = buffer[idx + 1 :]
-
-                    if sentence:
-                        await self._speak(sentence)
-                        full_text += sentence + " "
-
-                        if self._was_barged_in():
-                            logger.info("Barge-in detected between sentences")
-                            if self._client:
-                                await self._client.send_interrupt()
-                            while not self._stream_text_queue.empty():
-                                try:
-                                    self._stream_text_queue.get_nowait()
-                                except asyncio.QueueEmpty:
-                                    break
-                            return full_text.strip()
-        finally:
-            self.app.is_speaking = False
-            if self._wobbler:
-                self._wobbler.reset()
-
-        return full_text.strip()
-
-    def _was_barged_in(self) -> bool:
-        if not self.app.config.barge_in_enabled:
-            return False
-        if not self._audio or not self._audio._running:
-            return False
-
-        try:
-            import sounddevice as sd  # noqa: F401
-
-            if (
-                not hasattr(self._audio, "_input_stream")
-                or self._audio._input_stream is None
-            ):
-                return False
-            data, _ = self._audio._input_stream.read(512)
-            energy = np.abs(data).mean()
-            if energy > self.app.config.barge_in_energy_threshold:
-                logger.debug(f"Barge-in energy: {energy:.4f}")
-                return True
-        except Exception:
-            pass
-        return False
-
-    # -- TTS playback --
-
-    async def _speak(self, text: str) -> None:
+    async def _speak_interruptible(self, text: str) -> bool:
+        """Synthesize and play one sentence. Returns True if interrupted."""
         if not text.strip():
-            return
+            return False
 
         clean_text = text.replace("**", "").replace("*", "").replace("`", "")
-        temp_audio_path: str | None = None
 
+        # Use streaming TTS if backend supports it
+        if self._tts.supports_streaming:
+            return await self._speak_streaming_tts(clean_text)
+
+        return await self._speak_batch_tts(clean_text)
+
+    async def _speak_streaming_tts(self, text: str) -> bool:
+        """Stream TTS: play audio chunks as they arrive from the backend."""
         try:
-            logger.info(f"TTS: generating speech ({len(clean_text)} chars)...")
-            temp_audio_path = await self._tts.synthesize(clean_text)
+            logger.info(f"TTS stream: generating speech ({len(text)} chars)...")
+
+            if self.app.reachy and hasattr(self.app.reachy, "media"):
+                reachy = self.app.reachy
+                reachy.media.start_playing()
+                if self._wobbler:
+                    self._wobbler.start()
+
+                try:
+                    async for chunk, sr in self._tts.synthesize_streaming(text):
+                        if self._interrupt_event.is_set():
+                            reachy.media.stop_playing()
+                            return True
+                        reachy.media.push_audio_sample(chunk)
+                        if self._wobbler:
+                            self._wobbler.feed(chunk)
+                        await asyncio.sleep(len(chunk) / sr * 0.9)
+                finally:
+                    if self._wobbler:
+                        self._wobbler.reset()
+                    reachy.set_target_antenna_joint_positions([0.0, 0.0])
+                    await asyncio.sleep(0.3)
+                    reachy.media.stop_playing()
+                return False
+            else:
+                # Local playback: collect all streaming chunks, write to temp file, play
+                all_chunks = []
+                sample_rate = 16000
+                async for chunk, sr in self._tts.synthesize_streaming(text):
+                    if self._interrupt_event.is_set():
+                        return True
+                    all_chunks.append(chunk)
+                    sample_rate = sr
+
+                if not all_chunks:
+                    return False
+
+                audio = np.concatenate(all_chunks)
+                temp_path = self._write_temp_wav(audio, sample_rate)
+                try:
+                    return await self._play_local_interruptible(temp_path)
+                finally:
+                    try:
+                        os.unlink(temp_path)
+                    except FileNotFoundError:
+                        pass
+
+        except Exception as e:
+            logger.error(f"TTS streaming failed: {e}")
+            logger.info(f"[TTS] {text}")
+            return False
+
+    async def _speak_batch_tts(self, text: str) -> bool:
+        """Batch TTS: synthesize full file, then play."""
+        temp_audio_path: str | None = None
+        try:
+            logger.info(f"TTS: generating speech ({len(text)} chars)...")
+            temp_audio_path = await self._tts.synthesize(text)
+
+            if self._interrupt_event.is_set():
+                return True
 
             if self.app.reachy and hasattr(self.app.reachy, "media"):
                 try:
-                    await self._play_on_reachy(temp_audio_path)
+                    return await self._play_on_reachy_interruptible(temp_audio_path)
                 except Exception as e:
                     logger.error(f"Reachy playback failed: {e}")
-                    self._play_local_fallback(temp_audio_path)
+                    return await self._play_local_interruptible(temp_audio_path)
             else:
-                self._play_local_fallback(temp_audio_path)
+                return await self._play_local_interruptible(temp_audio_path)
 
         except Exception as e:
             logger.error(f"TTS failed: {e}")
             logger.info(f"[TTS] {text}")
+            return False
         finally:
             if temp_audio_path:
                 try:
@@ -394,7 +624,32 @@ class ConversationPlugin(Plugin):
                 except FileNotFoundError:
                     pass
 
-    async def _play_on_reachy(self, audio_path: str) -> None:
+    @staticmethod
+    def _write_temp_wav(audio: np.ndarray, sample_rate: int) -> str:
+        """Write float32 audio to a temporary WAV file."""
+        import struct
+        import tempfile
+
+        audio_int = (audio * 32767).astype(np.int16)
+        tmp = tempfile.NamedTemporaryFile(
+            prefix="clawd_stream_", suffix=".wav", delete=False
+        )
+        data_bytes = audio_int.tobytes()
+        # Write WAV header + data
+        tmp.write(b"RIFF")
+        tmp.write(struct.pack("<I", 36 + len(data_bytes)))
+        tmp.write(b"WAVE")
+        tmp.write(b"fmt ")
+        tmp.write(struct.pack("<I", 16))
+        tmp.write(struct.pack("<HHIIHH", 1, 1, sample_rate, sample_rate * 2, 2, 16))
+        tmp.write(b"data")
+        tmp.write(struct.pack("<I", len(data_bytes)))
+        tmp.write(data_bytes)
+        tmp.close()
+        return tmp.name
+
+    async def _play_on_reachy_interruptible(self, audio_path: str) -> bool:
+        """Play on Reachy with 100ms chunk granularity interrupt checks."""
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as wf:
             temp_wav_path = wf.name
 
@@ -419,19 +674,22 @@ class ConversationPlugin(Plugin):
             reachy = self.app.reachy
             reachy.media.start_playing()
 
-            # Start wobbler if available
             if self._wobbler:
                 self._wobbler.start()
 
             sample_rate = 16000
             chunk_size = 1600  # 100ms chunks
             chunk_duration = chunk_size / sample_rate
+            interrupted = False
 
             for i in range(0, len(audio_float), chunk_size):
+                if self._interrupt_event.is_set():
+                    interrupted = True
+                    break
+
                 chunk = audio_float[i : i + chunk_size]
                 reachy.media.push_audio_sample(chunk)
 
-                # Feed audio to wobbler for speech animation
                 if self._wobbler:
                     self._wobbler.feed(chunk)
 
@@ -441,16 +699,79 @@ class ConversationPlugin(Plugin):
                 self._wobbler.reset()
 
             reachy.set_target_antenna_joint_positions([0.0, 0.0])
-            await asyncio.sleep(0.3)
+            if not interrupted:
+                await asyncio.sleep(0.3)
             reachy.media.stop_playing()
+            return interrupted
         finally:
             try:
                 os.unlink(temp_wav_path)
             except FileNotFoundError:
                 pass
 
-    def _play_local_fallback(self, audio_path: str) -> None:
+    async def _play_local_interruptible(self, audio_path: str) -> bool:
+        """Play locally via subprocess with interrupt support."""
         try:
-            subprocess.run(["afplay", audio_path], capture_output=True)
+            proc = await asyncio.create_subprocess_exec(
+                "afplay", audio_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+
+            while proc.returncode is None:
+                if self._interrupt_event.is_set():
+                    proc.kill()
+                    await proc.wait()
+                    return True
+                # Poll every 100ms
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    pass
+
+            return False
         except FileNotFoundError:
             logger.warning("No local audio player available")
+            return False
+
+    # ── Single-shot speak (for task_completed notifications) ──────────
+
+    async def _speak_single(self, text: str) -> None:
+        """Speak a single utterance without the pipeline (for notifications)."""
+        if not text.strip():
+            return
+
+        clean_text = text.replace("**", "").replace("*", "").replace("`", "")
+        temp_audio_path: str | None = None
+
+        try:
+            temp_audio_path = await self._tts.synthesize(clean_text)
+
+            if self.app.reachy and hasattr(self.app.reachy, "media"):
+                try:
+                    await self._play_on_reachy_interruptible(temp_audio_path)
+                except Exception as e:
+                    logger.error(f"Reachy playback failed: {e}")
+                    await self._play_local_interruptible(temp_audio_path)
+            else:
+                await self._play_local_interruptible(temp_audio_path)
+        except Exception as e:
+            logger.error(f"TTS failed: {e}")
+        finally:
+            if temp_audio_path:
+                try:
+                    os.unlink(temp_audio_path)
+                except FileNotFoundError:
+                    pass
+
+
+# ── Helpers ───────────────────────────────────────────────────────────
+
+
+def _drain_queue(q: asyncio.Queue) -> None:
+    """Drain all items from a queue without blocking."""
+    while not q.empty():
+        try:
+            q.get_nowait()
+        except asyncio.QueueEmpty:
+            break

@@ -1,4 +1,4 @@
-"""Tests for the ConversationPlugin (STT->gateway->TTS loop)."""
+"""Tests for the ConversationPlugin (dual-pipeline architecture)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,12 @@ import numpy as np
 import pytest
 
 from clawd_reachy_mini.config import Config
-from clawd_reachy_mini.plugins.conversation_plugin import ConversationPlugin
+from clawd_reachy_mini.plugins.conversation_plugin import (
+    ConversationPlugin,
+    ConvState,
+    SentenceItem,
+    _drain_queue,
+)
 
 
 @pytest.fixture
@@ -31,126 +36,227 @@ def standalone_app(mock_reachy):
     return a
 
 
-# ── Stream text queue processing ───────────────────────────────────────
+# ── ConvState enum ────────────────────────────────────────────────────
 
 
-class TestSpeakStreaming:
+class TestConvState:
+    def test_all_states_exist(self):
+        assert ConvState.IDLE.value == "idle"
+        assert ConvState.LISTENING.value == "listening"
+        assert ConvState.TRANSCRIBING.value == "transcribing"
+        assert ConvState.THINKING.value == "thinking"
+        assert ConvState.SPEAKING.value == "speaking"
+
+
+# ── SentenceItem ──────────────────────────────────────────────────────
+
+
+class TestSentenceItem:
+    def test_defaults(self):
+        item = SentenceItem(text="Hello.")
+        assert item.text == "Hello."
+        assert item.is_last is False
+
+    def test_is_last(self):
+        item = SentenceItem(text="Done.", is_last=True)
+        assert item.is_last is True
+
+
+# ── drain_queue helper ────────────────────────────────────────────────
+
+
+class TestDrainQueue:
     @pytest.mark.asyncio
-    async def test_collects_chunks_and_speaks(self, standalone_app):
+    async def test_drains_all_items(self):
+        q: asyncio.Queue[str] = asyncio.Queue()
+        await q.put("a")
+        await q.put("b")
+        await q.put("c")
+        _drain_queue(q)
+        assert q.empty()
+
+    @pytest.mark.asyncio
+    async def test_noop_on_empty_queue(self):
+        q: asyncio.Queue[str] = asyncio.Queue()
+        _drain_queue(q)
+        assert q.empty()
+
+
+# ── Sentence accumulator ─────────────────────────────────────────────
+
+
+class TestSentenceAccumulator:
+    @pytest.mark.asyncio
+    async def test_splits_on_period(self, standalone_app):
         plugin = ConversationPlugin(standalone_app)
+        plugin._running = True
+
+        await plugin._stream_text_queue.put("Hello world. ")
+        await plugin._stream_text_queue.put("How are you?")
+        await plugin._stream_text_queue.put(None)
+
+        # Run accumulator briefly
+        task = asyncio.create_task(plugin._sentence_accumulator())
+        await asyncio.sleep(0.15)
+        plugin._running = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        sentences = []
+        while not plugin._sentence_queue.empty():
+            sentences.append(plugin._sentence_queue.get_nowait())
+
+        # Should get at least "Hello world." and "How are you?" (or combined final)
+        texts = [s.text for s in sentences if s.text]
+        assert any("Hello world" in t for t in texts)
+
+    @pytest.mark.asyncio
+    async def test_flushes_buffer_on_stream_end(self, standalone_app):
+        plugin = ConversationPlugin(standalone_app)
+        plugin._running = True
+
+        await plugin._stream_text_queue.put("Short")
+        await plugin._stream_text_queue.put(None)
+
+        task = asyncio.create_task(plugin._sentence_accumulator())
+        await asyncio.sleep(0.15)
+        plugin._running = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        sentences = []
+        while not plugin._sentence_queue.empty():
+            sentences.append(plugin._sentence_queue.get_nowait())
+
+        # "Short" is too short for sentence split, should flush as is_last
+        assert any(s.is_last for s in sentences)
+        assert any("Short" in s.text for s in sentences)
+
+
+# ── Output pipeline ──────────────────────────────────────────────────
+
+
+class TestOutputPipeline:
+    @pytest.mark.asyncio
+    async def test_speaks_sentences(self, standalone_app):
+        plugin = ConversationPlugin(standalone_app)
+        plugin._running = True
         spoken = []
 
         async def mock_speak(text):
             spoken.append(text)
+            return False
 
-        plugin._speak = mock_speak
-        plugin._audio = MagicMock()
-        plugin._audio._running = False
+        plugin._speak_interruptible = mock_speak
 
-        # Pre-fill the stream queue with deltas and end signal
-        await plugin._stream_text_queue.put("Hello ")
-        await plugin._stream_text_queue.put("world. ")
-        await plugin._stream_text_queue.put("How are you?")
-        await plugin._stream_text_queue.put(None)  # end of stream
+        await plugin._sentence_queue.put(SentenceItem(text="Hello world."))
+        await plugin._sentence_queue.put(SentenceItem(text="Done.", is_last=True))
 
-        result = await plugin._speak_streaming()
+        task = asyncio.create_task(plugin._output_pipeline())
+        await asyncio.sleep(0.15)
+        plugin._running = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
-        assert "Hello world" in result
-        assert "How are you" in result
-        assert len(spoken) >= 1
+        assert "Hello world." in spoken
+        assert "Done." in spoken
 
     @pytest.mark.asyncio
-    async def test_speaks_sentence_boundary(self, standalone_app):
+    async def test_interrupt_drains_queue(self, standalone_app):
         plugin = ConversationPlugin(standalone_app)
-        sentences_spoken = []
+        plugin._running = True
+        spoken = []
 
         async def mock_speak(text):
-            sentences_spoken.append(text)
+            spoken.append(text)
+            # Simulate interrupt after first sentence
+            plugin._interrupt_event.set()
+            return True
 
-        plugin._speak = mock_speak
-        plugin._audio = MagicMock()
-        plugin._audio._running = False
+        plugin._speak_interruptible = mock_speak
 
-        await plugin._stream_text_queue.put("First sentence. ")
-        await plugin._stream_text_queue.put("Second! ")
-        await plugin._stream_text_queue.put("Third?")
-        await plugin._stream_text_queue.put(None)
+        await plugin._sentence_queue.put(SentenceItem(text="First."))
+        await plugin._sentence_queue.put(SentenceItem(text="Second."))
+        await plugin._sentence_queue.put(SentenceItem(text="Third.", is_last=True))
 
-        await plugin._speak_streaming()
+        task = asyncio.create_task(plugin._output_pipeline())
+        await asyncio.sleep(0.15)
+        plugin._running = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
-        # Should speak at sentence boundaries
-        assert len(sentences_spoken) >= 2
+        # Only first sentence spoken, rest drained
+        assert len(spoken) == 1
+        assert spoken[0] == "First."
 
     @pytest.mark.asyncio
     async def test_sets_is_speaking_flag(self, standalone_app):
         plugin = ConversationPlugin(standalone_app)
+        plugin._running = True
         speaking_during = []
 
         async def mock_speak(text):
             speaking_during.append(standalone_app.is_speaking)
+            return False
 
-        plugin._speak = mock_speak
-        plugin._audio = MagicMock()
-        plugin._audio._running = False
+        plugin._speak_interruptible = mock_speak
 
-        await plugin._stream_text_queue.put("Hello world. ")
-        await plugin._stream_text_queue.put(None)
+        await plugin._sentence_queue.put(SentenceItem(text="Hello.", is_last=True))
 
-        assert standalone_app.is_speaking is False
-        await plugin._speak_streaming()
+        task = asyncio.create_task(plugin._output_pipeline())
+        await asyncio.sleep(0.15)
+        plugin._running = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert any(s is True for s in speaking_during)
         # After done, is_speaking should be reset
         assert standalone_app.is_speaking is False
-        # During speech, is_speaking should have been True
-        assert any(s is True for s in speaking_during)
 
     @pytest.mark.asyncio
-    async def test_timeout_on_no_data(self, standalone_app):
+    async def test_empty_is_last_finishes_speaking(self, standalone_app):
         plugin = ConversationPlugin(standalone_app)
-        plugin._tts = MagicMock()
-        plugin._tts.synthesize = AsyncMock(return_value="/dev/null")
-        plugin._audio = MagicMock()
-        plugin._audio._running = False
+        plugin._running = True
+        plugin._state = ConvState.SPEAKING
+        plugin.app.is_speaking = True
 
-        # Don't put anything in the queue - should timeout after 60s
-        # We'll use a shorter test by putting None after a delay
-        async def delayed_end():
-            await asyncio.sleep(0.05)
-            await plugin._stream_text_queue.put(None)
+        await plugin._sentence_queue.put(SentenceItem(text="", is_last=True))
 
-        asyncio.create_task(delayed_end())
-        result = await plugin._speak_streaming()
-        assert result == ""
+        task = asyncio.create_task(plugin._output_pipeline())
+        await asyncio.sleep(0.15)
+        plugin._running = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
-
-# ── Barge-in detection ─────────────────────────────────────────────────
-
-
-class TestBargeIn:
-    def test_barge_in_disabled(self, standalone_app):
-        standalone_app.config.barge_in_enabled = False
-        plugin = ConversationPlugin(standalone_app)
-        assert plugin._was_barged_in() is False
-
-    def test_barge_in_no_audio(self, standalone_app):
-        plugin = ConversationPlugin(standalone_app)
-        plugin._audio = None
-        assert plugin._was_barged_in() is False
-
-    def test_barge_in_audio_not_running(self, standalone_app):
-        plugin = ConversationPlugin(standalone_app)
-        plugin._audio = MagicMock()
-        plugin._audio._running = False
-        assert plugin._was_barged_in() is False
+        assert standalone_app.is_speaking is False
+        assert plugin._state == ConvState.IDLE
 
 
-# ── Callback wiring ────────────────────────────────────────────────────
+# ── Callback wiring ──────────────────────────────────────────────────
 
 
 class TestCallbacks:
     @pytest.mark.asyncio
     async def test_stream_start_drains_queue(self, standalone_app):
         plugin = ConversationPlugin(standalone_app)
-        # Pre-fill queue with stale data
         await plugin._stream_text_queue.put("stale")
         await plugin._stream_text_queue.put("data")
 
@@ -158,14 +264,17 @@ class TestCallbacks:
 
         assert plugin._current_run_id == "run-1"
         assert plugin._stream_text_queue.empty()
+        assert plugin._state == ConvState.THINKING
 
     @pytest.mark.asyncio
     async def test_stream_delta_puts_text(self, standalone_app):
         plugin = ConversationPlugin(standalone_app)
+        plugin._state = ConvState.THINKING
         await plugin._on_stream_delta("hello", "run-1")
 
         text = plugin._stream_text_queue.get_nowait()
         assert text == "hello"
+        assert plugin._state == ConvState.SPEAKING
 
     @pytest.mark.asyncio
     async def test_stream_end_puts_none(self, standalone_app):
@@ -184,13 +293,63 @@ class TestCallbacks:
         assert sentinel is None
 
 
-# ── Emotion queueing from conversation ─────────────────────────────────
+# ── Fire interrupt ────────────────────────────────────────────────────
+
+
+class TestFireInterrupt:
+    @pytest.mark.asyncio
+    async def test_sets_event_and_drains_queues(self, standalone_app):
+        plugin = ConversationPlugin(standalone_app)
+        plugin.app.is_speaking = True
+
+        await plugin._stream_text_queue.put("some text")
+        await plugin._sentence_queue.put(SentenceItem(text="sentence"))
+
+        await plugin._fire_interrupt()
+
+        assert plugin._interrupt_event.is_set()
+        assert plugin._stream_text_queue.empty()
+        assert plugin._sentence_queue.empty()
+        assert plugin.app.is_speaking is False
+
+    @pytest.mark.asyncio
+    async def test_sends_interrupt_to_gateway(self, standalone_app):
+        standalone_app.config.standalone_mode = False
+        plugin = ConversationPlugin(standalone_app)
+        plugin._client = MagicMock()
+        plugin._client.send_interrupt = AsyncMock()
+
+        await plugin._fire_interrupt()
+
+        plugin._client.send_interrupt.assert_called_once()
+
+
+# ── State transitions ─────────────────────────────────────────────────
+
+
+class TestStateTransitions:
+    def test_initial_state_is_idle(self, standalone_app):
+        plugin = ConversationPlugin(standalone_app)
+        assert plugin._state == ConvState.IDLE
+
+    def test_set_state_logs_transition(self, standalone_app):
+        plugin = ConversationPlugin(standalone_app)
+        plugin._set_state(ConvState.LISTENING)
+        assert plugin._state == ConvState.LISTENING
+
+    def test_set_state_noop_on_same(self, standalone_app):
+        plugin = ConversationPlugin(standalone_app)
+        plugin._state = ConvState.SPEAKING
+        plugin._set_state(ConvState.SPEAKING)
+        assert plugin._state == ConvState.SPEAKING
+
+
+# ── Emotion queueing ─────────────────────────────────────────────────
 
 
 class TestEmotionIntegration:
     @pytest.mark.asyncio
     async def test_thinking_emotion_queued_on_send(self, standalone_app):
-        """When not in standalone mode, sending to AI queues 'thinking'."""
         standalone_app.config.standalone_mode = False
         standalone_app.config.play_emotions = True
 
@@ -199,13 +358,6 @@ class TestEmotionIntegration:
         plugin._client.send_message_streaming = AsyncMock()
         plugin._client.send_state_change = AsyncMock()
 
-        # Mock _speak_streaming to return quickly
-        async def mock_stream():
-            return "response"
-
-        plugin._speak_streaming = mock_stream
-
-        # Simulate the sending part of _conversation_turn
         standalone_app.emotions.queue_emotion("thinking")
 
         expr = standalone_app.emotions.get_next_expression()
@@ -213,7 +365,7 @@ class TestEmotionIntegration:
         assert "hinking" in expr.description.lower()
 
 
-# ── Stop / cleanup ─────────────────────────────────────────────────────
+# ── Stop / cleanup ────────────────────────────────────────────────────
 
 
 class TestConversationCleanup:
@@ -232,3 +384,16 @@ class TestConversationCleanup:
         plugin._audio.stop.assert_called_once()
         plugin._client.disconnect.assert_called_once()
         plugin._tts.cleanup.assert_called_once()
+
+
+# ── Config: barge_in_confirm_frames ───────────────────────────────────
+
+
+class TestBargeInConfig:
+    def test_default_confirm_frames(self):
+        config = Config()
+        assert config.barge_in_confirm_frames == 3
+
+    def test_custom_confirm_frames(self):
+        config = Config(barge_in_confirm_frames=5)
+        assert config.barge_in_confirm_frames == 5

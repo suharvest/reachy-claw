@@ -56,6 +56,7 @@ class AudioCapture:
     async def start(self) -> None:
         """Start audio capture."""
         self._running = True
+        self._continuous = False
         if self._device_id is not None:
             logger.info(f"Audio capture started (device: {self.config.audio_device}, id: {self._device_id})")
         else:
@@ -67,9 +68,41 @@ class AudioCapture:
             except Exception:
                 pass
 
+    async def start_continuous(self) -> None:
+        """Open mic stream and keep it running for continuous read_chunk() calls."""
+        self._running = True
+        self._continuous = True
+        if self._device_id is None and self.reachy and hasattr(self.reachy, "media"):
+            self.reachy.media.start_recording()
+            logger.info("Started continuous Reachy media recording")
+        else:
+            # Pre-open the local mic stream
+            await self._read_local_mic(1024)
+            logger.info("Started continuous local mic capture")
+
+    async def read_chunk(self, frames: int = 1024) -> np.ndarray | None:
+        """Read one audio chunk. Non-blocking (uses asyncio.to_thread)."""
+        if not self._running:
+            return None
+
+        if self._device_id is not None:
+            return await self._read_local_mic(frames)
+        elif self.reachy and hasattr(self.reachy, "media"):
+            chunk = await asyncio.to_thread(self.reachy.media.get_audio_sample)
+            if chunk is not None and not isinstance(chunk, np.ndarray):
+                chunk = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+            return chunk
+        else:
+            return await self._read_local_mic(frames)
+
     async def stop(self) -> None:
         """Stop audio capture."""
         self._running = False
+        if getattr(self, '_continuous', False) and self.reachy and hasattr(self.reachy, "media"):
+            try:
+                self.reachy.media.stop_recording()
+            except Exception:
+                pass
         self._close_input_stream()
         logger.info("Audio capture stopped")
 

@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 class TTSBackend(ABC):
     """Abstract base class for text-to-speech backends."""
 
+    supports_streaming: bool = False
+
     @abstractmethod
     async def synthesize(self, text: str) -> str:
         """Synthesize speech from text.
@@ -24,6 +26,28 @@ class TTSBackend(ABC):
             Path to a temporary audio file (WAV or MP3). Caller is
             responsible for deleting it after playback.
         """
+
+    async def synthesize_streaming(self, text: str):
+        """Yield (np.ndarray chunk, sample_rate) tuples as audio is generated.
+
+        Override in backends that support streaming. Default falls back to
+        batch synthesize + yield the whole thing at once.
+        """
+        import numpy as np
+        import wave
+
+        path = await self.synthesize(text)
+        try:
+            with wave.open(path, "rb") as wf:
+                sr = wf.getframerate()
+                data = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+                audio = data.astype(np.float32) / 32768.0
+            yield audio, sr
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
 
     def cleanup(self) -> None:
         """Release any resources held by the backend."""
@@ -147,18 +171,34 @@ class KokoroTTS(TTSBackend):
     """Remote Kokoro TTS via Jetson speech service (sherpa-onnx, CUDA)."""
 
     class Settings:
-        speaker_id: int = 50
+        speaker_id: int = 3
         speed: float = 1.0
 
     def __init__(
         self,
         base_url: str = "http://localhost:8000",
-        speaker_id: int = 50,
+        speaker_id: int = 3,
         speed: float = 1.0,
     ):
         self._base_url = base_url.rstrip("/")
         self._speaker_id = speaker_id
         self._speed = speed
+        self._check_streaming_support()
+
+    def _check_streaming_support(self) -> None:
+        """Probe server for /tts/stream endpoint at init time."""
+        import urllib.request
+
+        try:
+            req = urllib.request.Request(
+                f"{self._base_url}/tts/stream", method="OPTIONS"
+            )
+            urllib.request.urlopen(req, timeout=3)
+            self.supports_streaming = True
+            logger.info("Kokoro TTS: streaming endpoint available")
+        except Exception:
+            self.supports_streaming = False
+            logger.info("Kokoro TTS: using batch mode (no /tts/stream)")
 
     async def synthesize(self, text: str) -> str:
         import json
@@ -185,6 +225,45 @@ class KokoroTTS(TTSBackend):
         tmp.write(wav_bytes)
         tmp.close()
         return tmp.name
+
+    async def synthesize_streaming(self, text: str):
+        """Stream PCM chunks from Jetson /tts/stream endpoint."""
+        import asyncio
+        import json
+        import struct
+        import urllib.request
+
+        import numpy as np
+
+        payload = json.dumps({
+            "text": text,
+            "sid": self._speaker_id,
+            "speed": self._speed,
+        }).encode()
+
+        req = urllib.request.Request(
+            f"{self._base_url}/tts/stream",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        resp = await asyncio.to_thread(urllib.request.urlopen, req, 30)
+
+        # Read sample_rate from first 4 bytes (little-endian uint32)
+        sr_bytes = resp.read(4)
+        if len(sr_bytes) < 4:
+            return
+        sample_rate = struct.unpack("<I", sr_bytes)[0]
+
+        # Read 16-bit PCM chunks (4096 samples = ~256ms at 16kHz)
+        chunk_bytes_size = 4096 * 2  # 4096 int16 samples
+        while True:
+            raw = resp.read(chunk_bytes_size)
+            if not raw:
+                break
+            audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            yield audio, sample_rate
 
 
 def create_tts_backend(
