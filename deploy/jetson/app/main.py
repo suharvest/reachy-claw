@@ -26,20 +26,20 @@ class TTSRequest(BaseModel):
 
 @app.on_event("startup")
 async def startup():
-    import asr_service, tts_service
-
-    logger.info("Pre-loading ASR model...")
-    asr_service.get_recognizer()
+    import tts_service
 
     logger.info("Pre-loading TTS model...")
     tts_service.preload()
 
-    # Try to preload streaming ASR (optional — model may not be installed)
+    # Pre-load streaming ASR (primary ASR backend)
     try:
         import streaming_asr_service
         streaming_asr_service.preload()
     except Exception as e:
         logger.info(f"Streaming ASR not available: {e}")
+
+    # SenseVoice (offline ASR) is lazy-loaded on first /asr request
+    # to avoid wasting GPU memory when only streaming is used.
 
     logger.info("Speech service ready.")
 
