@@ -10,8 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libasound2 libsndfile1 sox patchelf \
     && rm -rf /var/lib/apt/lists/*
 
-# FastAPI stack
-RUN pip3 install --no-cache-dir \
+# FastAPI stack (use PyPI explicitly; base image may set a custom index)
+RUN pip3 install --no-cache-dir --index-url https://pypi.org/simple \
     fastapi \
     "uvicorn[standard]" \
     soundfile \
@@ -23,7 +23,7 @@ RUN pip3 install --no-cache-dir \
 # We patch it below to use the system's onnxruntime 1.20.0 (CUDA 12.6).
 ARG SHERPA_ONNX_VERSION=1.12.28
 ARG SHERPA_WHEEL_URL=https://huggingface.co/csukuangfj2/sherpa-onnx-wheels/resolve/main/cuda/${SHERPA_ONNX_VERSION}/sherpa_onnx-${SHERPA_ONNX_VERSION}+cuda-cp310-cp310-linux_aarch64.whl
-RUN pip3 install --no-cache-dir "${SHERPA_WHEEL_URL}" \
+RUN pip3 install --no-cache-dir --index-url https://pypi.org/simple "${SHERPA_WHEEL_URL}" \
     || { echo "Download failed. Place wheel in wheels/ and rebuild with:" ; \
          echo "  COPY wheels/*.whl /tmp/" ; \
          echo "  RUN pip3 install /tmp/*.whl" ; \
