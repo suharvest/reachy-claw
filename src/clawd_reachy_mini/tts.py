@@ -285,8 +285,8 @@ class KokoroTTS(TTSBackend):
             return
         sample_rate = struct.unpack("<I", sr_bytes)[0]
 
-        # Read 16-bit PCM chunks (4096 samples = ~256ms at 16kHz)
-        chunk_bytes_size = 4096 * 2  # 4096 int16 samples
+        # Read 16-bit PCM chunks (1024 samples = ~64ms at 16kHz for low TTFC)
+        chunk_bytes_size = 1024 * 2  # 1024 int16 samples
         while True:
             raw = await asyncio.to_thread(resp.read, chunk_bytes_size)
             if not raw:

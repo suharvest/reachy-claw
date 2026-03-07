@@ -348,7 +348,22 @@ class ConversationPlugin(Plugin):
                 if streaming_stt:
                     partial = await asyncio.to_thread(self._stt.feed_chunk, chunk)
                     if partial and partial.text:
-                        logger.debug(f"Partial: \"{partial.text}\" (stable={partial.is_stable})")
+                        logger.debug(f"Partial: \"{partial.text}\" (final={partial.is_final}, stable={partial.is_stable})")
+                        # If ASR sent is_final, skip silence wait and process immediately
+                        if partial.is_final:
+                            logger.info("ASR is_final received — skipping silence wait")
+                            self._set_state(ConvState.TRANSCRIBING)
+                            text = await asyncio.to_thread(self._stt.finish_stream)
+                            speech_frames = []
+                            silence_count = 0
+                            barge_in_count = 0
+                            if self._vad:
+                                self._vad.reset()
+                            self._spawn_task(
+                                self._process_and_send(text),
+                                name="conversation.process_and_send",
+                            )
+                            continue
 
             elif self._state == ConvState.LISTENING:
                 silence_count += 1
@@ -470,10 +485,13 @@ class ConversationPlugin(Plugin):
         }
         buffer = ""
         last_chunk_ts = time.monotonic()
-        flush_timeout_s = 0.35
-        flush_min_chars = 24
+        first_sentence_emitted = False
 
         while self._running:
+            # Use aggressive thresholds for first sentence (get TTS started fast)
+            flush_timeout_s = 0.15 if not first_sentence_emitted else 0.35
+            flush_min_chars = 8 if not first_sentence_emitted else 24
+
             try:
                 chunk = await asyncio.wait_for(
                     self._stream_text_queue.get(), timeout=0.1
@@ -486,6 +504,7 @@ class ConversationPlugin(Plugin):
                 ):
                     await self._sentence_queue.put(SentenceItem(text=buffer.strip()))
                     buffer = ""
+                    first_sentence_emitted = True
                 continue
 
             if chunk is None:
@@ -499,6 +518,7 @@ class ConversationPlugin(Plugin):
                         SentenceItem(text="", is_last=True)
                     )
                 buffer = ""
+                first_sentence_emitted = False
                 continue
 
             buffer += chunk
@@ -520,6 +540,7 @@ class ConversationPlugin(Plugin):
 
                 if sentence:
                     await self._sentence_queue.put(SentenceItem(text=sentence))
+                    first_sentence_emitted = True
 
     # ── Pipeline task 3: Output pipeline (TTS + playback) ────────────
 

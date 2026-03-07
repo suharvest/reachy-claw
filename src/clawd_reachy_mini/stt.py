@@ -418,6 +418,11 @@ class ParaformerStreamingSTT(STTBackend):
             return self._final_text or self._partial_text
 
         try:
+            # Short-circuit: if we already have a final result from feed_chunk,
+            # skip the EOF round-trip to save ~40-110ms
+            if self._final_text:
+                return self._final_text
+
             # Send empty bytes to signal end of audio
             self._ws.send(b"")
 

@@ -63,7 +63,7 @@ class Config:
     audio_device: str | None = None
     sample_rate: int = 16000
     silence_threshold: float = 0.01
-    silence_duration: float = 1.5
+    silence_duration: float = 0.7
     max_recording_duration: float = 30.0
 
     # Gateway session
