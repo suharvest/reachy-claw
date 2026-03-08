@@ -296,13 +296,21 @@ async def async_main(config: Config) -> int:
 
     app.register(ConversationPlugin(app))
 
-    # Handle shutdown signals
+    # Handle shutdown signals (first = graceful, second = force)
     loop = asyncio.get_running_loop()
     shutdown_event = asyncio.Event()
+    _sig_count = 0
 
     def signal_handler():
-        logging.info("Shutdown signal received")
-        shutdown_event.set()
+        nonlocal _sig_count
+        _sig_count += 1
+        if _sig_count == 1:
+            logging.info("Shutdown signal received")
+            shutdown_event.set()
+        else:
+            logging.info("Force shutdown")
+            import os
+            os._exit(1)
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, signal_handler)
@@ -319,15 +327,18 @@ async def async_main(config: Config) -> int:
         for task in pending:
             task.cancel()
             try:
-                await task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(asyncio.shield(task), timeout=3.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
 
     except Exception as e:
         logging.error(f"Fatal error: {e}")
         return 1
     finally:
-        await app.shutdown()
+        try:
+            await asyncio.wait_for(app.shutdown(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logging.warning("Shutdown timed out after 5s")
 
     return 0
 
