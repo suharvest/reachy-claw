@@ -155,8 +155,8 @@ class TestOutputPipeline:
 
         plugin._speak_interruptible = mock_speak
 
-        await plugin._sentence_queue.put(SentenceItem(text="Hello world."))
-        await plugin._sentence_queue.put(SentenceItem(text="Done.", is_last=True))
+        await plugin._audio_queue.put((SentenceItem(text="Hello world."), None))
+        await plugin._audio_queue.put((SentenceItem(text="Done.", is_last=True), None))
 
         task = asyncio.create_task(plugin._output_pipeline())
         await asyncio.sleep(0.15)
@@ -184,9 +184,9 @@ class TestOutputPipeline:
 
         plugin._speak_interruptible = mock_speak
 
-        await plugin._sentence_queue.put(SentenceItem(text="First."))
-        await plugin._sentence_queue.put(SentenceItem(text="Second."))
-        await plugin._sentence_queue.put(SentenceItem(text="Third.", is_last=True))
+        await plugin._audio_queue.put((SentenceItem(text="First."), None))
+        await plugin._audio_queue.put((SentenceItem(text="Second."), None))
+        await plugin._audio_queue.put((SentenceItem(text="Third.", is_last=True), None))
 
         task = asyncio.create_task(plugin._output_pipeline())
         await asyncio.sleep(0.15)
@@ -213,7 +213,7 @@ class TestOutputPipeline:
 
         plugin._speak_interruptible = mock_speak
 
-        await plugin._sentence_queue.put(SentenceItem(text="Hello.", is_last=True))
+        await plugin._audio_queue.put((SentenceItem(text="Hello.", is_last=True), None))
 
         task = asyncio.create_task(plugin._output_pipeline())
         await asyncio.sleep(0.15)
@@ -235,7 +235,7 @@ class TestOutputPipeline:
         plugin._state = ConvState.SPEAKING
         plugin.app.is_speaking = True
 
-        await plugin._sentence_queue.put(SentenceItem(text="", is_last=True))
+        await plugin._audio_queue.put((SentenceItem(text="", is_last=True), None))
 
         task = asyncio.create_task(plugin._output_pipeline())
         await asyncio.sleep(0.15)
@@ -316,12 +316,14 @@ class TestFireInterrupt:
 
         await plugin._stream_text_queue.put("some text")
         await plugin._sentence_queue.put(SentenceItem(text="sentence"))
+        await plugin._audio_queue.put((SentenceItem(text="audio"), None))
 
         await plugin._fire_interrupt()
 
         assert plugin._interrupt_event.is_set()
         assert plugin._stream_text_queue.empty()
         assert plugin._sentence_queue.empty()
+        assert plugin._audio_queue.empty()
         assert plugin.app.is_speaking is False
 
     @pytest.mark.asyncio

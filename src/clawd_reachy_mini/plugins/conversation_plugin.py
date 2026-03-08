@@ -66,9 +66,11 @@ class ConversationPlugin(Plugin):
         self._wake_detector: WakeWordDetector | None = None
         self._wobbler: HeadWobbler | None = None
 
-        # Queues connecting the three pipeline stages
+        # Queues connecting the four pipeline stages
         self._stream_text_queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._sentence_queue: asyncio.Queue[SentenceItem | None] = asyncio.Queue()
+        # Audio queue: (SentenceItem, list_of_chunks | None) — TTS worker feeds this
+        self._audio_queue: asyncio.Queue[tuple[SentenceItem, list | None] | None] = asyncio.Queue(maxsize=3)
         self._interrupt_event = asyncio.Event()
 
         self._current_run_id: str | None = None
@@ -118,14 +120,24 @@ class ConversationPlugin(Plugin):
         # Connect to OpenClaw
         if not config.standalone_mode:
             self._client = DesktopRobotClient(config)
-            self._setup_callbacks()
             await self._client.connect()
 
-            # Warm up the session to avoid cold-start latency on first real message
+            # Warm up gateway + TTS in parallel (callbacks NOT yet wired,
+            # so the warmup response won't be spoken)
+            warmup_tasks = []
             if config.gateway_warmup:
-                await self._client.warmup_session()
+                warmup_tasks.append(self._client.warmup_session())
+            if self._tts:
+                warmup_tasks.append(self._warmup_tts())
+            if warmup_tasks:
+                await asyncio.gather(*warmup_tasks, return_exceptions=True)
+
+            # NOW wire callbacks — only real user messages will be spoken
+            self._setup_callbacks()
         else:
             logger.info("Running in standalone mode - no server connection")
+            if self._tts:
+                await self._warmup_tts()
 
         # Start continuous audio capture
         await self._audio.start_continuous()
@@ -151,11 +163,12 @@ class ConversationPlugin(Plugin):
             logger.info("Speak anytime - always listening!")
         logger.info("=" * 50)
 
-        # Run three concurrent pipeline tasks
+        # Run four concurrent pipeline tasks
         try:
             await asyncio.gather(
                 self._audio_loop(),
                 self._sentence_accumulator(),
+                self._tts_worker(),
                 self._output_pipeline(),
             )
         except asyncio.CancelledError:
@@ -190,6 +203,23 @@ class ConversationPlugin(Plugin):
             if isinstance(p, MotionPlugin):
                 return p
         return None
+
+    async def _warmup_tts(self) -> None:
+        """Send a tiny TTS request to warm up the remote service connection."""
+        t0 = time.perf_counter()
+        try:
+            if self._tts.supports_streaming:
+                async for _ in self._tts.synthesize_streaming("."):
+                    pass
+            else:
+                path = await self._tts.synthesize(".")
+                import os
+                os.unlink(path)
+            elapsed = (time.perf_counter() - t0) * 1000
+            logger.info(f"TTS warmup complete ({elapsed:.0f}ms)")
+        except Exception as e:
+            elapsed = (time.perf_counter() - t0) * 1000
+            logger.warning(f"TTS warmup failed ({elapsed:.0f}ms): {e}")
 
     # ── State helpers ─────────────────────────────────────────────────
 
@@ -524,15 +554,16 @@ class ConversationPlugin(Plugin):
             buffer += chunk
             last_chunk_ts = time.monotonic()
 
-            # Split on sentence boundaries
+            # Split on sentence boundaries (min 2 chars to avoid empty splits)
+            min_split = 2
             while True:
                 idx = -1
                 for ch in sentence_ends:
-                    pos = buffer.find(ch)
+                    pos = buffer.find(ch, min_split)
                     if pos >= 0 and (idx < 0 or pos < idx):
                         idx = pos
 
-                if idx < 0 or idx < 5:
+                if idx < 0:
                     break
 
                 sentence = buffer[: idx + 1].strip()
@@ -542,41 +573,82 @@ class ConversationPlugin(Plugin):
                     await self._sentence_queue.put(SentenceItem(text=sentence))
                     first_sentence_emitted = True
 
-    # ── Pipeline task 3: Output pipeline (TTS + playback) ────────────
+    # ── Pipeline task 3: TTS worker (sentence → synthesized audio) ───
 
-    async def _output_pipeline(self) -> None:
-        """Consume sentences, synthesize TTS, play with interrupt support.
+    async def _tts_worker(self) -> None:
+        """Continuously synthesize sentences into the audio queue.
 
-        Prefetches next sentence's TTS while current sentence plays,
-        eliminating inter-sentence gaps.
+        Runs ahead of playback: while the output pipeline plays sentence N,
+        this worker is already synthesizing sentences N+1, N+2, etc.
+        The bounded audio_queue (maxsize=3) provides natural back-pressure.
         """
-        prefetch: asyncio.Task | None = None  # Task[tuple[SentenceItem, list|None]]
-
         while self._running:
-            # Use prefetched result if available
-            item = None
-            prefetched_chunks = None
-
-            if prefetch is not None:
-                try:
-                    item, prefetched_chunks = await prefetch
-                except (asyncio.CancelledError, Exception):
-                    pass
-                prefetch = None
-
-            if item is None:
-                try:
-                    item = await asyncio.wait_for(
-                        self._sentence_queue.get(), timeout=1.0
-                    )
-                except asyncio.TimeoutError:
-                    continue
+            try:
+                item = await asyncio.wait_for(
+                    self._sentence_queue.get(), timeout=1.0
+                )
+            except asyncio.TimeoutError:
+                continue
 
             if item is None:
                 continue
 
             if item.is_last and not item.text:
-                # Empty final marker — done speaking
+                await self._audio_queue.put((item, None))
+                continue
+
+            if not item.text:
+                continue
+
+            clean = item.text.replace("**", "").replace("*", "").replace("`", "")
+
+            # Synthesize TTS (streaming or batch)
+            if self._tts and self._tts.supports_streaming:
+                chunks = []
+                try:
+                    async for chunk, sr in self._tts.synthesize_streaming(clean):
+                        if self._interrupt_event.is_set():
+                            break
+                        chunks.append((chunk, sr))
+                except Exception as e:
+                    logger.warning(f"TTS worker synthesis failed: {e}")
+                    chunks = None
+
+                if self._interrupt_event.is_set():
+                    continue
+
+                logger.debug(
+                    f"TTS ready: \"{clean[:20]}...\" "
+                    f"({len(chunks) if chunks else 0} chunks)"
+                )
+                await self._audio_queue.put((item, chunks if chunks else None))
+            else:
+                # Batch mode — no pre-synthesized chunks, output pipeline
+                # will call synthesize() itself
+                await self._audio_queue.put((item, None))
+
+    # ── Pipeline task 4: Output pipeline (play pre-synthesized audio) ─
+
+    async def _output_pipeline(self) -> None:
+        """Play pre-synthesized audio from the audio queue.
+
+        TTS synthesis is handled by _tts_worker, so this task only does
+        playback — no waiting for TTS between sentences.
+        """
+        while self._running:
+            try:
+                entry = await asyncio.wait_for(
+                    self._audio_queue.get(), timeout=1.0
+                )
+            except asyncio.TimeoutError:
+                continue
+
+            if entry is None:
+                continue
+
+            item, prefetched_chunks = entry
+
+            if item.is_last and not item.text:
                 await self._finish_speaking()
                 continue
 
@@ -584,10 +656,6 @@ class ConversationPlugin(Plugin):
             t_speak_start = time.perf_counter()
             self.app.is_speaking = True
             self._set_state(ConvState.SPEAKING)
-
-            # Start prefetching next sentence in background (runs during playback)
-            if not item.is_last:
-                prefetch = asyncio.create_task(self._prefetch_next_sentence())
 
             interrupted = await self._speak_interruptible(
                 item.text, prefetched_chunks
@@ -599,10 +667,7 @@ class ConversationPlugin(Plugin):
             )
 
             if interrupted or self._interrupt_event.is_set():
-                if prefetch:
-                    prefetch.cancel()
-                    prefetch = None
-                # Drain remaining sentences
+                _drain_queue(self._audio_queue)
                 _drain_queue(self._sentence_queue)
                 self._interrupt_event.clear()
                 await self._finish_speaking()
@@ -610,33 +675,6 @@ class ConversationPlugin(Plugin):
 
             if item.is_last:
                 await self._finish_speaking()
-
-    async def _prefetch_next_sentence(self) -> tuple:
-        """Wait for next sentence and pre-synthesize its audio."""
-        try:
-            item = await asyncio.wait_for(
-                self._sentence_queue.get(), timeout=10.0
-            )
-        except asyncio.TimeoutError:
-            return None, None
-
-        if item is None or (item.is_last and not item.text):
-            return item, None
-
-        if not item.text or not self._tts or not self._tts.supports_streaming:
-            return item, None
-
-        clean = item.text.replace("**", "").replace("*", "").replace("`", "")
-        chunks = []
-        try:
-            async for chunk, sr in self._tts.synthesize_streaming(clean):
-                chunks.append((chunk, sr))
-        except Exception as e:
-            logger.warning(f"Prefetch TTS failed: {e}")
-            return item, None
-
-        logger.info(f"Prefetched TTS: {len(clean)} chars, {len(chunks)} chunks")
-        return item, chunks if chunks else None
 
     async def _finish_speaking(self) -> None:
         """Clean up after speaking is done."""
@@ -663,6 +701,7 @@ class ConversationPlugin(Plugin):
 
         _drain_queue(self._stream_text_queue)
         _drain_queue(self._sentence_queue)
+        _drain_queue(self._audio_queue)
 
         self.app.is_speaking = False
         if self._wobbler:
@@ -728,11 +767,11 @@ class ConversationPlugin(Plugin):
                         self._wobbler.reset()
                     reachy.set_target_antenna_joint_positions([0.0, 0.0])
                     if not interrupted:
-                        await asyncio.sleep(0.3)
+                        await asyncio.sleep(0.05)
                     reachy.media.stop_playing()
                 return interrupted
             else:
-                # Local playback: collect all streaming chunks, write to temp file, play
+                # Local playback via sounddevice (no temp file, no subprocess)
                 all_chunks = []
                 sample_rate = 16000
                 async for chunk, sr in source:
@@ -745,14 +784,7 @@ class ConversationPlugin(Plugin):
                     return False
 
                 audio = np.concatenate(all_chunks)
-                temp_path = self._write_temp_wav(audio, sample_rate)
-                try:
-                    return await self._play_local_interruptible(temp_path)
-                finally:
-                    try:
-                        os.unlink(temp_path)
-                    except FileNotFoundError:
-                        pass
+                return await self._play_sounddevice(audio, sample_rate)
 
         except Exception as e:
             logger.error(f"TTS streaming failed: {e}")
@@ -882,8 +914,41 @@ class ConversationPlugin(Plugin):
             except FileNotFoundError:
                 pass
 
+    async def _play_sounddevice(self, audio: np.ndarray, sample_rate: int) -> bool:
+        """Play numpy audio via sounddevice (zero overhead, no subprocess)."""
+        try:
+            import sounddevice as sd
+
+            finished = asyncio.Event()
+
+            def _play_blocking():
+                sd.play(audio, samplerate=sample_rate, blocking=True)
+                finished.set()
+
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(None, _play_blocking)
+
+            while not finished.is_set():
+                if self._interrupt_event.is_set():
+                    sd.stop()
+                    return True
+                await asyncio.sleep(0.02)  # 20ms poll
+
+            return False
+        except Exception as e:
+            logger.warning(f"sounddevice playback failed: {e}, falling back to afplay")
+            # Fallback to afplay
+            temp_path = self._write_temp_wav(audio, sample_rate)
+            try:
+                return await self._play_local_interruptible(temp_path)
+            finally:
+                try:
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
+
     async def _play_local_interruptible(self, audio_path: str) -> bool:
-        """Play locally via subprocess with interrupt support."""
+        """Play locally via subprocess with interrupt support (fallback)."""
         try:
             proc = await asyncio.create_subprocess_exec(
                 "afplay", audio_path,
@@ -896,9 +961,8 @@ class ConversationPlugin(Plugin):
                     proc.kill()
                     await proc.wait()
                     return True
-                # Poll every 100ms
                 try:
-                    await asyncio.wait_for(proc.wait(), timeout=0.1)
+                    await asyncio.wait_for(proc.wait(), timeout=0.05)
                 except asyncio.TimeoutError:
                     pass
 

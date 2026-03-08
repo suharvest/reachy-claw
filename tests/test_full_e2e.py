@@ -371,9 +371,9 @@ class TestConversationPluginIntegration:
         plugin._speak_interruptible = mock_speak
 
         # Feed sentences
-        await plugin._sentence_queue.put(SentenceItem(text="Hello world."))
-        await plugin._sentence_queue.put(
-            SentenceItem(text="Reachy is ready.", is_last=True)
+        await plugin._audio_queue.put((SentenceItem(text="Hello world."), None))
+        await plugin._audio_queue.put(
+            (SentenceItem(text="Reachy is ready.", is_last=True), None)
         )
 
         # Run output pipeline briefly
