@@ -273,6 +273,8 @@ class ConversationPlugin(Plugin):
         cb.on_tool_end = self._on_tool_end
         cb.on_task_spawned = self._on_task_spawned
         cb.on_task_completed = self._on_task_completed
+        cb.on_emotion = self._on_emotion
+        cb.on_robot_command = self._on_robot_command
 
     async def _on_stream_start(self, run_id: str) -> None:
         logger.debug(f"Stream started: {run_id}")
@@ -322,6 +324,149 @@ class ConversationPlugin(Plugin):
         # Route notifications through the normal output queue to avoid
         # blocking gateway listener callbacks on TTS playback.
         await self._sentence_queue.put(SentenceItem(text=short, is_last=True))
+
+    # ── Passive emotion channel ──────────────────────────────────────
+
+    async def _on_emotion(self, emotion: str) -> None:
+        """Server sends an emotion tag — queue it for immediate expression."""
+        if self.app.config.play_emotions:
+            logger.info(f"Emotion from server: {emotion}")
+            self.app.emotions.queue_emotion(emotion)
+
+    # ── Active robot commands (LLM tool calls) ────────────────────────
+
+    async def _on_robot_command(
+        self, action: str, params: dict, command_id: str
+    ) -> None:
+        """Execute a robot command from LLM tool call and return result."""
+        logger.info(f"Robot command: {action} {params}")
+        result = await asyncio.to_thread(self._execute_robot_command, action, params)
+        if self._client and command_id:
+            await self._client.send_robot_result(command_id, result)
+
+    def _execute_robot_command(self, action: str, params: dict) -> dict:
+        """Dispatch a robot command to the appropriate handler."""
+        handlers = {
+            "move_head": self._cmd_move_head,
+            "move_antennas": self._cmd_move_antennas,
+            "play_emotion": self._cmd_play_emotion,
+            "dance": self._cmd_dance,
+            "capture_image": self._cmd_capture_image,
+            "status": self._cmd_status,
+        }
+        handler = handlers.get(action)
+        if not handler:
+            return {"status": "error", "message": f"Unknown action: {action}"}
+        try:
+            return handler(params)
+        except Exception as e:
+            logger.error(f"Robot command '{action}' failed: {e}")
+            return {"status": "error", "message": str(e)}
+
+    def _cmd_move_head(self, params: dict) -> dict:
+        reachy = self.app.reachy
+        if not reachy:
+            return {"status": "error", "message": "No robot connected"}
+        from reachy_mini.utils import create_head_pose
+
+        yaw = max(-45, min(45, params.get("yaw", 0)))
+        pitch = max(-30, min(30, params.get("pitch", 0)))
+        roll = max(-30, min(30, params.get("roll", 0)))
+        duration = params.get("duration", 1.0)
+
+        pose = create_head_pose(yaw=yaw, pitch=pitch, roll=roll, degrees=True)
+        reachy.goto_target(head=pose, duration=duration)
+        return {"status": "success", "position": {"yaw": yaw, "pitch": pitch, "roll": roll}}
+
+    def _cmd_move_antennas(self, params: dict) -> dict:
+        reachy = self.app.reachy
+        if not reachy:
+            return {"status": "error", "message": "No robot connected"}
+        import numpy as np
+
+        left = params.get("left", 0)
+        right = params.get("right", 0)
+        duration = params.get("duration", 0.5)
+
+        reachy.goto_target(
+            antennas=[np.radians(right), np.radians(left)],
+            duration=duration,
+        )
+        return {"status": "success", "antennas": {"left": left, "right": right}}
+
+    def _cmd_play_emotion(self, params: dict) -> dict:
+        emotion = params.get("emotion", "")
+        if not emotion:
+            return {"status": "error", "message": "Missing emotion parameter"}
+        self.app.emotions.queue_emotion(emotion)
+        return {"status": "success", "emotion": emotion}
+
+    def _cmd_dance(self, params: dict) -> dict:
+        reachy = self.app.reachy
+        if not reachy:
+            return {"status": "error", "message": "No robot connected"}
+        from reachy_mini.utils import create_head_pose
+        import numpy as np
+        import time as _time
+
+        from ..motion.dances import DANCE_ROUTINES
+
+        name = params.get("dance_name", "")
+        routine = DANCE_ROUTINES.get(name)
+        if not routine:
+            from ..motion.dances import AVAILABLE_DANCES
+            return {"status": "error", "message": f"Unknown dance: {name}. Available: {', '.join(AVAILABLE_DANCES)}"}
+
+        for step in routine.steps:
+            pose = create_head_pose(yaw=step.yaw, pitch=step.pitch, roll=step.roll, degrees=True)
+            antennas = [np.radians(step.antenna_right), np.radians(step.antenna_left)]
+            reachy.goto_target(head=pose, antennas=antennas, duration=step.duration)
+            _time.sleep(step.duration)
+
+        return {"status": "success", "dance": name, "steps": len(routine.steps)}
+
+    def _cmd_capture_image(self, params: dict) -> dict:
+        reachy = self.app.reachy
+        if not reachy:
+            return {"status": "error", "message": "No robot connected"}
+        if not hasattr(reachy, "media") or reachy.media is None:
+            return {"status": "error", "message": "Media backend not available"}
+
+        frame = reachy.media.get_frame()
+        if frame is None:
+            return {"status": "error", "message": "No frame available"}
+
+        from datetime import datetime
+        from pathlib import Path
+
+        capture_dir = Path.home() / ".reachy-claw" / "captures"
+        capture_dir.mkdir(parents=True, exist_ok=True)
+        filepath = capture_dir / f"capture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+
+        try:
+            import cv2
+            cv2.imwrite(str(filepath), frame)
+        except ImportError:
+            from PIL import Image
+            Image.fromarray(frame).save(filepath)
+
+        return {"status": "success", "filepath": str(filepath)}
+
+    def _cmd_status(self, params: dict) -> dict:
+        reachy = self.app.reachy
+        status = {"connected": reachy is not None}
+        if reachy:
+            try:
+                pose = reachy.get_current_head_pose()
+                status["head_pose"] = pose.tolist() if hasattr(pose, "tolist") else str(pose)
+            except Exception:
+                pass
+            try:
+                pos = reachy.get_present_antenna_joint_positions()
+                status["antenna_positions_rad"] = list(pos)
+            except Exception:
+                pass
+        return status
 
     # ── Pipeline task 1: Audio loop (mic → VAD → STT → send) ─────────
 
@@ -996,9 +1141,12 @@ class ConversationPlugin(Plugin):
 
     async def _play_local_interruptible(self, audio_path: str) -> bool:
         """Play locally via subprocess with interrupt support (fallback)."""
+        import sys
+
+        player = "afplay" if sys.platform == "darwin" else "aplay"
         try:
             proc = await asyncio.create_subprocess_exec(
-                "afplay", audio_path,
+                player, audio_path,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )

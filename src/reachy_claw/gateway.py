@@ -47,6 +47,8 @@ class StreamCallbacks:
     on_task_spawned: Callable[[str, str], Any] | None = None  # label, task_run_id
     on_task_completed: Callable[[str, str], Any] | None = None  # summary, task_run_id
     on_state_change: Callable[[str], Any] | None = None  # state
+    on_emotion: Callable[[str], Any] | None = None  # emotion name
+    on_robot_command: Callable[[str, dict, str], Any] | None = None  # action, params, command_id
     on_error: Callable[[str], Any] | None = None  # message
 
 
@@ -217,6 +219,18 @@ class DesktopRobotClient:
             return
         await self._send({"type": "state_change", "state": state})
 
+    async def send_robot_result(
+        self, command_id: str, result: dict
+    ) -> None:
+        """Send robot command execution result back to server."""
+        if not self.is_connected:
+            return
+        await self._send({
+            "type": "robot_result",
+            "commandId": command_id,
+            "result": result,
+        })
+
     async def send_ping(self) -> None:
         if not self.is_connected:
             return
@@ -361,6 +375,20 @@ class DesktopRobotClient:
             task_run_id = msg.get("taskRunId", "")
             if self.callbacks.on_task_completed:
                 await _maybe_await(self.callbacks.on_task_completed(summary, task_run_id))
+
+        elif t == "emotion":
+            emotion = msg.get("emotion", "")
+            if emotion and self.callbacks.on_emotion:
+                await _maybe_await(self.callbacks.on_emotion(emotion))
+
+        elif t == "robot_command":
+            action = msg.get("action", "")
+            params = msg.get("params", {})
+            command_id = msg.get("commandId", "")
+            if action and self.callbacks.on_robot_command:
+                await _maybe_await(
+                    self.callbacks.on_robot_command(action, params, command_id)
+                )
 
         elif t == "error":
             message = msg.get("message", "unknown error")
