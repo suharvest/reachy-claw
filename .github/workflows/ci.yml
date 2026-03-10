@@ -7,11 +7,30 @@ on:
     branches: [ master, main ]
 
 jobs:
-  build-and-test:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: uv sync --extra dev
+
+    - name: Lint with Ruff
+      run: uv tool run ruff check .
+
+  test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11"]
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
     - uses: actions/checkout@v4
@@ -29,20 +48,8 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y ffmpeg
 
-    - name: Install dependencies (Main App)
-      run: |
-        uv sync --extra dev
+    - name: Install dependencies
+      run: uv sync --extra dev
 
-    - name: Lint with Ruff
-      run: |
-        uv tool run ruff check .
-
-    - name: Install dependencies (Action Skill)
-      run: |
-        cd action-skill
-        uv sync --extra dev
-
-    - name: Test Action Skill
-      run: |
-        cd action-skill
-        uv run pytest
+    - name: Run tests
+      run: uv run pytest tests/ -v --tb=short

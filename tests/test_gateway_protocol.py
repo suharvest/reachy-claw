@@ -121,3 +121,124 @@ async def test_error_callback():
     await client._handle({"type": "error", "message": "bad request"})
 
     assert errors == ["bad request"]
+
+
+# ── Emotion channel ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_emotion_callback():
+    client = DesktopRobotClient(Config())
+    emotions: list[str] = []
+
+    client.callbacks.on_emotion = lambda e: emotions.append(e)
+
+    await client._handle({"type": "emotion", "emotion": "happy"})
+    await client._handle({"type": "emotion", "emotion": "thinking"})
+
+    assert emotions == ["happy", "thinking"]
+
+
+@pytest.mark.asyncio
+async def test_emotion_empty_ignored():
+    client = DesktopRobotClient(Config())
+    emotions: list[str] = []
+
+    client.callbacks.on_emotion = lambda e: emotions.append(e)
+
+    await client._handle({"type": "emotion", "emotion": ""})
+
+    assert emotions == []
+
+
+@pytest.mark.asyncio
+async def test_emotion_no_callback_no_error():
+    """Emotion messages should not crash when no callback is set."""
+    client = DesktopRobotClient(Config())
+    await client._handle({"type": "emotion", "emotion": "happy"})
+
+
+# ── Robot command channel ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_robot_command_callback():
+    client = DesktopRobotClient(Config())
+    commands: list[tuple] = []
+
+    client.callbacks.on_robot_command = lambda a, p, c: commands.append((a, p, c))
+
+    await client._handle({
+        "type": "robot_command",
+        "action": "move_head",
+        "params": {"yaw": 15, "pitch": 10},
+        "commandId": "cmd-1",
+    })
+
+    assert len(commands) == 1
+    action, params, cmd_id = commands[0]
+    assert action == "move_head"
+    assert params == {"yaw": 15, "pitch": 10}
+    assert cmd_id == "cmd-1"
+
+
+@pytest.mark.asyncio
+async def test_robot_command_empty_action_ignored():
+    client = DesktopRobotClient(Config())
+    commands: list[tuple] = []
+
+    client.callbacks.on_robot_command = lambda a, p, c: commands.append((a, p, c))
+
+    await client._handle({
+        "type": "robot_command",
+        "action": "",
+        "params": {},
+        "commandId": "cmd-2",
+    })
+
+    assert commands == []
+
+
+@pytest.mark.asyncio
+async def test_robot_command_defaults():
+    """Missing params/commandId should default to empty."""
+    client = DesktopRobotClient(Config())
+    commands: list[tuple] = []
+
+    client.callbacks.on_robot_command = lambda a, p, c: commands.append((a, p, c))
+
+    await client._handle({"type": "robot_command", "action": "status"})
+
+    assert len(commands) == 1
+    assert commands[0] == ("status", {}, "")
+
+
+# ── send_robot_result ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_send_robot_result():
+    client = DesktopRobotClient(Config())
+    client._connected = True
+    client._ws = object()  # is_connected checks _ws is not None
+    sent: list[dict] = []
+
+    async def capture_send(data):
+        sent.append(data)
+
+    client._send = capture_send  # type: ignore[assignment]
+
+    await client.send_robot_result("cmd-1", {"status": "success"})
+
+    assert len(sent) == 1
+    assert sent[0]["type"] == "robot_result"
+    assert sent[0]["commandId"] == "cmd-1"
+    assert sent[0]["result"] == {"status": "success"}
+
+
+@pytest.mark.asyncio
+async def test_send_robot_result_not_connected():
+    """Should silently do nothing when not connected."""
+    client = DesktopRobotClient(Config())
+    client._connected = False
+    await client.send_robot_result("cmd-1", {"status": "error"})
