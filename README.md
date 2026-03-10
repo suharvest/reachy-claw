@@ -87,31 +87,70 @@ uv run reachy-claw --demo
 
 ## Architecture
 
+Reachy Claw is the client-side runtime that sits between three services:
+
 ```text
-                        ┌──────────────────────┐
-                        │    Local Hardware     │
-                        └──────────────────────┘
-                                  │
-┌─────────────────────────────────────────────────────────────────┐
-│  ReachyClawApp (app.py)         All running locally              │
-│  ├── MotionPlugin     — emotions, head tracking, idle anims     │
-│  ├── FaceTrackerPlugin — MediaPipe face detection → HeadTarget  │
-│  └── ConversationPlugin — STT → Gateway → TTS conversation loop │
-│                                                                 │
-│  Shared state:                                                  │
-│  • HeadTargetBus  — fuses face/DOA/neutral head targets         │
-│  • EmotionMapper  — 14 emotions, queue with debounce            │
-│  • HeadWobbler    — speech-driven head micro-movements          │
-└─────────────────────────────────────────────────────────────────┘
-          │                │                        │
-          ▼                ▼                        ▼
-   Reachy Mini SDK   Edge Speech Service      OpenClaw Gateway
-   (head, antennas)  (sherpa-onnx, CUDA)      (LLM, tools, streaming)
-                     Paraformer ASR            WebSocket :18790
-                     Matcha TTS + Vocos
+┌─────────────────────────────────────────────────────────────────────┐
+│  reachy-claw (this project)                                         │
+│                                                                     │
+│  Plugins:                                                          │
+│    ConversationPlugin — mic → VAD → STT → Gateway → TTS → speaker │
+│    MotionPlugin       — emotions, head tracking, idle animations    │
+│    FaceTrackerPlugin  — MediaPipe face detection → head gaze        │
+│                                                                     │
+│  Shared state:                                                     │
+│    HeadTargetBus  — fuses face/DOA/neutral head targets             │
+│    EmotionMapper  — 14 emotions → head+antenna poses                │
+│    HeadWobbler    — speech-driven head micro-movements              │
+└──────┬──────────────────┬───────────────────────┬───────────────────┘
+       │                  │                       │
+       ▼                  ▼                       ▼
+ Reachy Mini SDK    Speech Service          OpenClaw Gateway
+ (reachy-mini)      (jetson-local-voice)    (openclaw + desktop-robot)
 ```
 
-Data flow:
+### Related Projects
+
+| Project | Role | Default Port | Protocol |
+|---------|------|-------------|----------|
+| **[reachy-claw](https://github.com/suharvest/reachy-claw)** (this) | Client runtime — plugins, STT/TTS pipeline, robot control | — | — |
+| **[OpenClaw](https://github.com/ArturSkowronski/openclaw)** | AI gateway — LLM, tools, multi-turn conversation | `:18789` (gateway) | HTTP |
+| ↳ desktop-robot extension | WebSocket bridge for voice assistants | `:18790` | `ws://.../desktop-robot` |
+| **[Jetson Voice](https://github.com/suharvest/jetson-local-voice)** | Edge speech — Paraformer ASR + Matcha TTS (sherpa-onnx, CUDA) | `:8621` | HTTP REST |
+| **reachy-mini daemon** | Robot hardware — SDK access, motor control | `:8000` (dev) / `:38001` (Jetson) | Zenoh `:7447` |
+
+### Plugins
+
+| Plugin | Purpose | Depends on |
+|--------|---------|------------|
+| `ConversationPlugin` | Full conversation loop: mic → VAD → STT → OpenClaw → TTS → speaker. Handles barge-in, emotion channel, and robot commands from LLM. | OpenClaw gateway, Speech service |
+| `MotionPlugin` | Executes emotion expressions (head + antenna), fused head tracking, idle animations. | Reachy Mini SDK |
+| `FaceTrackerPlugin` | MediaPipe face detection → HeadTarget published to HeadTargetBus. | Camera |
+
+### WebSocket Protocol (desktop-robot)
+
+reachy-claw connects to OpenClaw's desktop-robot extension via WebSocket.
+
+**Passive emotion channel** — The LLM includes `[emotion:happy]` tags in its responses. The extension strips them from the text stream and sends a separate `emotion` message. reachy-claw receives it and immediately queues the expression — zero extra round-trip.
+
+```text
+LLM output: "[emotion:happy] Sure, I'd love to help!"
+  → extension sends:  {"type": "emotion", "emotion": "happy"}
+  → extension sends:  {"type": "stream_delta", "text": "Sure, I'd love to help!"}
+  → reachy-claw:      queue_emotion("happy") → MotionPlugin executes head+antenna pose
+```
+
+**Active robot commands** — User says "do a dance", LLM calls a `reachy_*` tool, extension forwards it as `robot_command` for client-side execution:
+
+```text
+LLM tool call: reachy_dance({dance_name: "celebrate"})
+  → extension sends:  {"type": "robot_command", "action": "dance", "params": {...}, "commandId": "..."}
+  → reachy-claw:      execute dance routine → send robot_result back
+```
+
+Available actions: `move_head`, `move_antennas`, `play_emotion`, `dance`, `capture_image`, `status`. See `action-skill/SKILL.md` for the full tool interface.
+
+### Data Flow
 
 ```text
 Microphone → VAD (Silero) → Speech detected?
@@ -125,6 +164,19 @@ TTS audio → HeadWobbler → speech roll/pitch/yaw → Robot head
 
 Barge-in: VAD detects speech during playback → interrupt TTS → new turn
 ```
+
+### Jetson Deployment (Docker Compose)
+
+On Jetson, all services run as containers with `network_mode: host`:
+
+| Container | Image | Ports |
+|-----------|-------|-------|
+| `reachy-daemon` | `Dockerfile.daemon` | `:38001` (FastAPI), `:7447` (Zenoh) |
+| `reachy-claw` | `Dockerfile.reachy-claw` | — (connects to others) |
+| `openclaw-gateway` | (separate) | `:18789`, `:18790` |
+| `speech` | (jetson-local-voice) | `:8621` |
+
+See `deploy/jetson/` for Dockerfiles and compose config.
 
 ## Edge Speech Service
 
@@ -397,16 +449,15 @@ uv sync --extra dev
 
 ## OpenClaw Skill (`action-skill/`)
 
-The action skill provides tool wrappers for LLM-driven robot control via OpenClaw:
+The `action-skill/SKILL.md` describes the robot control tools available to OpenClaw's LLM. Give this file to your OpenClaw agent so it knows what it can do:
 
-- connect/disconnect
-- head movement + antenna movement
-- emotions and dance
-- image capture
-- robot speech (TTS)
-- status checks
+- `reachy_move_head` / `reachy_move_antennas` — direct motor control
+- `reachy_play_emotion` — 14 emotions expressed as head+antenna poses
+- `reachy_dance` — 5 choreographed routines (nod, wiggle, celebrate, curious_look, lobster)
+- `reachy_capture_image` — camera snapshot
+- `reachy_status` — connection state and live positions
 
-Skill docs: `action-skill/SKILL.md`.
+No Python code in this directory — it's a pure interface description. Execution happens in reachy-claw's ConversationPlugin via the `robot_command` WebSocket channel.
 
 ## Development
 
@@ -416,14 +467,6 @@ uv run pytest
 uv tool run ruff check .
 ```
 
-Action skill tests:
-
-```bash
-cd action-skill
-uv sync --extra dev
-uv run pytest
-```
-
 ## Key Files
 
 | File | Purpose |
@@ -431,17 +474,18 @@ uv run pytest
 | `src/reachy_claw/main.py` | CLI entrypoint |
 | `src/reachy_claw/app.py` | ReachyClawApp orchestrator |
 | `src/reachy_claw/reachy_app.py` | Reachy Mini daemon app adapter |
-| `src/reachy_claw/gateway.py` | OpenClaw WebSocket protocol |
+| `src/reachy_claw/gateway.py` | OpenClaw WebSocket protocol (emotion + robot_command channels) |
+| `src/reachy_claw/plugins/conversation_plugin.py` | Conversation loop + robot command handlers |
+| `src/reachy_claw/plugins/motion_plugin.py` | Emotion execution + head tracking fusion |
+| `src/reachy_claw/plugins/face_tracker_plugin.py` | MediaPipe face detection → HeadTarget |
+| `src/reachy_claw/motion/emotion_mapper.py` | 14 emotions → head+antenna poses |
+| `src/reachy_claw/motion/dances.py` | 5 dance routines (choreographed movement sequences) |
+| `src/reachy_claw/motion/head_target.py` | HeadTargetBus — fused head target from multiple sources |
+| `src/reachy_claw/motion/head_wobbler.py` | Speech-driven head micro-movements |
 | `src/reachy_claw/backend_registry.py` | Auto-discovery registry for STT/TTS/VAD backends |
-| `src/reachy_claw/stt.py` | STT backend implementations |
-| `src/reachy_claw/tts.py` | TTS backend implementations |
-| `src/reachy_claw/vad.py` | VAD backend implementations |
-| `src/reachy_claw/plugins/` | Motion, conversation, face tracker plugins |
-| `src/reachy_claw/motion/` | EmotionMapper, HeadTargetBus, HeadWobbler |
-| `src/reachy_claw/vision/` | MediaPipe face tracker |
-| `src/reachy_claw/config.py` | Configuration (YAML + env + defaults) |
-| `reachy-claw.example.yaml` | Example configuration file |
-| `action-skill/` | OpenClaw skill package |
+| `src/reachy_claw/config.py` | Configuration (YAML + env + CLI, 70+ options) |
+| `action-skill/SKILL.md` | OpenClaw tool interface for LLM-driven robot control |
+| `deploy/jetson/` | Dockerfiles + compose for Jetson deployment |
 
 ## Acknowledgements
 
