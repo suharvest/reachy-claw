@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from clawd_reachy_mini.config import Config, load_config
+from reachy_claw.config import Config, load_config
 
 
 def test_config_loads_tokens_from_environment(monkeypatch):
@@ -55,7 +55,7 @@ def test_config_has_vision_defaults():
 
 def test_load_config_from_yaml(tmp_path, monkeypatch):
     """YAML file values override defaults."""
-    cfg_file = tmp_path / "clawd.yaml"
+    cfg_file = tmp_path / "reachy-claw.yaml"
     cfg_file.write_text(
         """\
 gateway:
@@ -95,7 +95,7 @@ plugins:
 
 def test_env_overrides_yaml(tmp_path, monkeypatch):
     """Environment variables take priority over YAML."""
-    cfg_file = tmp_path / "clawd.yaml"
+    cfg_file = tmp_path / "reachy-claw.yaml"
     cfg_file.write_text(
         """\
 gateway:
@@ -115,7 +115,7 @@ stt:
 
 def test_load_config_missing_yaml_uses_defaults():
     """Non-existent explicit path is ignored gracefully."""
-    config = load_config("/nonexistent/clawd.yaml")
+    config = load_config("/nonexistent/reachy-claw.yaml")
 
     assert config.gateway_host == "127.0.0.1"
     assert config.stt_backend == "paraformer-streaming"
@@ -123,7 +123,7 @@ def test_load_config_missing_yaml_uses_defaults():
 
 def test_load_config_partial_yaml(tmp_path):
     """Partial YAML only overrides specified fields."""
-    cfg_file = tmp_path / "clawd.yaml"
+    cfg_file = tmp_path / "reachy-claw.yaml"
     cfg_file.write_text("tts:\n  backend: piper\n")
 
     config = load_config(cfg_file)
@@ -133,9 +133,9 @@ def test_load_config_partial_yaml(tmp_path):
     assert config.gateway_host == "127.0.0.1"  # untouched default
 
 
-def test_load_config_auto_detect_clawd_yaml(tmp_path, monkeypatch):
-    """Auto-detect clawd.yaml in current directory."""
-    cfg_file = tmp_path / "clawd.yaml"
+def test_load_config_auto_detect_reachy_claw_yaml(tmp_path, monkeypatch):
+    """Auto-detect reachy-claw.yaml in current directory."""
+    cfg_file = tmp_path / "reachy-claw.yaml"
     cfg_file.write_text("gateway:\n  port: 12345\n")
     monkeypatch.chdir(tmp_path)
 
@@ -144,11 +144,11 @@ def test_load_config_auto_detect_clawd_yaml(tmp_path, monkeypatch):
     assert config.gateway_port == 12345
 
 
-def test_load_config_env_clawd_config(tmp_path, monkeypatch):
-    """CLAWD_CONFIG env var points to config file."""
+def test_load_config_env_reachy_claw_config(tmp_path, monkeypatch):
+    """REACHY_CLAW_CONFIG env var points to config file."""
     cfg_file = tmp_path / "my-config.yaml"
     cfg_file.write_text("tts:\n  backend: none\n")
-    monkeypatch.setenv("CLAWD_CONFIG", str(cfg_file))
+    monkeypatch.setenv("REACHY_CLAW_CONFIG", str(cfg_file))
 
     config = load_config()
 
@@ -157,7 +157,7 @@ def test_load_config_env_clawd_config(tmp_path, monkeypatch):
 
 def test_nested_backend_config(tmp_path):
     """Backend settings can be nested under the backend name."""
-    cfg_file = tmp_path / "clawd.yaml"
+    cfg_file = tmp_path / "reachy-claw.yaml"
     cfg_file.write_text(
         """\
 tts:

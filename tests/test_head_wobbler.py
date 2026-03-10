@@ -7,7 +7,7 @@ import time
 import numpy as np
 import pytest
 
-from clawd_reachy_mini.motion.head_wobbler import HeadWobbler
+from reachy_claw.motion.head_wobbler import HeadWobbler
 
 
 class TestHeadWobblerLifecycle:

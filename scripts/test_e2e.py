@@ -30,9 +30,9 @@ import sys
 # Add src to path for local dev
 sys.path.insert(0, "src")
 
-from clawd_reachy_mini.config import Config
-from clawd_reachy_mini.gateway import DesktopRobotClient
-from clawd_reachy_mini.tts import TTSBackend, create_tts_backend
+from reachy_claw.config import Config
+from reachy_claw.gateway import DesktopRobotClient
+from reachy_claw.tts import TTSBackend, create_tts_backend
 
 logging.basicConfig(
     level=logging.INFO,

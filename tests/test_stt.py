@@ -11,8 +11,8 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from clawd_reachy_mini.config import Config
-from clawd_reachy_mini.stt import (
+from reachy_claw.config import Config
+from reachy_claw.stt import (
     WhisperSTT,
     FasterWhisperSTT,
     OpenAISTT,

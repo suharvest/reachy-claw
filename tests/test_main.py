@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import sys
 
-from clawd_reachy_mini.main import create_config, parse_args
+from reachy_claw.main import create_config, parse_args
 
 
 def test_create_config_preserves_yaml_when_cli_omits_values(tmp_path, monkeypatch):
-    cfg_file = tmp_path / "clawd.yaml"
+    cfg_file = tmp_path / "reachy-claw.yaml"
     cfg_file.write_text(
         """\
 gateway:
@@ -25,7 +25,7 @@ vision:
 """
     )
 
-    monkeypatch.setattr(sys, "argv", ["clawd-reachy", "--config", str(cfg_file)])
+    monkeypatch.setattr(sys, "argv", ["reachy-claw", "--config", str(cfg_file)])
     args = parse_args()
     config = create_config(args)
 
@@ -40,7 +40,7 @@ vision:
 
 
 def test_create_config_cli_overrides_yaml_when_explicit(tmp_path, monkeypatch):
-    cfg_file = tmp_path / "clawd.yaml"
+    cfg_file = tmp_path / "reachy-claw.yaml"
     cfg_file.write_text(
         """\
 gateway:
@@ -55,7 +55,7 @@ vision:
         sys,
         "argv",
         [
-            "clawd-reachy",
+            "reachy-claw",
             "--config",
             str(cfg_file),
             "--gateway-host",

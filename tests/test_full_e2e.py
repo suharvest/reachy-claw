@@ -25,10 +25,10 @@ import numpy as np
 import pytest
 import websockets
 
-from clawd_reachy_mini.app import ClawdApp
-from clawd_reachy_mini.config import Config
-from clawd_reachy_mini.gateway import DesktopRobotClient
-from clawd_reachy_mini.plugins.conversation_plugin import (
+from reachy_claw.app import ReachyClawApp
+from reachy_claw.config import Config
+from reachy_claw.gateway import DesktopRobotClient
+from reachy_claw.plugins.conversation_plugin import (
     ConversationPlugin,
     ConvState,
     SentenceItem,
@@ -165,7 +165,7 @@ class TestFullConversationPipeline:
         assert len(collected_deltas) > 0
 
         # 3. Synthesize the response via Kokoro TTS
-        from clawd_reachy_mini.tts import KokoroTTS
+        from reachy_claw.tts import KokoroTTS
 
         tts = KokoroTTS(base_url=SPEECH_URL, speaker_id=3, speed=1.0)
         path = await tts.synthesize(full_response)
@@ -200,7 +200,7 @@ class TestFullConversationPipeline:
         await asyncio.wait_for(stream_done.wait(), timeout=30.0)
 
         # Stream the response through Kokoro streaming TTS
-        from clawd_reachy_mini.tts import KokoroTTS
+        from reachy_claw.tts import KokoroTTS
 
         tts = KokoroTTS(base_url=SPEECH_URL, speaker_id=3, speed=1.0)
         assert tts.supports_streaming
@@ -230,7 +230,7 @@ class TestStreamingASRToGateway:
     @pytest.mark.asyncio
     async def test_streaming_asr_feeds_gateway(self):
         """Open streaming ASR session, feed silence, finalize, send result to gateway."""
-        from clawd_reachy_mini.stt import ParaformerStreamingSTT
+        from reachy_claw.stt import ParaformerStreamingSTT
 
         stt = ParaformerStreamingSTT(base_url=SPEECH_URL)
 
@@ -283,7 +283,7 @@ class TestConversationPluginIntegration:
     async def test_sentence_accumulator_with_gateway_stream(self):
         """Gateway stream deltas → sentence accumulator → sentence queue."""
         config = _make_config()
-        app = ClawdApp(config)
+        app = ReachyClawApp(config)
 
         plugin = ConversationPlugin(app)
         plugin._running = True
@@ -341,13 +341,13 @@ class TestConversationPluginIntegration:
     async def test_output_pipeline_with_kokoro_tts(self):
         """Sentence queue → output pipeline → Kokoro TTS (batch mode)."""
         config = _make_config(tts_backend="kokoro")
-        app = ClawdApp(config)
+        app = ReachyClawApp(config)
 
         plugin = ConversationPlugin(app)
         plugin._running = True
 
         # Initialize TTS manually (skip full start())
-        from clawd_reachy_mini.tts import create_tts_backend
+        from reachy_claw.tts import create_tts_backend
 
         plugin._tts = create_tts_backend(
             backend="kokoro", config=config
@@ -403,10 +403,10 @@ class TestFullRoundTripWithSim:
     @pytest.mark.asyncio
     async def test_conversation_turn_with_motion(self, sim_reachy):
         """Complete turn: text → gateway → LLM → TTS → sim robot motion."""
-        from clawd_reachy_mini.plugins.motion_plugin import MotionPlugin
+        from reachy_claw.plugins.motion_plugin import MotionPlugin
 
         config = _make_config(enable_motion=True, play_emotions=True)
-        app = ClawdApp(config)
+        app = ReachyClawApp(config)
         app.reachy = sim_reachy
 
         # Start motion plugin
@@ -439,7 +439,7 @@ class TestFullRoundTripWithSim:
         app.emotions.queue_emotion("happy")
 
         # Synthesize via Kokoro
-        from clawd_reachy_mini.tts import KokoroTTS
+        from reachy_claw.tts import KokoroTTS
 
         tts = KokoroTTS(base_url=SPEECH_URL, speaker_id=3, speed=1.0)
         path = await tts.synthesize(full_response)
@@ -459,7 +459,7 @@ class TestFullRoundTripWithSim:
     async def test_interrupt_during_tts(self, sim_reachy):
         """Start TTS playback, then interrupt mid-stream."""
         config = _make_config()
-        app = ClawdApp(config)
+        app = ReachyClawApp(config)
         app.reachy = sim_reachy
 
         client = DesktopRobotClient(config)
@@ -514,10 +514,10 @@ class TestFullRoundTripWithSim:
     async def test_multiple_turns_with_tts(self, sim_reachy):
         """Multiple conversation turns, each with TTS synthesis."""
         config = _make_config()
-        app = ClawdApp(config)
+        app = ReachyClawApp(config)
         app.reachy = sim_reachy
 
-        from clawd_reachy_mini.tts import KokoroTTS
+        from reachy_claw.tts import KokoroTTS
 
         tts = KokoroTTS(base_url=SPEECH_URL, speaker_id=3, speed=1.0)
         client = DesktopRobotClient(config)
@@ -561,8 +561,8 @@ class TestStreamingPipeline:
     @pytest.mark.asyncio
     async def test_streaming_asr_to_streaming_tts(self):
         """Complete streaming pipeline without real audio."""
-        from clawd_reachy_mini.stt import ParaformerStreamingSTT
-        from clawd_reachy_mini.tts import KokoroTTS
+        from reachy_claw.stt import ParaformerStreamingSTT
+        from reachy_claw.tts import KokoroTTS
 
         # 1. Streaming ASR (feed silence, get empty text)
         stt = ParaformerStreamingSTT(base_url=SPEECH_URL)
@@ -655,7 +655,7 @@ class TestStreamingPipeline:
         )
 
         # Concurrently consume sentences and synthesize TTS
-        from clawd_reachy_mini.tts import KokoroTTS
+        from reachy_claw.tts import KokoroTTS
 
         tts = KokoroTTS(base_url=SPEECH_URL, speaker_id=3, speed=1.0)
         synthesized = []

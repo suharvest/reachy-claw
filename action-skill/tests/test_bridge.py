@@ -3,8 +3,8 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from clawd_reachy_mini.bridge import ReachyBridge
-from clawd_reachy_mini.config import ReachyConfig
+from reachy_claw.bridge import ReachyBridge
+from reachy_claw.config import ReachyConfig
 
 
 @pytest.fixture

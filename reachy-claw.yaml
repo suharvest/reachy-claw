@@ -1,0 +1,21 @@
+# reachy-claw configuration
+# Remote speech service on Jetson (Paraformer streaming ASR + Matcha TTS)
+
+stt:
+  backend: paraformer-streaming
+  speech_service_url: http://100.67.111.58:8000
+  sensevoice_language: auto
+
+tts:
+  backend: matcha
+  speech_service_url: http://100.67.111.58:8000
+  matcha:
+    speaker_id: 0
+    speed: 1.2
+  kokoro:
+    speaker_id: 3
+    speed: 1.2
+
+vad:
+  backend: silero  # "silero" (onnxruntime, CPU) or "energy" (simple threshold)
+

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from clawd_reachy_mini.elevenlabs import (
+from reachy_claw.elevenlabs import (
     DEFAULT_ELEVENLABS_VOICE_ID,
     ElevenLabsConfig,
     _accept_header_for_output_format,
@@ -151,7 +151,7 @@ class TestElevenLabsAPI:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("clawd_reachy_mini.elevenlabs.httpx.AsyncClient", return_value=mock_client):
+        with patch("reachy_claw.elevenlabs.httpx.AsyncClient", return_value=mock_client):
             result = await elevenlabs_tts_bytes(text="Hello", config=config)
 
         assert result == b"fake-audio-bytes"
@@ -181,7 +181,7 @@ class TestElevenLabsAPI:
         )
 
         with patch(
-            "clawd_reachy_mini.elevenlabs.elevenlabs_tts_bytes",
+            "reachy_claw.elevenlabs.elevenlabs_tts_bytes",
             new_callable=AsyncMock,
             return_value=b"fake-mp3-data",
         ):
@@ -205,7 +205,7 @@ class TestElevenLabsAPI:
         )
 
         with patch(
-            "clawd_reachy_mini.elevenlabs.elevenlabs_tts_bytes",
+            "reachy_claw.elevenlabs.elevenlabs_tts_bytes",
             new_callable=AsyncMock,
             return_value=b"fake-wav-data",
         ):
@@ -231,7 +231,7 @@ class TestElevenLabsAPI:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("clawd_reachy_mini.elevenlabs.httpx.AsyncClient", return_value=mock_client):
+        with patch("reachy_claw.elevenlabs.httpx.AsyncClient", return_value=mock_client):
             await elevenlabs_tts_bytes(
                 text="Hi",
                 config=config,

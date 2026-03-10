@@ -66,7 +66,7 @@ fi
 
 sleep 1  # extra settle time for gRPC
 
-# ── Launch clawd-reachy-mini (foreground) ──────────────────────────────
+# ── Launch reachy-claw (foreground) ──────────────────────────────
 
 echo ""
 echo "Starting conversation app..."
@@ -76,7 +76,7 @@ echo ""
 # Use config file defaults; user can override via $@
 # NOTE: do NOT use exec here — bash must stay alive for the EXIT trap
 # to clean up the sim daemon background process.
-uv run clawd-reachy \
+uv run reachy-claw \
   --no-face-tracking \
   -v \
   "$@"

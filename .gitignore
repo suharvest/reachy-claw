@@ -37,7 +37,7 @@ ENV/
 htmlcov/
 
 # Local data
-.clawd-reachy-mini/
+.reachy-claw/
 captures/
 
 # Whisper models cache

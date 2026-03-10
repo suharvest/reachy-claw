@@ -1,7 +1,7 @@
 [project]
-name = "clawd-reachy-mini"
+name = "reachy-claw"
 version = "0.1.0"
-description = "Reachy Mini interface for OpenClaw - voice-based AI assistant channel"
+description = "Low-latency voice assistant for Reachy Mini — powered by sherpa-onnx and OpenClaw"
 requires-python = ">=3.10"
 dependencies = [
     "reachy-mini>=1.2.0",
@@ -41,17 +41,17 @@ mediapipe-vision = [
 ]
 
 [project.scripts]
-clawd-reachy = "clawd_reachy_mini.main:main"
+reachy-claw = "reachy_claw.main:main"
 
 [project.entry-points."reachy_mini_apps"]
-clawd_reachy_mini = "clawd_reachy_mini.reachy_app:ClawdReachyMiniApp"
+reachy_claw = "reachy_claw.reachy_app:ClawdReachyMiniApp"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/clawd_reachy_mini"]
+packages = ["src/reachy_claw"]
 
 [tool.uv]
 override-dependencies = [

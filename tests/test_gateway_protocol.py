@@ -7,8 +7,8 @@ import json
 
 import pytest
 
-from clawd_reachy_mini.config import Config
-from clawd_reachy_mini.gateway import DesktopRobotClient
+from reachy_claw.config import Config
+from reachy_claw.gateway import DesktopRobotClient
 
 
 @pytest.mark.asyncio

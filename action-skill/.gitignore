@@ -37,7 +37,7 @@ ENV/
 htmlcov/
 
 # Local
-.clawd-reachy-mini/
+.reachy-claw/
 captures/
 
 # OS

@@ -12,9 +12,9 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from clawd_reachy_mini.config import Config
-from clawd_reachy_mini.stt import SenseVoiceSTT, create_stt_backend
-from clawd_reachy_mini.tts import KokoroTTS, create_tts_backend
+from reachy_claw.config import Config
+from reachy_claw.stt import SenseVoiceSTT, create_stt_backend
+from reachy_claw.tts import KokoroTTS, create_tts_backend
 
 
 # ── SenseVoiceSTT ───────────────────────────────────────────────────────

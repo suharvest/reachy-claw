@@ -1,4 +1,4 @@
-"""Tests for the plugin framework and ClawdApp lifecycle."""
+"""Tests for the plugin framework and ReachyClawApp lifecycle."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ import asyncio
 
 import pytest
 
-from clawd_reachy_mini.app import ClawdApp
-from clawd_reachy_mini.config import Config
-from clawd_reachy_mini.plugin import Plugin
+from reachy_claw.app import ReachyClawApp
+from reachy_claw.config import Config
+from reachy_claw.plugin import Plugin
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -160,7 +160,7 @@ async def test_app_run_multiple_plugins_concurrently(app):
 
 @pytest.mark.asyncio
 async def test_app_run_no_plugins_returns_immediately(config, mock_reachy):
-    a = ClawdApp(config)
+    a = ReachyClawApp(config)
     a.reachy = mock_reachy
     await a.run()
     # Should return without error

@@ -9,13 +9,13 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from clawd_reachy_mini.motion.emotion_mapper import (
+from reachy_claw.motion.emotion_mapper import (
     AntennaMotion,
     HeadPose,
     RobotExpression,
 )
-from clawd_reachy_mini.motion.head_target import HeadTarget
-from clawd_reachy_mini.plugins.motion_plugin import MotionPlugin
+from reachy_claw.motion.head_target import HeadTarget
+from reachy_claw.plugins.motion_plugin import MotionPlugin
 
 # Patch target for the lazy import inside motion_plugin methods
 _CHP = "reachy_mini.utils.create_head_pose"

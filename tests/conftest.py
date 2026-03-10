@@ -1,4 +1,4 @@
-"""Shared test fixtures: mock Reachy Mini robot and ClawdApp."""
+"""Shared test fixtures: mock Reachy Mini robot and ReachyClawApp."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, AsyncMock, PropertyMock
 import numpy as np
 import pytest
 
-from clawd_reachy_mini.app import ClawdApp
-from clawd_reachy_mini.config import Config
+from reachy_claw.app import ReachyClawApp
+from reachy_claw.config import Config
 
 
 def _make_mock_reachy():
@@ -66,7 +66,7 @@ def config():
 
 @pytest.fixture
 def app(config, mock_reachy):
-    """ClawdApp with a mock robot attached."""
-    a = ClawdApp(config)
+    """ReachyClawApp with a mock robot attached."""
+    a = ReachyClawApp(config)
     a.reachy = mock_reachy
     return a

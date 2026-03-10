@@ -18,9 +18,9 @@ import numpy as np
 import pytest
 import websockets
 
-from clawd_reachy_mini.app import ClawdApp
-from clawd_reachy_mini.config import Config
-from clawd_reachy_mini.gateway import DesktopRobotClient, StreamCallbacks
+from reachy_claw.app import ReachyClawApp
+from reachy_claw.config import Config
+from reachy_claw.gateway import DesktopRobotClient, StreamCallbacks
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────
@@ -161,7 +161,7 @@ class TestGatewayWithRobot:
             tts_backend="none",
             stt_backend="whisper",
         )
-        app = ClawdApp(config)
+        app = ReachyClawApp(config)
         app.reachy = sim_reachy
 
         # Queue thinking emotion (as conversation_plugin does)
@@ -174,7 +174,7 @@ class TestGatewayWithRobot:
     async def test_motion_plugin_with_gateway_stream(self, e2e_env):
         """MotionPlugin processes emotions while gateway streams a response."""
         sim_reachy = e2e_env
-        from clawd_reachy_mini.plugins.motion_plugin import MotionPlugin
+        from reachy_claw.plugins.motion_plugin import MotionPlugin
 
         config = Config(
             idle_animations=False,
@@ -184,7 +184,7 @@ class TestGatewayWithRobot:
             tts_backend="none",
             stt_backend="whisper",
         )
-        app = ClawdApp(config)
+        app = ReachyClawApp(config)
         app.reachy = sim_reachy
 
         # Start motion plugin
@@ -229,7 +229,7 @@ class TestGatewayWithRobot:
         gateway protocol and emotion/motion pipeline.
         """
         sim_reachy = e2e_env
-        from clawd_reachy_mini.plugins.motion_plugin import MotionPlugin
+        from reachy_claw.plugins.motion_plugin import MotionPlugin
 
         config = Config(
             idle_animations=False,
@@ -238,7 +238,7 @@ class TestGatewayWithRobot:
             play_emotions=True,
             tts_backend="none",
         )
-        app = ClawdApp(config)
+        app = ReachyClawApp(config)
         app.reachy = sim_reachy
 
         # Start motion plugin in background

@@ -40,9 +40,9 @@ import sys
 
 sys.path.insert(0, "src")
 
-from clawd_reachy_mini.config import Config, load_config
-from clawd_reachy_mini.interface import ReachyInterface
-from clawd_reachy_mini.main import parse_args, create_config, setup_logging
+from reachy_claw.config import Config, load_config
+from reachy_claw.interface import ReachyInterface
+from reachy_claw.main import parse_args, create_config, setup_logging
 
 
 async def main() -> int:

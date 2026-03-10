@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
-from clawd_reachy_mini.config import Config
-from clawd_reachy_mini.plugins.conversation_plugin import (
+from reachy_claw.config import Config
+from reachy_claw.plugins.conversation_plugin import (
     ConversationPlugin,
     ConvState,
     SentenceItem,
@@ -20,7 +20,7 @@ from clawd_reachy_mini.plugins.conversation_plugin import (
 @pytest.fixture
 def standalone_app(mock_reachy):
     """App in standalone mode (no gateway) with mock robot."""
-    from clawd_reachy_mini.app import ClawdApp
+    from reachy_claw.app import ReachyClawApp
 
     config = Config(
         standalone_mode=True,
@@ -31,7 +31,7 @@ def standalone_app(mock_reachy):
         tts_backend="none",
         stt_backend="whisper",
     )
-    a = ClawdApp(config)
+    a = ReachyClawApp(config)
     a.reachy = mock_reachy
     return a
 
@@ -159,7 +159,8 @@ class TestOutputPipeline:
         await plugin._audio_queue.put((SentenceItem(text="Done.", is_last=True), None))
 
         task = asyncio.create_task(plugin._output_pipeline())
-        await asyncio.sleep(0.15)
+        # Wait long enough for both sentences + inter-sentence pause (0.15s)
+        await asyncio.sleep(0.5)
         plugin._running = False
         task.cancel()
         try:
@@ -256,6 +257,8 @@ class TestOutputPipeline:
 class TestCallbacks:
     @pytest.mark.asyncio
     async def test_stream_start_drains_queue(self, standalone_app):
+        from reachy_claw.plugins.conversation_plugin import _RESET_BUFFER
+
         plugin = ConversationPlugin(standalone_app)
         await plugin._stream_text_queue.put("stale")
         await plugin._stream_text_queue.put("data")
@@ -263,13 +266,17 @@ class TestCallbacks:
         await plugin._on_stream_start("run-1")
 
         assert plugin._current_run_id == "run-1"
-        assert plugin._stream_text_queue.empty()
+        # Stale data drained, only the reset sentinel remains
+        assert plugin._stream_text_queue.qsize() == 1
+        sentinel = plugin._stream_text_queue.get_nowait()
+        assert sentinel is _RESET_BUFFER
         assert plugin._state == ConvState.THINKING
 
     @pytest.mark.asyncio
     async def test_stream_delta_puts_text(self, standalone_app):
         plugin = ConversationPlugin(standalone_app)
         plugin._state = ConvState.THINKING
+        plugin._current_run_id = "run-1"
         await plugin._on_stream_delta("hello", "run-1")
 
         text = plugin._stream_text_queue.get_nowait()

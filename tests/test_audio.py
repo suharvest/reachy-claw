@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
-from clawd_reachy_mini.audio import AudioCapture, WakeWordDetector
-from clawd_reachy_mini.config import Config
+from reachy_claw.audio import AudioCapture, WakeWordDetector
+from reachy_claw.config import Config
 
 
 # ── WakeWordDetector ─────────────────────────────────────────────────────

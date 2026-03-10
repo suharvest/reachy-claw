@@ -21,8 +21,8 @@ import time
 import numpy as np
 import pytest
 
-from clawd_reachy_mini.config import Config
-from clawd_reachy_mini.gateway import DesktopRobotClient
+from reachy_claw.config import Config
+from reachy_claw.gateway import DesktopRobotClient
 
 SPEECH_URL = os.environ.get("SPEECH_SERVICE_URL", "http://100.67.111.58:8000")
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "ws://127.0.0.1:18790/desktop-robot")
@@ -93,7 +93,7 @@ def _print_latency_table(title: str, stages: list[tuple[str, float]]):
 class TestSTTLatency:
     def test_streaming_asr_finalize_latency(self):
         """Measure: feed audio → call finish_stream() → text ready."""
-        from clawd_reachy_mini.stt import ParaformerStreamingSTT
+        from reachy_claw.stt import ParaformerStreamingSTT
 
         stt = ParaformerStreamingSTT(base_url=SPEECH_URL)
 
@@ -115,7 +115,7 @@ class TestSTTLatency:
 
     def test_batch_asr_latency(self):
         """Measure: batch transcribe 1s of silence."""
-        from clawd_reachy_mini.stt import ParaformerStreamingSTT
+        from reachy_claw.stt import ParaformerStreamingSTT
 
         stt = ParaformerStreamingSTT(base_url=SPEECH_URL)
 
@@ -187,13 +187,13 @@ class TestGatewayLLMLatency:
     @pytest.mark.asyncio
     async def test_time_to_first_sentence(self):
         """Measure: send message → first complete sentence from accumulator."""
-        from clawd_reachy_mini.plugins.conversation_plugin import (
+        from reachy_claw.plugins.conversation_plugin import (
             ConversationPlugin,
             SentenceItem,
         )
 
         config = _make_config()
-        app = __import__("clawd_reachy_mini.app", fromlist=["ClawdApp"]).ClawdApp(config)
+        app = __import__("reachy_claw.app", fromlist=["ReachyClawApp"]).ReachyClawApp(config)
         plugin = ConversationPlugin(app)
         plugin._running = True
 
@@ -267,7 +267,7 @@ class TestTTSLatency:
     @pytest.mark.asyncio
     async def test_batch_tts_latency(self):
         """Measure: text → WAV file ready (batch mode)."""
-        from clawd_reachy_mini.tts import KokoroTTS
+        from reachy_claw.tts import KokoroTTS
 
         tts = KokoroTTS(base_url=SPEECH_URL, speaker_id=3, speed=1.0)
 
@@ -291,7 +291,7 @@ class TestTTSLatency:
     @pytest.mark.asyncio
     async def test_streaming_tts_time_to_first_chunk(self):
         """Measure: text → first audio chunk arrives (streaming mode)."""
-        from clawd_reachy_mini.tts import KokoroTTS
+        from reachy_claw.tts import KokoroTTS
 
         tts = KokoroTTS(base_url=SPEECH_URL, speaker_id=3, speed=1.0)
         if not tts.supports_streaming:
@@ -340,7 +340,7 @@ class TestFullPipelineLatency:
         Simulates: user stops speaking, text already transcribed,
         measures from send to AI until first audio file is ready.
         """
-        from clawd_reachy_mini.tts import KokoroTTS
+        from reachy_claw.tts import KokoroTTS
 
         config = _make_config()
         client = DesktopRobotClient(config)
@@ -422,7 +422,7 @@ class TestFullPipelineLatency:
     @pytest.mark.asyncio
     async def test_end_to_end_latency_streaming_tts(self):
         """Full pipeline with streaming TTS: send → LLM → sentence → first audio chunk."""
-        from clawd_reachy_mini.tts import KokoroTTS
+        from reachy_claw.tts import KokoroTTS
 
         config = _make_config()
         client = DesktopRobotClient(config)
@@ -516,8 +516,8 @@ class TestFullPipelineLatency:
         This is the true end-to-end: from when the user stops speaking
         until they would hear the first audio output.
         """
-        from clawd_reachy_mini.stt import ParaformerStreamingSTT
-        from clawd_reachy_mini.tts import KokoroTTS
+        from reachy_claw.stt import ParaformerStreamingSTT
+        from reachy_claw.tts import KokoroTTS
 
         stt = ParaformerStreamingSTT(base_url=SPEECH_URL)
         tts = KokoroTTS(base_url=SPEECH_URL, speaker_id=3, speed=1.0)

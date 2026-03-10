@@ -283,7 +283,7 @@ class TestStreamingASR:
 class TestClientBackends:
     def test_kokoro_tts_batch(self):
         """KokoroTTS batch synthesize against live service."""
-        from clawd_reachy_mini.tts import KokoroTTS
+        from reachy_claw.tts import KokoroTTS
 
         tts = KokoroTTS(base_url=SPEECH_URL, speaker_id=3, speed=1.0)
 
@@ -301,7 +301,7 @@ class TestClientBackends:
 
     def test_kokoro_tts_streaming(self):
         """KokoroTTS streaming synthesize against live service."""
-        from clawd_reachy_mini.tts import KokoroTTS
+        from reachy_claw.tts import KokoroTTS
 
         tts = KokoroTTS(base_url=SPEECH_URL, speaker_id=3, speed=1.0)
         if not tts.supports_streaming:
@@ -324,7 +324,7 @@ class TestClientBackends:
 
     def test_paraformer_streaming_stt_batch_fallback(self):
         """ParaformerStreamingSTT batch transcribe against live service."""
-        from clawd_reachy_mini.stt import ParaformerStreamingSTT
+        from reachy_claw.stt import ParaformerStreamingSTT
 
         stt = ParaformerStreamingSTT(base_url=SPEECH_URL)
         stt.preload()
@@ -336,7 +336,7 @@ class TestClientBackends:
 
     def test_paraformer_streaming_stt_websocket(self):
         """ParaformerStreamingSTT streaming interface against live service."""
-        from clawd_reachy_mini.stt import ParaformerStreamingSTT
+        from reachy_claw.stt import ParaformerStreamingSTT
 
         stt = ParaformerStreamingSTT(base_url=SPEECH_URL)
 
@@ -358,8 +358,8 @@ class TestFallbackBehavior:
 
     def test_fallback_stt_when_unreachable(self):
         """STT factory should fall back to whisper when remote is unreachable."""
-        from clawd_reachy_mini.config import Config
-        from clawd_reachy_mini.stt import WhisperSTT, create_stt_backend
+        from reachy_claw.config import Config
+        from reachy_claw.stt import WhisperSTT, create_stt_backend
 
         config = Config(
             stt_backend="paraformer-streaming",
@@ -373,8 +373,8 @@ class TestFallbackBehavior:
         """TTS factory should fall back to say/none when kokoro is unreachable."""
         import platform
 
-        from clawd_reachy_mini.config import Config
-        from clawd_reachy_mini.tts import MacOSSayTTS, NoopTTS, create_tts_backend
+        from reachy_claw.config import Config
+        from reachy_claw.tts import MacOSSayTTS, NoopTTS, create_tts_backend
 
         config = Config(speech_service_url="http://192.0.2.1:9999")
         backend = create_tts_backend(

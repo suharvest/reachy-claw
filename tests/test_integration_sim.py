@@ -166,7 +166,7 @@ class TestEmotionExecution:
         """Every mapped emotion can be executed without error."""
         from reachy_mini.utils import create_head_pose
 
-        from clawd_reachy_mini.motion.emotion_mapper import EMOTION_MAP, EmotionMapper
+        from reachy_claw.motion.emotion_mapper import EMOTION_MAP, EmotionMapper
 
         mapper = EmotionMapper(intensity=0.5)
 
@@ -207,16 +207,16 @@ class TestEmotionExecution:
 class TestMotionPluginIntegration:
     @pytest.mark.asyncio
     async def test_motion_loop_processes_emotion_on_sim(self, sim_reachy):
-        from clawd_reachy_mini.app import ClawdApp
-        from clawd_reachy_mini.config import Config
-        from clawd_reachy_mini.plugins.motion_plugin import MotionPlugin
+        from reachy_claw.app import ReachyClawApp
+        from reachy_claw.config import Config
+        from reachy_claw.plugins.motion_plugin import MotionPlugin
 
         config = Config(
             idle_animations=False,
             enable_face_tracker=False,
             motion_idle_animation_interval=999,
         )
-        app = ClawdApp(config)
+        app = ReachyClawApp(config)
         app.reachy = sim_reachy
 
         plugin = MotionPlugin(app)
@@ -236,10 +236,10 @@ class TestMotionPluginIntegration:
 
     @pytest.mark.asyncio
     async def test_head_tracking_drives_head_on_sim(self, sim_reachy):
-        from clawd_reachy_mini.app import ClawdApp
-        from clawd_reachy_mini.config import Config
-        from clawd_reachy_mini.motion.head_target import HeadTarget
-        from clawd_reachy_mini.plugins.motion_plugin import MotionPlugin
+        from reachy_claw.app import ReachyClawApp
+        from reachy_claw.config import Config
+        from reachy_claw.motion.head_target import HeadTarget
+        from reachy_claw.plugins.motion_plugin import MotionPlugin
 
         config = Config(
             idle_animations=False,
@@ -247,7 +247,7 @@ class TestMotionPluginIntegration:
             motion_head_tracking_poll_interval=0.05,
             motion_head_tracking_smoothing=0.5,
         )
-        app = ClawdApp(config)
+        app = ReachyClawApp(config)
         app.reachy = sim_reachy
 
         plugin = MotionPlugin(app)
@@ -275,16 +275,16 @@ class TestMotionPluginIntegration:
 
     @pytest.mark.asyncio
     async def test_idle_animation_moves_on_sim(self, sim_reachy):
-        from clawd_reachy_mini.app import ClawdApp
-        from clawd_reachy_mini.config import Config
-        from clawd_reachy_mini.plugins.motion_plugin import MotionPlugin
+        from reachy_claw.app import ReachyClawApp
+        from reachy_claw.config import Config
+        from reachy_claw.plugins.motion_plugin import MotionPlugin
 
         config = Config(
             idle_animations=True,
             enable_face_tracker=False,
             motion_idle_animation_interval=0.1,
         )
-        app = ClawdApp(config)
+        app = ReachyClawApp(config)
         app.reachy = sim_reachy
         app.is_speaking = False
 
@@ -305,9 +305,9 @@ class TestMotionPluginIntegration:
 class TestFullPluginOrchestration:
     @pytest.mark.asyncio
     async def test_app_registers_and_runs_motion_plugin(self, sim_reachy):
-        from clawd_reachy_mini.app import ClawdApp
-        from clawd_reachy_mini.config import Config
-        from clawd_reachy_mini.plugins.motion_plugin import MotionPlugin
+        from reachy_claw.app import ReachyClawApp
+        from reachy_claw.config import Config
+        from reachy_claw.plugins.motion_plugin import MotionPlugin
 
         config = Config(
             idle_animations=False,
@@ -315,7 +315,7 @@ class TestFullPluginOrchestration:
             enable_motion=True,
             standalone_mode=True,
         )
-        app = ClawdApp(config)
+        app = ReachyClawApp(config)
         app.reachy = sim_reachy
 
         plugin = MotionPlugin(app)

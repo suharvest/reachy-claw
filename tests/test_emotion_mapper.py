@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from clawd_reachy_mini.motion.emotion_mapper import (
+from reachy_claw.motion.emotion_mapper import (
     AntennaMotion,
     EmotionMapper,
     HeadPose,

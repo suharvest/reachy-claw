@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from clawd_reachy_mini.motion.head_target import HeadTarget, HeadTargetBus
+from reachy_claw.motion.head_target import HeadTarget, HeadTargetBus
 
 
 class TestHeadTarget:

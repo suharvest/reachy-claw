@@ -7,9 +7,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from clawd_reachy_mini.config import Config
-from clawd_reachy_mini.app import ClawdApp
-from clawd_reachy_mini.plugins.face_tracker_plugin import FaceTrackerPlugin
+from reachy_claw.config import Config
+from reachy_claw.app import ReachyClawApp
+from reachy_claw.plugins.face_tracker_plugin import FaceTrackerPlugin
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def tracker_config():
 
 @pytest.fixture
 def tracker_app(tracker_config, mock_reachy):
-    a = ClawdApp(tracker_config)
+    a = ReachyClawApp(tracker_config)
     a.reachy = mock_reachy
     return a
 

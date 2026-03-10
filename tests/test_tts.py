@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from clawd_reachy_mini.tts import (
+from reachy_claw.tts import (
     ElevenLabsTTS,
     MacOSSayTTS,
     NoopTTS,
@@ -24,7 +24,7 @@ from clawd_reachy_mini.tts import (
 
 class TestCreateTTSBackend:
     def test_creates_elevenlabs(self):
-        with patch("clawd_reachy_mini.elevenlabs.load_elevenlabs_config") as mock_cfg:
+        with patch("reachy_claw.elevenlabs.load_elevenlabs_config") as mock_cfg:
             mock_cfg.return_value = MagicMock()
             backend = create_tts_backend(backend="elevenlabs", voice="test-voice")
             assert isinstance(backend, ElevenLabsTTS)
@@ -111,7 +111,7 @@ class TestMacOSSayTTS:
     async def test_builds_correct_command(self):
         tts = MacOSSayTTS(voice="Alex", rate=200)
 
-        with patch("clawd_reachy_mini.tts.subprocess") as mock_sub:
+        with patch("reachy_claw.tts.subprocess") as mock_sub:
             mock_sub.run.return_value = MagicMock(returncode=0)
             path = await tts.synthesize("Hello")
 
@@ -133,7 +133,7 @@ class TestMacOSSayTTS:
     async def test_default_voice_no_flags(self):
         tts = MacOSSayTTS()
 
-        with patch("clawd_reachy_mini.tts.subprocess") as mock_sub:
+        with patch("reachy_claw.tts.subprocess") as mock_sub:
             mock_sub.run.return_value = MagicMock(returncode=0)
             path = await tts.synthesize("Hi")
 
@@ -150,7 +150,7 @@ class TestMacOSSayTTS:
     async def test_failure_raises(self):
         tts = MacOSSayTTS()
 
-        with patch("clawd_reachy_mini.tts.subprocess") as mock_sub:
+        with patch("reachy_claw.tts.subprocess") as mock_sub:
             mock_sub.run.return_value = MagicMock(
                 returncode=1, stderr=b"say error"
             )
@@ -172,7 +172,7 @@ class TestPiperTTS:
     async def test_builds_correct_command(self):
         tts = PiperTTS(model="/models/en.onnx", speaker=2)
 
-        with patch("clawd_reachy_mini.tts.subprocess") as mock_sub:
+        with patch("reachy_claw.tts.subprocess") as mock_sub:
             mock_sub.run.return_value = MagicMock(returncode=0)
             path = await tts.synthesize("Hello piper")
 
@@ -195,7 +195,7 @@ class TestPiperTTS:
     async def test_failure_raises(self):
         tts = PiperTTS(model="/models/en.onnx")
 
-        with patch("clawd_reachy_mini.tts.subprocess") as mock_sub:
+        with patch("reachy_claw.tts.subprocess") as mock_sub:
             mock_sub.run.return_value = MagicMock(
                 returncode=1, stderr=b"piper error"
             )
