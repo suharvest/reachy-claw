@@ -36,8 +36,8 @@ reachy:
   media_backend: gstreamer
 
 vision:
-  camera_source: opencv
-  tracker: none
+  camera_source: sdk
+  tracker: mediapipe
 
 plugins:
-  face_tracker: false
+  face_tracker: true
