@@ -32,5 +32,11 @@ Capture camera image. Returns filepath.
 Set system speaker volume.
 - `level` (int): Volume percentage, 0-100. Or use relative: +10, -10.
 
+### `reachy_stop_conversation`
+Stop the conversation. The robot will still listen and send messages to you, but will not speak (TTS disabled). Use when the user says "停止", "别说了", "安静", "shut up", "stop" or similar intent to pause the conversation.
+
+### `reachy_resume_conversation`
+Resume the conversation after it was stopped. The robot will start speaking again. Use when the user says "开始", "继续", "你好", "start", "resume", "go on" or similar intent to restart the conversation.
+
 ### `reachy_status`
-Get robot connection state and current head/antenna positions.
+Get robot connection state, current head/antenna positions, and conversation stopped state.

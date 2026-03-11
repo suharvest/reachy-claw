@@ -80,6 +80,7 @@ class ConversationPlugin(Plugin):
 
         self._current_run_id: str | None = None
         self._conversation_active = False
+        self._conversation_stopped = False  # STOPPED: still listen+send, but no TTS
         self._state = ConvState.IDLE
         self._pending_tasks: set[asyncio.Task] = set()
 
@@ -354,6 +355,8 @@ class ConversationPlugin(Plugin):
             "capture_image": self._cmd_capture_image,
             "set_volume": self._cmd_set_volume,
             "status": self._cmd_status,
+            "stop_conversation": self._cmd_stop_conversation,
+            "resume_conversation": self._cmd_resume_conversation,
         }
         handler = handlers.get(action)
         if not handler:
@@ -538,7 +541,10 @@ class ConversationPlugin(Plugin):
 
     def _cmd_status(self, params: dict) -> dict:
         reachy = self.app.reachy
-        status = {"connected": reachy is not None}
+        status = {
+            "connected": reachy is not None,
+            "conversation_stopped": self._conversation_stopped,
+        }
         if reachy:
             try:
                 pose = reachy.get_current_head_pose()
@@ -551,6 +557,23 @@ class ConversationPlugin(Plugin):
             except Exception:
                 pass
         return status
+
+    def _cmd_stop_conversation(self, params: dict) -> dict:
+        if self._conversation_stopped:
+            return {"status": "ok", "conversation": "already_stopped"}
+        self._conversation_stopped = True
+        logger.info("Conversation STOPPED by gateway command")
+        # Thread-safe interrupt: schedule on the event loop
+        loop = asyncio.get_event_loop()
+        loop.call_soon_threadsafe(self._interrupt_event.set)
+        return {"status": "success", "conversation": "stopped"}
+
+    def _cmd_resume_conversation(self, params: dict) -> dict:
+        if not self._conversation_stopped:
+            return {"status": "ok", "conversation": "already_active"}
+        self._conversation_stopped = False
+        logger.info("Conversation RESUMED by gateway command")
+        return {"status": "success", "conversation": "active"}
 
     # ── Pipeline task 1: Audio loop (mic → VAD → STT → send) ─────────
 
@@ -914,6 +937,13 @@ class ConversationPlugin(Plugin):
                 await self._finish_speaking()
                 continue
 
+            # STOPPED: skip TTS playback, just drain
+            if self._conversation_stopped:
+                logger.debug(f"Stopped — skipping TTS: \"{item.text[:30]}\"")
+                if item.is_last:
+                    await self._finish_speaking()
+                continue
+
             # Speak this sentence
             t_speak_start = time.perf_counter()
             self.app.is_speaking = True
@@ -956,10 +986,14 @@ class ConversationPlugin(Plugin):
         self._set_state(ConvState.IDLE)
         if self._client:
             try:
-                await self._client.send_state_change("listening")
+                state = "stopped" if self._conversation_stopped else "listening"
+                await self._client.send_state_change(state)
             except Exception:
                 pass
-        logger.info("Ready for next turn")
+        if self._conversation_stopped:
+            logger.info("Conversation stopped — waiting for resume")
+        else:
+            logger.info("Ready for next turn")
 
     # ── Interrupt ─────────────────────────────────────────────────────
 
