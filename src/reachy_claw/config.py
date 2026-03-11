@@ -34,6 +34,7 @@ class Config:
     reachy_media_backend: str = "default"  # "default" or "gstreamer"
     reachy_spawn_daemon: bool = True  # auto-spawn daemon for USB-connected Lite
     reachy_serialport: str = "auto"  # serial port for Lite, or "auto"
+    reachy_daemon_port: int = 8000  # daemon FastAPI port (SDK connects here)
 
     # Speech-to-text
     stt_backend: str = "paraformer-streaming"  # "paraformer-streaming", "whisper", "faster-whisper", "openai", "sensevoice"
@@ -143,6 +144,7 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("reachy", "media_backend"): "reachy_media_backend",
     ("reachy", "serialport"): "reachy_serialport",
     ("reachy", "spawn_daemon"): "reachy_spawn_daemon",
+    ("reachy", "daemon_port"): "reachy_daemon_port",
     ("stt", "backend"): "stt_backend",
     ("stt", "whisper_model"): "whisper_model",
     ("stt", "openai_api_key"): "openai_api_key",

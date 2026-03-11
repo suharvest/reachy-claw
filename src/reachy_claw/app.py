@@ -46,8 +46,15 @@ class ReachyClawApp:
         kwargs = {}
         if self.config.reachy_connection_mode != "auto":
             kwargs["connection_mode"] = self.config.reachy_connection_mode
+        if self.config.reachy_daemon_port != 8000:
+            kwargs["port"] = self.config.reachy_daemon_port
         if self.config.reachy_media_backend != "default":
             kwargs["media_backend"] = self.config.reachy_media_backend
+
+        # macOS lacks GStreamer/gi — force no_media to avoid crash
+        import sys
+        if sys.platform == "darwin" and "media_backend" not in kwargs:
+            kwargs["media_backend"] = "no_media"
 
         # Auto-spawn daemon for USB-connected Lite
         if self.config.reachy_spawn_daemon:
@@ -56,8 +63,9 @@ class ReachyClawApp:
         try:
             self.reachy = ReachyMini(**kwargs)
             self.reachy.__enter__()
+            self.reachy.enable_motors()
             self._owns_reachy = True
-            logger.info("Connected to Reachy Mini")
+            logger.info("Connected to Reachy Mini (motors enabled)")
         except ImportError as e:
             # GStreamer/gi not available on macOS — retry with no_media
             logger.warning(f"Media backend unavailable ({e}), retrying with no_media")
@@ -65,8 +73,9 @@ class ReachyClawApp:
                 kwargs["media_backend"] = "no_media"
                 self.reachy = ReachyMini(**kwargs)
                 self.reachy.__enter__()
+                self.reachy.enable_motors()
                 self._owns_reachy = True
-                logger.info("Connected to Reachy Mini (no media)")
+                logger.info("Connected to Reachy Mini (no media, motors enabled)")
             except Exception as e2:
                 logger.error(f"Failed to connect to Reachy Mini: {e2}")
                 self.reachy = None
@@ -94,7 +103,7 @@ class ReachyClawApp:
             logger.error("reachy-mini-daemon not found in PATH")
             return
 
-        cmd = [daemon_bin, "--serialport", serialport, "--localhost-only"]
+        cmd = [daemon_bin, "--serialport", serialport, "--localhost-only", "--deactivate-audio"]
         self._daemon_proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
@@ -172,6 +181,11 @@ class ReachyClawApp:
                     duration=0.5,
                 )
                 self.reachy.set_target_antenna_joint_positions([0.0, 0.0])
+            except Exception:
+                pass
+            # Disable motors before disconnecting
+            try:
+                self.reachy.disable_motors()
             except Exception:
                 pass
             # Only close the connection if we created it ourselves
