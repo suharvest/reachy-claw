@@ -1,3 +1,10 @@
+# Local build compose — for building images on the Jetson itself.
+# For production deploy with pre-built images, use: reachy/docker-compose.yml
+#
+# Usage:
+#   docker compose up -d                           # Ollama mode
+#   docker compose --profile openclaw up -d        # OpenClaw mode
+
 services:
   reachy-daemon:
     build:
@@ -27,3 +34,26 @@ services:
     depends_on:
       reachy-daemon:
         condition: service_healthy
+
+  openclaw-gateway:
+    profiles: ["openclaw"]
+    image: ghcr.io/phioranex/openclaw-docker:latest
+    container_name: openclaw-gateway
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - openclaw-config:/home/node/.openclaw
+    environment:
+      - NODE_ENV=production
+      - OPENCLAW_GATEWAY_BIND=lan
+      - OPENCLAW_SKIP_SERVICE_CHECK=true
+    command: ["gateway", "--bind", "lan", "--allow-unconfigured"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  openclaw-config:

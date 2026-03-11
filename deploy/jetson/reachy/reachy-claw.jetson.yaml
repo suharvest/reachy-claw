@@ -1,3 +1,22 @@
+# Reachy Claw — Jetson deployment config.
+#
+# LLM backend:
+#   Ollama mode:   llm.backend: ollama  (default below)
+#   OpenClaw mode: llm.backend: gateway (+ start with --profile openclaw)
+
+llm:
+  backend: ollama
+  model: qwen3.5:2b-q4_K_M
+  base_url: http://localhost:11434
+  # max_history: 5
+
+  # To switch to OpenClaw, change to:
+  # backend: gateway
+
+# gateway:                       # only needed for OpenClaw mode
+#   host: 127.0.0.1
+#   port: 18790
+
 stt:
   backend: paraformer-streaming
   speech_service_url: http://localhost:8621
@@ -13,21 +32,25 @@ vad:
   backend: silero
 
 barge_in:
-  confirm_frames: 8  # ~500ms, avoid false triggers from noise
+  confirm_frames: 10
+  energy_threshold: 0.03
+  silero_threshold: 0.6
+  cooldown_ms: 800
 
 audio:
   device: "Reachy Mini Audio"
+  volume: 5.0
 
 reachy:
   serialport: auto
   spawn_daemon: false  # daemon runs as separate container
   connection_mode: localhost_only
   daemon_port: 38001
-  media_backend: no_media  # audio via USB ALSA, camera via OpenCV
+  media_backend: gstreamer
 
 vision:
-  camera_source: opencv  # direct V4L2 access
-  tracker: mediapipe
+  camera_source: opencv
+  tracker: none
 
 plugins:
-  face_tracker: true
+  face_tracker: false

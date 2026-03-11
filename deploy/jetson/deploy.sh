@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# One-click deploy: reachy-claw stack + OpenClaw gateway to Jetson.
+# One-click deploy: reachy-claw stack to Jetson.
+#
+# Two modes:
+#   ./deploy.sh                    # Ollama mode (default, no OpenClaw)
+#   ./deploy.sh --openclaw         # OpenClaw mode (starts gateway container)
 #
 # Prerequisites:
 #   - Speech service already running on Jetson (port 8621)
 #   - SSH access to Jetson (key-based auth recommended)
+#   - Ollama mode: Ollama installed on Jetson (ollama.com)
+#   - OpenClaw mode: configure LLM after deploy with configure-llm.sh
 #
-# Usage:
-#   ./deploy.sh                           # deploy all
-#   ./deploy.sh --reachy-only             # skip OpenClaw (user already has it)
-#   JETSON_HOST=192.168.1.100 ./deploy.sh # custom host
+# Options:
+#   --openclaw          Deploy with OpenClaw gateway
+#   --setup-openclaw    Run OpenClaw first-time setup (extension install + config)
+#   JETSON_HOST=x       Custom SSH host (default: recomputer)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -17,11 +23,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 JETSON_HOST="${JETSON_HOST:-recomputer}"
 JETSON_USER="${JETSON_USER:-recomputer}"
 DEPLOY_DIR="${DEPLOY_DIR:-~/reachy-deploy}"
-SKIP_OPENCLAW=false
+USE_OPENCLAW=false
+SETUP_OPENCLAW=false
 
 for arg in "$@"; do
     case "$arg" in
-        --reachy-only) SKIP_OPENCLAW=true ;;
+        --openclaw) USE_OPENCLAW=true ;;
+        --setup-openclaw) USE_OPENCLAW=true; SETUP_OPENCLAW=true ;;
     esac
 done
 
@@ -38,55 +46,53 @@ info "Checking SSH connection to $JETSON_USER@$JETSON_HOST..."
 ssh_cmd "echo ok" >/dev/null 2>&1 || die "Cannot SSH to $JETSON_HOST"
 ok "SSH connected"
 
-# ── Deploy OpenClaw ──────────────────────────────────────────────────
-if [ "$SKIP_OPENCLAW" = false ]; then
-    info "=== Deploying OpenClaw gateway ==="
-
-    # Sync openclaw compose + scripts
-    info "Syncing OpenClaw deploy files..."
-    ssh_cmd "mkdir -p $DEPLOY_DIR/openclaw"
-    rsync -az \
-        "$SCRIPT_DIR/openclaw/docker-compose.yml" \
-        "$SCRIPT_DIR/openclaw/setup.sh" \
-        "$SCRIPT_DIR/openclaw/configure-llm.sh" \
-        "$JETSON_USER@$JETSON_HOST:$DEPLOY_DIR/openclaw/"
-    ssh_cmd "chmod +x $DEPLOY_DIR/openclaw/setup.sh $DEPLOY_DIR/openclaw/configure-llm.sh"
-
-    # Stop old openclaw container if exists
-    info "Stopping old OpenClaw container (if any)..."
-    ssh_cmd "docker stop openclaw-gateway 2>/dev/null; docker rm openclaw-gateway 2>/dev/null" || true
-
-    # Start OpenClaw
-    info "Starting OpenClaw gateway..."
-    ssh_cmd "cd $DEPLOY_DIR/openclaw && docker compose pull && docker compose up -d"
-
-    # Run setup (install extension deps + init config)
-    info "Running OpenClaw setup..."
-    ssh_cmd "cd $DEPLOY_DIR/openclaw && bash setup.sh"
-    ok "OpenClaw gateway deployed"
+if [ "$USE_OPENCLAW" = true ]; then
+    info "Mode: OpenClaw (gateway + reachy)"
+else
+    info "Mode: Ollama (reachy only, no gateway)"
 fi
 
-# ── Deploy Reachy stack ──────────────────────────────────────────────
-info "=== Deploying Reachy stack ==="
-
-# Sync reachy compose + config
-info "Syncing Reachy deploy files..."
-ssh_cmd "mkdir -p $DEPLOY_DIR/reachy"
+# ── Sync deploy files ─────────────────────────────────────────────────
+info "Syncing deploy files..."
+ssh_cmd "mkdir -p $DEPLOY_DIR"
 rsync -az \
     "$SCRIPT_DIR/reachy/docker-compose.yml" \
     "$SCRIPT_DIR/reachy/reachy-claw.jetson.yaml" \
-    "$JETSON_USER@$JETSON_HOST:$DEPLOY_DIR/reachy/"
+    "$JETSON_USER@$JETSON_HOST:$DEPLOY_DIR/"
 
-# Stop old containers
-info "Stopping old Reachy containers (if any)..."
-ssh_cmd "cd $DEPLOY_DIR/reachy && docker compose down 2>/dev/null" || true
+# Sync OpenClaw helper scripts (always — they're small and useful later)
+rsync -az \
+    "$SCRIPT_DIR/openclaw/setup.sh" \
+    "$SCRIPT_DIR/openclaw/configure-llm.sh" \
+    "$JETSON_USER@$JETSON_HOST:$DEPLOY_DIR/"
+ssh_cmd "chmod +x $DEPLOY_DIR/setup.sh $DEPLOY_DIR/configure-llm.sh"
+ok "Files synced"
 
-# Pull and start
-info "Pulling and starting Reachy containers..."
-ssh_cmd "cd $DEPLOY_DIR/reachy && docker compose pull && docker compose up -d"
-ok "Reachy stack deployed"
+# ── Stop old containers ───────────────────────────────────────────────
+info "Stopping old containers..."
+ssh_cmd "cd $DEPLOY_DIR && docker compose --profile openclaw down 2>/dev/null" || true
 
-# ── Smoke tests ──────────────────────────────────────────────────────
+# Also clean up legacy separate openclaw compose if it exists
+ssh_cmd "cd $DEPLOY_DIR/openclaw && docker compose down 2>/dev/null" || true
+
+# ── Start stack ───────────────────────────────────────────────────────
+if [ "$USE_OPENCLAW" = true ]; then
+    info "Pulling and starting (with OpenClaw gateway)..."
+    ssh_cmd "cd $DEPLOY_DIR && docker compose --profile openclaw pull && docker compose --profile openclaw up -d"
+else
+    info "Pulling and starting (Ollama mode)..."
+    ssh_cmd "cd $DEPLOY_DIR && docker compose pull && docker compose up -d"
+fi
+ok "Containers started"
+
+# ── OpenClaw first-time setup ─────────────────────────────────────────
+if [ "$SETUP_OPENCLAW" = true ]; then
+    info "Running OpenClaw first-time setup (extension + config)..."
+    ssh_cmd "cd $DEPLOY_DIR && bash setup.sh"
+    ok "OpenClaw setup complete"
+fi
+
+# ── Smoke tests ───────────────────────────────────────────────────────
 info "=== Running smoke tests ==="
 sleep 5
 
@@ -101,21 +107,36 @@ check_service() {
 
 check_service "Speech service (:8621)" "curl -sf http://localhost:8621/health"
 check_service "Reachy daemon (:38001)" "curl -sf http://localhost:38001/"
-if [ "$SKIP_OPENCLAW" = false ]; then
+if [ "$USE_OPENCLAW" = true ]; then
     check_service "OpenClaw gateway (:18789)" "curl -sf http://localhost:18789/healthz"
+else
+    check_service "Ollama (:11434)" "curl -sf http://localhost:11434/api/tags"
 fi
 
 echo ""
 info "Container status:"
-ssh_cmd "docker ps --format 'table {{.Names}}\t{{.Status}}' | grep -E 'reachy|openclaw|speech|voice'"
+ssh_cmd "docker ps --format 'table {{.Names}}\t{{.Status}}' | grep -E 'reachy|openclaw|speech|voice'" || true
 
 echo ""
 ok "Deployment complete!"
 echo ""
-echo "Next steps:"
-echo "  1. Configure LLM (if not done):"
-echo "     ssh $JETSON_USER@$JETSON_HOST 'cd $DEPLOY_DIR/openclaw && ./configure-llm.sh dashscope <api-key>'"
-echo ""
-echo "  2. View logs:"
-echo "     ssh $JETSON_USER@$JETSON_HOST 'cd $DEPLOY_DIR/reachy && docker compose logs -f'"
+
+if [ "$USE_OPENCLAW" = true ]; then
+    echo "Next steps (OpenClaw mode):"
+    echo "  1. Configure LLM (if not done):"
+    echo "     ssh $JETSON_USER@$JETSON_HOST 'cd $DEPLOY_DIR && ./configure-llm.sh dashscope <api-key>'"
+    echo ""
+    echo "  2. View logs:"
+    echo "     ssh $JETSON_USER@$JETSON_HOST 'cd $DEPLOY_DIR && docker compose --profile openclaw logs -f'"
+else
+    echo "Next steps (Ollama mode):"
+    echo "  1. Make sure Ollama is running with the right model:"
+    echo "     ssh $JETSON_USER@$JETSON_HOST 'ollama pull qwen3.5:2b-q4_K_M'"
+    echo ""
+    echo "  2. View logs:"
+    echo "     ssh $JETSON_USER@$JETSON_HOST 'cd $DEPLOY_DIR && docker compose logs -f'"
+    echo ""
+    echo "  To switch to OpenClaw mode later:"
+    echo "     ./deploy.sh --setup-openclaw"
+fi
 echo ""

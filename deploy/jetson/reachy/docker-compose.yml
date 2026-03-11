@@ -1,4 +1,15 @@
+# Unified Reachy Claw stack for Jetson.
+#
+# Two LLM modes:
+#   Ollama mode (default):   docker compose up -d
+#   OpenClaw mode:           docker compose --profile openclaw up -d
+#
+# Both modes share: reachy-daemon, reachy-claw, speech (external).
+# OpenClaw profile adds: openclaw-gateway.
+
 services:
+  # ── Always-on services ────────────────────────────────────────────
+
   reachy-daemon:
     image: sensecraft-missionpack.seeed.cn/solution/reachy-daemon:v1.0
     container_name: reachy-daemon
@@ -40,3 +51,33 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # ── OpenClaw profile (opt-in) ────────────────────────────────────
+
+  openclaw-gateway:
+    profiles: ["openclaw"]
+    image: ghcr.io/phioranex/openclaw-docker:latest
+    container_name: openclaw-gateway
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - openclaw-config:/home/node/.openclaw
+    environment:
+      - NODE_ENV=production
+      - OPENCLAW_GATEWAY_BIND=lan
+      - OPENCLAW_SKIP_SERVICE_CHECK=true
+    command: ["gateway", "--bind", "lan", "--allow-unconfigured"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  openclaw-config:
