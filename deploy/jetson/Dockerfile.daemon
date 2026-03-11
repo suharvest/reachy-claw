@@ -4,6 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential meson pkg-config \
     libcairo2-dev libgirepository1.0-dev gobject-introspection \
     libgl1 libglib2.0-0 \
+    alsa-utils libpulse0 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir reachy-mini

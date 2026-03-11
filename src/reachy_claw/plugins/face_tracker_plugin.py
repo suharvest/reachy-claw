@@ -34,6 +34,7 @@ class FaceTrackerPlugin(Plugin):
 
         self._tracker = None
         self._cap = None
+        self._gst_cam = None  # GstSubprocessCamera
         self._use_sdk_camera = False
 
         # Smoothing state
@@ -77,10 +78,12 @@ class FaceTrackerPlugin(Plugin):
                     import time as _time
                     _time.sleep(0.5)
             if self._camera_source == "sdk":
-                logger.warning("SDK camera requested but not available after retries")
-                return False
-            # auto: fall through to OpenCV
-            logger.info("SDK camera not available, falling back to OpenCV")
+                logger.warning("SDK camera not available after retries")
+                # Fall through to gst-subprocess / OpenCV
+
+        # Try gst-launch subprocess (works in Docker where PyGObject v4l2src is broken)
+        if self._try_gst_subprocess():
+            return True
 
         # OpenCV camera check
         try:
@@ -100,6 +103,30 @@ class FaceTrackerPlugin(Plugin):
 
         return True
 
+    def _try_gst_subprocess(self) -> bool:
+        """Try to set up gst-launch subprocess camera."""
+        from ..vision.gst_camera import GstSubprocessCamera
+
+        if not GstSubprocessCamera.available():
+            logger.debug("gst-launch-1.0 not found, skipping subprocess camera")
+            return False
+
+        device = f"/dev/video{self._camera_index}"
+        # Try to find Reachy camera specifically
+        found = GstSubprocessCamera.find_device()
+        logger.info(f"Trying gst-subprocess camera (device={found or device})")
+        if found:
+            device = found
+
+        cam = GstSubprocessCamera(device=device)
+        if cam.open():
+            logger.info(f"Using gst-subprocess camera: {device}")
+            self._gst_cam = cam
+            return True
+
+        cam.close()
+        return False
+
     def _open_cv_camera(self, cv2):
         """Open camera with best available backend (FFMPEG fallback for ARM64)."""
         cap = cv2.VideoCapture(self._camera_index)
@@ -116,7 +143,7 @@ class FaceTrackerPlugin(Plugin):
     async def start(self):
         from ..vision.head_tracker import create_head_tracker
 
-        if not self._use_sdk_camera:
+        if not self._use_sdk_camera and self._gst_cam is None:
             import cv2
 
             self._cap = self._open_cv_camera(cv2)
@@ -130,9 +157,16 @@ class FaceTrackerPlugin(Plugin):
             logger.error(f"Failed to initialize tracker: {e}")
             if self._cap:
                 self._cap.release()
+            if self._gst_cam:
+                self._gst_cam.close()
             return
 
-        source_desc = "sdk/zenoh" if self._use_sdk_camera else f"opencv/{self._camera_index}"
+        if self._gst_cam:
+            source_desc = f"gst-subprocess/{self._gst_cam.device}"
+        elif self._use_sdk_camera:
+            source_desc = "sdk/zenoh"
+        else:
+            source_desc = f"opencv/{self._camera_index}"
         logger.info(
             f"Face tracker started (type={self._tracker_type}, source={source_desc})"
         )
@@ -145,7 +179,9 @@ class FaceTrackerPlugin(Plugin):
         try:
             while self._running:
                 try:
-                    if self._use_sdk_camera:
+                    if self._gst_cam:
+                        frame = await asyncio.to_thread(self._gst_cam.read)
+                    elif self._use_sdk_camera:
                         frame = await asyncio.to_thread(self.app.reachy.media.get_frame)
                     else:
                         ret, frame = await asyncio.to_thread(self._cap.read)
@@ -167,9 +203,14 @@ class FaceTrackerPlugin(Plugin):
                 consecutive_errors = 0
 
                 # Run face detection in thread to avoid blocking
-                eye_center, _roll = await asyncio.to_thread(
-                    self._tracker.get_head_position, frame
-                )
+                try:
+                    eye_center, _roll = await asyncio.to_thread(
+                        self._tracker.get_head_position, frame
+                    )
+                except Exception as e:
+                    logger.warning(f"Face detection error: {e}")
+                    await asyncio.sleep(0.04)
+                    continue
 
                 now = time.monotonic()
 
@@ -224,6 +265,8 @@ class FaceTrackerPlugin(Plugin):
                 self._tracker.close()
             if self._cap:
                 self._cap.release()
+            if self._gst_cam:
+                self._gst_cam.close()
             logger.info("Face tracker stopped")
 
     async def stop(self):

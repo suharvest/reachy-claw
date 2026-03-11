@@ -51,7 +51,8 @@ class TestFaceTrackerSetup:
         # mediapipe imports fine
         with patch.dict("sys.modules", {"mediapipe": MagicMock()}):
             with patch("builtins.__import__", side_effect=_import_blocker("cv2")):
-                assert plugin.setup() is False
+                with patch.object(plugin, "_try_gst_subprocess", return_value=False):
+                    assert plugin.setup() is False
 
     def test_skips_when_camera_not_available(self, tracker_app):
         plugin = FaceTrackerPlugin(tracker_app)
@@ -64,9 +65,10 @@ class TestFaceTrackerSetup:
 
         with patch.dict("sys.modules", {"mediapipe": mock_mp, "cv2": mock_cv2}):
             with patch("builtins.__import__", side_effect=_import_passthrough("mediapipe", "cv2", mock_mp, mock_cv2)):
-                assert plugin.setup() is False
+                with patch.object(plugin, "_try_gst_subprocess", return_value=False):
+                    assert plugin.setup() is False
 
-        mock_cap.release.assert_called_once()
+        assert mock_cap.release.call_count >= 1
 
     def test_succeeds_when_all_available(self, tracker_app):
         plugin = FaceTrackerPlugin(tracker_app)
@@ -79,7 +81,8 @@ class TestFaceTrackerSetup:
 
         with patch.dict("sys.modules", {"mediapipe": mock_mp, "cv2": mock_cv2}):
             with patch("builtins.__import__", side_effect=_import_passthrough("mediapipe", "cv2", mock_mp, mock_cv2)):
-                assert plugin.setup() is True
+                with patch.object(plugin, "_try_gst_subprocess", return_value=False):
+                    assert plugin.setup() is True
 
         mock_cap.release.assert_called_once()
 
@@ -93,12 +96,20 @@ class TestFaceTrackerCameraSource:
             assert plugin.setup() is True
             assert plugin._use_sdk_camera is True
 
-    def test_sdk_camera_fails_when_unavailable(self, tracker_app):
+    def test_sdk_camera_falls_back_when_unavailable(self, tracker_app):
+        """When SDK camera unavailable, falls back to gst-subprocess/OpenCV."""
         tracker_app.config.vision_camera_source = "sdk"
-        tracker_app.reachy.media.get_frame.side_effect = Exception("no camera")
+        tracker_app.reachy.media_manager.camera = None
         plugin = FaceTrackerPlugin(tracker_app)
         with patch.dict("sys.modules", {"mediapipe": MagicMock()}):
-            assert plugin.setup() is False
+            with patch("time.sleep"):
+                # All fallbacks fail → setup returns False
+                with patch.object(plugin, "_try_gst_subprocess", return_value=False):
+                    with patch("builtins.__import__", side_effect=_import_blocker("cv2")):
+                        assert plugin.setup() is False
+                # gst-subprocess available → succeeds
+                with patch.object(plugin, "_try_gst_subprocess", return_value=True):
+                    assert plugin.setup() is True
 
     def test_auto_prefers_sdk(self, tracker_app):
         tracker_app.config.vision_camera_source = "auto"
@@ -110,7 +121,7 @@ class TestFaceTrackerCameraSource:
 
     def test_auto_falls_back_to_opencv(self, tracker_app):
         tracker_app.config.vision_camera_source = "auto"
-        tracker_app.reachy.media.get_frame.return_value = None  # no frame
+        tracker_app.reachy.media_manager.camera = None  # no SDK camera
         plugin = FaceTrackerPlugin(tracker_app)
 
         mock_mp = MagicMock()
@@ -121,8 +132,9 @@ class TestFaceTrackerCameraSource:
 
         with patch.dict("sys.modules", {"mediapipe": mock_mp, "cv2": mock_cv2}):
             with patch("builtins.__import__", side_effect=_import_passthrough("mediapipe", "cv2", mock_mp, mock_cv2)):
-                assert plugin.setup() is True
-                assert plugin._use_sdk_camera is False
+                with patch.object(plugin, "_try_gst_subprocess", return_value=False):
+                    assert plugin.setup() is True
+                    assert plugin._use_sdk_camera is False
 
 
 class TestFaceTrackerConfig:

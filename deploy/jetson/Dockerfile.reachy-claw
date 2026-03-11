@@ -5,7 +5,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2-dev libgirepository1.0-dev gobject-introspection \
     libportaudio2 portaudio19-dev ffmpeg libasound2-dev \
     libgl1 libglib2.0-0 \
+    gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+    libv4l-0 \
     && rm -rf /var/lib/apt/lists/*
+
+# Fix: v4l2src gets stuck at PAUSED→PLAYING inside Docker without libv4l2
+ENV GST_V4L2_USE_LIBV4L2=1
 
 WORKDIR /app
 COPY . .

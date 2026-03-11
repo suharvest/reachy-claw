@@ -43,7 +43,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 \
     gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
     gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+    libv4l-0 \
     && rm -rf /var/lib/apt/lists/*
+
+# Fix: v4l2src gets stuck at PAUSED→PLAYING inside Docker without libv4l2
+ENV GST_V4L2_USE_LIBV4L2=1
 
 # Copy installed packages from builder
 COPY --from=builder /install /usr/local

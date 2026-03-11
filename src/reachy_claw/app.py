@@ -229,28 +229,47 @@ class ReachyClawApp:
         if self.config.reachy_spawn_daemon:
             self._ensure_daemon(self.config.reachy_serialport)
 
-        try:
-            self.reachy = ReachyMini(**kwargs)
-            self.reachy.__enter__()
-            self.reachy.enable_motors()
-            self._owns_reachy = True
-            logger.info("Connected to Reachy Mini (motors enabled)")
-        except ImportError as e:
-            # GStreamer/gi not available on macOS — retry with no_media
-            logger.warning(f"Media backend unavailable ({e}), retrying with no_media")
+        import time as _time
+
+        max_retries = 5
+        for attempt in range(max_retries):
             try:
-                kwargs["media_backend"] = "no_media"
                 self.reachy = ReachyMini(**kwargs)
                 self.reachy.__enter__()
                 self.reachy.enable_motors()
                 self._owns_reachy = True
-                logger.info("Connected to Reachy Mini (no media, motors enabled)")
-            except Exception as e2:
-                logger.error(f"Failed to connect to Reachy Mini: {e2}")
+                logger.info("Connected to Reachy Mini (motors enabled)")
+                return
+            except ImportError as e:
+                # GStreamer/gi not available on macOS — retry with no_media
+                logger.warning(f"Media backend unavailable ({e}), retrying with no_media")
+                try:
+                    kwargs["media_backend"] = "no_media"
+                    self.reachy = ReachyMini(**kwargs)
+                    self.reachy.__enter__()
+                    self.reachy.enable_motors()
+                    self._owns_reachy = True
+                    logger.info("Connected to Reachy Mini (no media, motors enabled)")
+                    return
+                except Exception as e2:
+                    logger.error(f"Failed to connect to Reachy Mini: {e2}")
+                    self.reachy = None
+                return
+            except ConnectionError as e:
+                if attempt < max_retries - 1:
+                    wait = 2 * (attempt + 1)
+                    logger.warning(
+                        f"Daemon not ready (attempt {attempt + 1}/{max_retries}): {e}. "
+                        f"Retrying in {wait}s..."
+                    )
+                    _time.sleep(wait)
+                else:
+                    logger.error(f"Failed to connect to Reachy Mini after {max_retries} attempts: {e}")
+                    self.reachy = None
+            except Exception as e:
+                logger.error(f"Failed to connect to Reachy Mini: {e}")
                 self.reachy = None
-        except Exception as e:
-            logger.error(f"Failed to connect to Reachy Mini: {e}")
-            self.reachy = None
+                return
 
     def _ensure_daemon(self, serialport: str = "auto") -> None:
         """Start Reachy Mini daemon if not already running."""
