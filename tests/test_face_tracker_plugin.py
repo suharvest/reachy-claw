@@ -17,6 +17,7 @@ def tracker_config():
     return Config(
         enable_face_tracker=True,
         vision_tracker_type="mediapipe",
+        vision_camera_source="opencv",  # tests exercise OpenCV path explicitly
         vision_camera_index=0,
         vision_max_yaw=25.0,
         vision_max_pitch=15.0,
@@ -81,6 +82,47 @@ class TestFaceTrackerSetup:
                 assert plugin.setup() is True
 
         mock_cap.release.assert_called_once()
+
+
+class TestFaceTrackerCameraSource:
+    def test_sdk_camera_succeeds(self, tracker_app):
+        tracker_app.config.vision_camera_source = "sdk"
+        tracker_app.reachy.media.get_frame.return_value = MagicMock()  # truthy frame
+        plugin = FaceTrackerPlugin(tracker_app)
+        with patch.dict("sys.modules", {"mediapipe": MagicMock()}):
+            assert plugin.setup() is True
+            assert plugin._use_sdk_camera is True
+
+    def test_sdk_camera_fails_when_unavailable(self, tracker_app):
+        tracker_app.config.vision_camera_source = "sdk"
+        tracker_app.reachy.media.get_frame.side_effect = Exception("no camera")
+        plugin = FaceTrackerPlugin(tracker_app)
+        with patch.dict("sys.modules", {"mediapipe": MagicMock()}):
+            assert plugin.setup() is False
+
+    def test_auto_prefers_sdk(self, tracker_app):
+        tracker_app.config.vision_camera_source = "auto"
+        tracker_app.reachy.media.get_frame.return_value = MagicMock()
+        plugin = FaceTrackerPlugin(tracker_app)
+        with patch.dict("sys.modules", {"mediapipe": MagicMock()}):
+            assert plugin.setup() is True
+            assert plugin._use_sdk_camera is True
+
+    def test_auto_falls_back_to_opencv(self, tracker_app):
+        tracker_app.config.vision_camera_source = "auto"
+        tracker_app.reachy.media.get_frame.return_value = None  # no frame
+        plugin = FaceTrackerPlugin(tracker_app)
+
+        mock_mp = MagicMock()
+        mock_cv2 = MagicMock()
+        mock_cap = MagicMock()
+        mock_cap.isOpened.return_value = True
+        mock_cv2.VideoCapture.return_value = mock_cap
+
+        with patch.dict("sys.modules", {"mediapipe": mock_mp, "cv2": mock_cv2}):
+            with patch("builtins.__import__", side_effect=_import_passthrough("mediapipe", "cv2", mock_mp, mock_cv2)):
+                assert plugin.setup() is True
+                assert plugin._use_sdk_camera is False
 
 
 class TestFaceTrackerConfig:

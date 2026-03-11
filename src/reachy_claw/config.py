@@ -92,6 +92,7 @@ class Config:
 
     # Vision / face tracking
     vision_tracker_type: str = "mediapipe"  # "mediapipe", "none"
+    vision_camera_source: str = "auto"  # "auto" (SDK if available, else OpenCV), "sdk", "opencv"
     vision_camera_index: int = 0
     vision_max_yaw: float = 25.0
     vision_max_pitch: float = 15.0
@@ -175,6 +176,7 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("motion", "head_tracking_poll_interval"): "motion_head_tracking_poll_interval",
     ("motion", "idle_animation_interval"): "motion_idle_animation_interval",
     ("vision", "tracker"): "vision_tracker_type",
+    ("vision", "camera_source"): "vision_camera_source",
     ("vision", "camera_index"): "vision_camera_index",
     ("vision", "max_yaw"): "vision_max_yaw",
     ("vision", "max_pitch"): "vision_max_pitch",

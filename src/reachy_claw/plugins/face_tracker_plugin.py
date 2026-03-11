@@ -23,6 +23,7 @@ class FaceTrackerPlugin(Plugin):
         super().__init__(app)
         cfg = app.config
         self._tracker_type = cfg.vision_tracker_type
+        self._camera_source = cfg.vision_camera_source
         self._camera_index = cfg.vision_camera_index
         self._max_yaw = cfg.vision_max_yaw
         self._max_pitch = cfg.vision_max_pitch
@@ -32,11 +33,26 @@ class FaceTrackerPlugin(Plugin):
 
         self._tracker = None
         self._cap = None
+        self._use_sdk_camera = False
 
         # Smoothing state
         self._smooth_x = 0.0
         self._smooth_y = 0.0
         self._last_face_time = 0.0
+
+    def _has_sdk_camera(self) -> bool:
+        """Check if the Reachy SDK camera is available via zenoh."""
+        reachy = self.app.reachy
+        if reachy is None:
+            return False
+        media = getattr(reachy, "media", None)
+        if media is None:
+            return False
+        try:
+            frame = media.get_frame()
+            return frame is not None
+        except Exception:
+            return False
 
     def setup(self) -> bool:
         """Check camera and tracker availability."""
@@ -52,7 +68,24 @@ class FaceTrackerPlugin(Plugin):
                 logger.info("mediapipe not installed, face tracker skipped")
                 return False
 
-        # Check camera
+        # Determine camera source
+        if self._camera_source == "sdk":
+            if self._has_sdk_camera():
+                self._use_sdk_camera = True
+                logger.info("Using SDK camera (zenoh) for face tracking")
+                return True
+            else:
+                logger.warning("SDK camera requested but not available")
+                return False
+        elif self._camera_source == "auto":
+            if self._has_sdk_camera():
+                self._use_sdk_camera = True
+                logger.info("Using SDK camera (zenoh) for face tracking")
+                return True
+            # Fall through to OpenCV
+            logger.info("SDK camera not available, falling back to OpenCV")
+
+        # OpenCV camera check
         try:
             import cv2
 
@@ -71,33 +104,40 @@ class FaceTrackerPlugin(Plugin):
         return True
 
     async def start(self):
-        import cv2
-
         from ..vision.head_tracker import create_head_tracker
 
-        self._cap = cv2.VideoCapture(self._camera_index)
-        if not self._cap.isOpened():
-            logger.error("Failed to open camera for face tracking")
-            return
+        if not self._use_sdk_camera:
+            import cv2
+
+            self._cap = cv2.VideoCapture(self._camera_index)
+            if not self._cap.isOpened():
+                logger.error("Failed to open camera for face tracking")
+                return
 
         try:
             self._tracker = create_head_tracker(self._tracker_type)
         except Exception as e:
             logger.error(f"Failed to initialize tracker: {e}")
-            self._cap.release()
+            if self._cap:
+                self._cap.release()
             return
 
+        source_desc = "sdk/zenoh" if self._use_sdk_camera else f"opencv/{self._camera_index}"
         logger.info(
-            f"Face tracker started (type={self._tracker_type}, camera={self._camera_index})"
+            f"Face tracker started (type={self._tracker_type}, source={source_desc})"
         )
 
         self._face_lost_published = False
 
         try:
             while self._running:
-                # Run blocking cv2.read() in a thread to avoid stalling the event loop
-                ret, frame = await asyncio.to_thread(self._cap.read)
-                if not ret or frame is None:
+                if self._use_sdk_camera:
+                    frame = await asyncio.to_thread(self.app.reachy.media.get_frame)
+                else:
+                    ret, frame = await asyncio.to_thread(self._cap.read)
+                    frame = frame if ret else None
+
+                if frame is None:
                     await asyncio.sleep(0.04)
                     continue
 
