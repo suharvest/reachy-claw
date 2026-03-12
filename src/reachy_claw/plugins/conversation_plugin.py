@@ -262,6 +262,7 @@ class ConversationPlugin(Plugin):
         if self._state != new_state:
             logger.debug(f"State: {self._state.value} → {new_state.value}")
             self._state = new_state
+            self.app.events.emit("state_change", {"state": new_state.value})
             if new_state == ConvState.SPEAKING:
                 self._speaking_since = time.monotonic()
 
@@ -319,6 +320,7 @@ class ConversationPlugin(Plugin):
                 logger.info(f"TTFT: {ttft:.0f}ms (send → first delta)")
             self._set_state(ConvState.SPEAKING)
         await self._stream_text_queue.put(text)
+        self.app.events.emit("llm_delta", {"text": text, "run_id": run_id})
 
     async def _on_stream_end(self, full_text: str, run_id: str) -> None:
         if hasattr(self, "_t_send") and self._t_send:
@@ -328,6 +330,7 @@ class ConversationPlugin(Plugin):
         else:
             logger.info(f"Response complete ({len(full_text)} chars)")
         await self._stream_text_queue.put(None)
+        self.app.events.emit("llm_end", {"full_text": full_text, "run_id": run_id})
 
     async def _on_stream_abort(self, reason: str, run_id: str) -> None:
         logger.info(f"Stream aborted: {reason}")
@@ -353,6 +356,7 @@ class ConversationPlugin(Plugin):
 
     async def _on_emotion(self, emotion: str) -> None:
         """Server sends an emotion tag — queue it for immediate expression."""
+        self.app.events.emit("emotion", {"emotion": emotion})
         if self.app.config.play_emotions:
             logger.info(f"Emotion from server: {emotion}")
             self.app.emotions.queue_emotion(emotion)
@@ -694,6 +698,7 @@ class ConversationPlugin(Plugin):
                     partial = await asyncio.to_thread(self._stt.feed_chunk, chunk)
                     if partial and partial.text:
                         logger.debug(f"Partial: \"{partial.text}\" (final={partial.is_final}, stable={partial.is_stable})")
+                        self.app.events.emit("asr_partial", {"text": partial.text})
                         # If ASR sent is_final, skip silence wait and process immediately
                         if partial.is_final:
                             logger.info("ASR is_final received — skipping silence wait")
@@ -770,6 +775,7 @@ class ConversationPlugin(Plugin):
             return
 
         logger.info(f'You said: "{text}"')
+        self.app.events.emit("asr_final", {"text": text})
 
         # Check wake word
         if self._wake_detector and not self._conversation_active:
