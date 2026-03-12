@@ -42,11 +42,12 @@ def vision_app(vision_config, mock_reachy):
 
 
 class TestVisionClientSetup:
-    def test_skips_without_robot(self, vision_config):
+    def test_works_without_robot(self, vision_config):
+        """Vision client doesn't need a robot — it only consumes ZMQ data."""
         app = ReachyClawApp(vision_config)
         app.reachy = None
         plugin = VisionClientPlugin(app)
-        assert plugin.setup() is False
+        assert plugin.setup() is True
 
     def test_skips_without_zmq(self, vision_app):
         plugin = VisionClientPlugin(vision_app)
@@ -150,7 +151,7 @@ class TestConfigYamlMapping:
     def test_config_defaults(self):
         cfg = Config()
         assert cfg.vision_service_url == "tcp://127.0.0.1:8631"
-        assert cfg.vision_emotion_threshold == 0.45
+        assert cfg.vision_emotion_threshold == 0.35
         assert cfg.vision_emotion_cooldown == 2.0
         assert cfg.vision_identity_threshold == 0.4
 

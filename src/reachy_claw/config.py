@@ -117,7 +117,7 @@ class Config:
 
     # Vision TRT service (used when vision_tracker_type == "remote")
     vision_service_url: str = "tcp://127.0.0.1:8631"
-    vision_emotion_threshold: float = 0.45
+    vision_emotion_threshold: float = 0.35
     vision_emotion_cooldown: float = 2.0
     vision_emotion_sustain: float = 5.0  # resend same emotion after N seconds
     vision_identity_threshold: float = 0.4

@@ -196,14 +196,22 @@ class ReachyClawApp:
                 audioconvert = Gst.ElementFactory.make("audioconvert")
                 audioresample = Gst.ElementFactory.make("audioresample")
                 audiosink = Gst.ElementFactory.make("alsasink")
-                audiosink.set_property("device", alsa_device)
+                if audiosink:
+                    audiosink.set_property("device", alsa_device)
+                    sink_name = f"alsasink device={alsa_device}"
+                else:
+                    # alsasink not available (missing gst-alsa plugin) — use autoaudiosink
+                    audiosink = Gst.ElementFactory.make("autoaudiosink")
+                    sink_name = "autoaudiosink (alsasink unavailable)"
+                    if not audiosink:
+                        raise RuntimeError("No audio sink available")
 
                 for el in [self._appsrc, audioconvert, audioresample, audiosink]:
                     pipeline.add(el)
                 self._appsrc.link(audioconvert)
                 audioconvert.link(audioresample)
                 audioresample.link(audiosink)
-                logger.debug("SDK audio playback pipeline: alsasink device=%s", alsa_device)
+                logger.info("SDK audio playback pipeline: %s", sink_name)
             except Exception as e:
                 logger.warning("ALSA playback pipeline failed: %s, falling back", e)
                 _orig_playback(self, pipeline)
