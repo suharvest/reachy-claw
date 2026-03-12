@@ -37,13 +37,16 @@ services:
         max-file: "3"
 
   reachy-claw:
-    image: reachy-claw:v1.9
+    image: reachy-claw:v1.10
     container_name: reachy-claw
     restart: unless-stopped
     network_mode: host
     privileged: true
     volumes:
       - ./reachy-claw.jetson.yaml:/app/reachy-claw.yaml:ro
+      # Source code (dev mount — remove for production image)
+      - ${REACHY_CLAW_SRC:-/home/recomputer/reachy-claw-src/src/reachy_claw}:/app/src/reachy_claw:ro
+      - /dev/shm:/dev/shm
       - /run/udev:/run/udev:ro
     depends_on:
       reachy-daemon:
@@ -64,21 +67,24 @@ services:
 
   vision-trt:
     profiles: ["vision"]
-    build: ../vision-trt
+    image: vision-trt:v2.0-gst
     container_name: vision-trt
     restart: unless-stopped
     network_mode: host
     runtime: nvidia
     devices:
-      - /dev/video0:/dev/video0
+      - ${CAMERA_DEVICE:-/dev/video1}:${CAMERA_DEVICE:-/dev/video1}
     volumes:
+      # Source code (dev mount — remove for production image)
+      - ../vision-trt/src:/app/src:ro
       - ../vision-trt/models:/app/models:ro
+      # Persistent TRT engine cache (avoid rebuild on restart)
       - vision-trt-engines:/app/engines
       - vision-trt-data:/app/data
-      # Mount host TensorRT (JetPack 6.x)
+      # Host TensorRT (JetPack 6.x)
       - /usr/lib/python3.10/dist-packages/tensorrt:/usr/lib/python3.10/dist-packages/tensorrt:ro
       - /lib/aarch64-linux-gnu:/host-libs:ro
-      # Mount host NVIDIA GStreamer plugins + libs (l4t-base has stubs)
+      # Host NVIDIA GStreamer plugins + libs (l4t-base has stubs)
       - /usr/lib/aarch64-linux-gnu/gstreamer-1.0:/host-gst-plugins:ro
       - /usr/lib/aarch64-linux-gnu/nvidia:/host-nvidia-libs:ro
       - /usr/local/cuda-12.6/targets/aarch64-linux/lib:/host-cuda-tgt:ro
@@ -87,9 +93,8 @@ services:
     environment:
       - LD_LIBRARY_PATH=/host-nvidia-libs:/host-libs:/host-cuda-tgt:/usr/local/cuda/lib64
       - GST_PLUGIN_PATH=/host-gst-plugins
-      # Do NOT set GST_V4L2_USE_LIBV4L2=1 — it loads libnvv4l2 which hides
-      # MJPEG caps and forces raw YUY2 at max resolution (10MP CPU decode)
-      - CAMERA_DEVICE=/dev/video0
+      - GST_V4L2_USE_LIBV4L2=1
+      - CAMERA_DEVICE=${CAMERA_DEVICE:-/dev/video1}
       - ZMQ_PUB_PORT=8631
       - HTTP_PORT=8630
       - STREAM_PORT=8632
@@ -98,38 +103,16 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 60s
-    depends_on:
-      reachy-daemon:
-        condition: service_healthy
+      start_period: 300s  # TRT engine build can take 5+ min on first boot
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
 
-  # ── Ollama profile (opt-in) ──────────────────────────────────────
-
-  ollama:
-    profiles: ["ollama"]
-    image: ollama/ollama
-    container_name: ollama
-    restart: unless-stopped
-    network_mode: host
-    runtime: nvidia
-    volumes:
-      - ollama-data:/root/.ollama
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+  # ── Ollama (runs as standalone container, not compose-managed) ───
+  # docker run -d --name ollama --restart unless-stopped --runtime nvidia \
+  #   --network host -v ~/.ollama:/root/.ollama ollama/ollama
 
   # ── OpenClaw profile (opt-in) ────────────────────────────────────
 
@@ -159,7 +142,6 @@ services:
         max-file: "3"
 
 volumes:
-  ollama-data:
   openclaw-config:
   vision-trt-engines:
   vision-trt-data:

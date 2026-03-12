@@ -14,7 +14,7 @@ WORKDIR /build
 COPY . .
 
 RUN pip install --no-cache-dir --prefix=/install onnxruntime
-RUN pip install --no-cache-dir --prefix=/install -e ".[audio,mediapipe-vision,remote-vision,dashboard]"
+RUN pip install --no-cache-dir --prefix=/install ".[audio,mediapipe-vision,remote-vision,dashboard]"
 
 # Install silero-vad WITHOUT torch — only need the Python wrapper + ONNX model
 RUN pip install --no-cache-dir --prefix=/install silero-vad --no-deps
@@ -41,8 +41,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 libgirepository-1.0-1 gir1.2-glib-2.0 \
     libportaudio2 ffmpeg libasound2 \
     libgl1 libglib2.0-0 \
-    gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+    gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-alsa \
     gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+    alsa-utils \
     libv4l-0 \
     && rm -rf /var/lib/apt/lists/*
 
