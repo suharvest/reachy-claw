@@ -39,6 +39,13 @@ mediapipe-vision = [
     "mediapipe>=0.10.14",
     "opencv-python>=4.8",
 ]
+remote-vision = [
+    "pyzmq>=25.0",
+    "msgpack>=1.0",
+]
+dashboard = [
+    "aiohttp>=3.9",
+]
 
 [project.scripts]
 reachy-claw = "reachy_claw.main:main"
