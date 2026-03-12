@@ -6,7 +6,7 @@ processes the emotion queue, and plays idle animations.
 Motion separation:
   - Body rotation (base Z-axis): tracks person's horizontal position
   - Head (Stewart platform): mirrors person's head pose (pitch/roll)
-  - Antennas: emotion-driven expressions
+  - Antennas: emotion-driven dynamic animations (sine-wave oscillation)
 """
 
 import asyncio
@@ -16,9 +16,12 @@ import time
 
 import numpy as np
 
+from ..motion.emotion_mapper import AntennaAnimation
 from ..plugin import Plugin
 
 logger = logging.getLogger(__name__)
+
+_ANIM_HZ = 30  # antenna animation update rate
 
 
 class MotionPlugin(Plugin):
@@ -33,7 +36,7 @@ class MotionPlugin(Plugin):
         self._current_pitch = 0.0
         self._current_roll = 0.0
         self._smoothing = app.config.motion_head_tracking_smoothing
-        self._min_angle_change = 3.0  # degrees
+        self._min_angle_change = 2.0  # degrees — head deadband
         self._last_applied_yaw = 0.0
         self._last_applied_pitch = 0.0
         self._last_applied_roll = 0.0
@@ -42,11 +45,17 @@ class MotionPlugin(Plugin):
         # Body rotation EMA state (base Z-axis — horizontal tracking)
         self._current_body_yaw = 0.0
         self._last_applied_body_yaw = 0.0
+        self._body_smoothing = 0.35  # body EMA
+        self._body_min_angle = 2.0  # degrees — body deadband
 
         # Speech wobble offsets (roll, pitch, yaw) set by HeadWobbler
         self._speech_roll = 0.0
         self._speech_pitch = 0.0
         self._speech_yaw = 0.0
+
+        # Antenna animation state
+        self._antenna_anim: AntennaAnimation | None = None
+        self._antenna_anim_start: float = 0.0
 
     def set_speech_offsets(self, offsets: tuple) -> None:
         """Called by HeadWobbler to set speech-driven head offsets."""
@@ -56,6 +65,7 @@ class MotionPlugin(Plugin):
         await asyncio.gather(
             self._motion_loop(),
             self._head_tracking_loop(),
+            self._antenna_animation_loop(),
         )
 
     async def _motion_loop(self):
@@ -90,8 +100,9 @@ class MotionPlugin(Plugin):
         poll_interval = self.app.config.motion_head_tracking_poll_interval
 
         while self._running:
-            if self.app.is_speaking:
-                # During speech, apply wobble offsets instead of tracking
+            if self.app.is_speaking and self.app.config.conversation_mode != "monologue":
+                # During speech in conversation mode, apply wobble offsets instead of tracking
+                # In monologue mode, keep tracking the user's face while speaking
                 self._apply_speech_wobble()
                 await asyncio.sleep(poll_interval)
                 continue
@@ -109,8 +120,8 @@ class MotionPlugin(Plugin):
                 self._current_yaw += self._smoothing * (target.yaw - self._current_yaw)
                 self._current_pitch += self._smoothing * (target.pitch - self._current_pitch)
                 self._current_roll += self._smoothing * (target.roll - self._current_roll)
-                # Body rotation: horizontal person tracking
-                self._current_body_yaw += self._smoothing * (target.body_yaw - self._current_body_yaw)
+                # Body rotation: horizontal person tracking (slower EMA to avoid jitter)
+                self._current_body_yaw += self._body_smoothing * (target.body_yaw - self._current_body_yaw)
 
             # Update head pose if changed enough
             delta_yaw = abs(self._current_yaw - self._last_applied_yaw)
@@ -125,13 +136,51 @@ class MotionPlugin(Plugin):
 
             # Update body rotation if changed enough
             delta_body = abs(self._current_body_yaw - self._last_applied_body_yaw)
-            if delta_body >= self._min_angle_change:
+            if delta_body >= self._body_min_angle:
                 self._set_body_yaw(self._current_body_yaw)
                 self._last_applied_body_yaw = self._current_body_yaw
 
             await asyncio.sleep(poll_interval)
 
         logger.info("Head tracking fusion loop stopped")
+
+    async def _antenna_animation_loop(self):
+        """Drive continuous antenna animations at 30Hz."""
+        logger.info("Antenna animation loop started")
+        interval = 1.0 / _ANIM_HZ
+
+        while self._running:
+            anim = self._antenna_anim
+            if anim is None:
+                await asyncio.sleep(interval)
+                continue
+
+            t = time.monotonic() - self._antenna_anim_start
+            if t > anim.duration:
+                # Animation finished — decay to neutral
+                self._antenna_anim = None
+                self._set_antennas(0.0, 0.0)
+                await asyncio.sleep(interval)
+                continue
+
+            # Sine wave: each antenna oscillates around center
+            phase_l = 2.0 * math.pi * anim.frequency * t
+            phase_r = phase_l + anim.phase_offset
+
+            # Ease-in over first 0.3s, ease-out over last 0.3s
+            ease = 1.0
+            if t < 0.3:
+                ease = t / 0.3
+            elif t > anim.duration - 0.3:
+                ease = (anim.duration - t) / 0.3
+
+            left = anim.center + anim.amplitude * ease * math.sin(phase_l)
+            right = anim.center + anim.amplitude * ease * math.sin(phase_r)
+
+            self._set_antennas(right, left)
+            await asyncio.sleep(interval)
+
+        logger.info("Antenna animation loop stopped")
 
     def _apply_speech_wobble(self) -> None:
         """Apply speech-driven head wobble offsets."""
@@ -179,12 +228,36 @@ class MotionPlugin(Plugin):
         except Exception:
             pass
 
+    def _set_antennas(self, right_deg: float, left_deg: float) -> None:
+        """Set antenna positions immediately (degrees → radians)."""
+        reachy = self.app.reachy
+        if not reachy:
+            return
+        try:
+            reachy.set_target_antenna_joint_positions([
+                math.radians(right_deg),
+                math.radians(left_deg),
+            ])
+        except Exception:
+            pass
+
     def _execute_expression(self, expr) -> None:
         """Execute a robot expression (head + antenna movement)."""
         reachy = self.app.reachy
         if not reachy:
             logger.info(f"[SIM] Expression: {expr.description}")
             return
+
+        # Start antenna animation if present (takes priority over static antenna)
+        if expr.antenna_anim:
+            self._antenna_anim = expr.antenna_anim
+            self._antenna_anim_start = time.monotonic()
+            logger.info(
+                f"Antenna anim: center={expr.antenna_anim.center:.0f}° "
+                f"amp={expr.antenna_anim.amplitude:.0f}° "
+                f"freq={expr.antenna_anim.frequency:.1f}Hz "
+                f"dur={expr.antenna_anim.duration:.1f}s | {expr.description}"
+            )
 
         try:
             from reachy_mini.utils import create_head_pose
@@ -199,8 +272,8 @@ class MotionPlugin(Plugin):
                 kwargs["head"] = head_pose
                 kwargs["duration"] = expr.head.duration
 
-            if expr.antenna:
-                # SDK uses antennas=[right, left] in radians
+            # Static antenna (only if no animation)
+            if expr.antenna and not expr.antenna_anim:
                 kwargs["antennas"] = [
                     np.radians(expr.antenna.right),
                     np.radians(expr.antenna.left),

@@ -7,6 +7,7 @@ import time
 import pytest
 
 from reachy_claw.motion.emotion_mapper import (
+    AntennaAnimation,
     AntennaMotion,
     EmotionMapper,
     HeadPose,
@@ -47,14 +48,18 @@ class TestIntensityScaling:
         assert expr is not None
         # pitch should be 15 * 1.0 = 15
         assert expr.head.pitch == pytest.approx(15.0)
-        assert expr.antenna.left == pytest.approx(50.0)
+        # surprised uses antenna_anim (center=40, amplitude=20)
+        assert expr.antenna_anim is not None
+        assert expr.antenna_anim.center == pytest.approx(40.0)
 
     def test_half_intensity_scales_values(self):
         em = EmotionMapper(intensity=0.5)
         expr = em.map_emotion("surprised")
         assert expr is not None
         assert expr.head.pitch == pytest.approx(7.5)
-        assert expr.antenna.left == pytest.approx(25.0)
+        # antenna_anim center and amplitude scaled by intensity
+        assert expr.antenna_anim.center == pytest.approx(20.0)
+        assert expr.antenna_anim.amplitude == pytest.approx(10.0)
 
     def test_zero_intensity_zeroes_values(self):
         em = EmotionMapper(intensity=0.0)
@@ -62,7 +67,8 @@ class TestIntensityScaling:
         assert expr is not None
         assert expr.head.pitch == 0.0
         assert expr.head.yaw == 0.0
-        assert expr.antenna.left == 0.0
+        assert expr.antenna_anim.center == 0.0
+        assert expr.antenna_anim.amplitude == 0.0
 
     def test_intensity_clamped_to_01(self):
         em_high = EmotionMapper(intensity=5.0)
@@ -135,7 +141,8 @@ class TestIdleExpression:
         em = EmotionMapper()
         expr = em.get_idle_expression()
         assert expr.head is not None
-        assert expr.antenna is not None
+        # Idle now uses antenna_anim for organic movement
+        assert expr.antenna_anim is not None
         assert expr.description == "Idle breathing"
 
     def test_idle_expressions_vary(self):

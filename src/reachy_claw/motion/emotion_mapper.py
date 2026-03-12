@@ -2,12 +2,16 @@
 
 Translates emotion strings into physical robot expressions using
 head poses, antenna movements, and recorded moves.
+
+Antenna animations use parametric sine waves for organic, dynamic
+movement (e.g. wagging when happy, drooping when sad).
 """
 
 import logging
+import math
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from queue import Empty, Queue
 from typing import Optional
 
@@ -26,11 +30,30 @@ class HeadPose:
 
 @dataclass
 class AntennaMotion:
-    """Antenna target positions in degrees."""
+    """Antenna target positions in degrees (static, one-shot)."""
 
     left: float = 0.0
     right: float = 0.0
     duration: float = 0.5
+
+
+@dataclass
+class AntennaAnimation:
+    """Parametric antenna animation — continuous sine-wave oscillation.
+
+    Each antenna: angle(t) = center + amplitude * sin(2π * freq * t + phase)
+    phase_offset shifts the right antenna relative to left:
+      0    = symmetric (both move together)
+      π    = opposite (wagging like a dog tail)
+      π/2  = wave-like
+    """
+
+    center: float = 0.0  # degrees — base position (positive = up)
+    amplitude: float = 20.0  # degrees — swing range
+    frequency: float = 2.0  # Hz
+    phase_offset: float = math.pi  # radians between L/R
+    duration: float = 2.0  # seconds
+    description: str = ""
 
 
 @dataclass
@@ -39,6 +62,7 @@ class RobotExpression:
 
     head: Optional[HeadPose] = None
     antenna: Optional[AntennaMotion] = None
+    antenna_anim: Optional[AntennaAnimation] = None  # dynamic animation (overrides antenna)
     description: str = ""
 
 
@@ -46,76 +70,109 @@ EMOTION_MAP: dict[str, list[RobotExpression]] = {
     "happy": [
         RobotExpression(
             head=HeadPose(yaw=0, pitch=5, roll=0, duration=0.6),
-            antenna=AntennaMotion(left=30, right=30, duration=0.4),
-            description="Happy nod with antenna raise",
+            antenna_anim=AntennaAnimation(
+                center=25, amplitude=20, frequency=2.5,
+                phase_offset=math.pi, duration=2.5,
+            ),
+            description="Happy wag — fast tail-like swing",
         ),
         RobotExpression(
             head=HeadPose(yaw=10, pitch=5, roll=5, duration=0.5),
-            antenna=AntennaMotion(left=40, right=20, duration=0.3),
-            description="Happy tilt",
+            antenna_anim=AntennaAnimation(
+                center=30, amplitude=15, frequency=2.0,
+                phase_offset=math.pi, duration=2.0,
+            ),
+            description="Happy tilt with wag",
         ),
     ],
     "laugh": [
         RobotExpression(
             head=HeadPose(yaw=0, pitch=10, roll=0, duration=0.3),
-            antenna=AntennaMotion(left=45, right=45, duration=0.2),
-            description="Laughing - quick nod with high antennas",
+            antenna_anim=AntennaAnimation(
+                center=35, amplitude=25, frequency=3.5,
+                phase_offset=math.pi, duration=2.0,
+            ),
+            description="Laughing — excited rapid wag",
         ),
     ],
     "excited": [
         RobotExpression(
             head=HeadPose(yaw=0, pitch=8, roll=0, duration=0.4),
-            antenna=AntennaMotion(left=50, right=50, duration=0.3),
-            description="Excited - head up, antennas high",
+            antenna_anim=AntennaAnimation(
+                center=40, amplitude=25, frequency=3.0,
+                phase_offset=math.pi, duration=3.0,
+            ),
+            description="Excited — high fast wag",
         ),
     ],
     "thinking": [
         RobotExpression(
             head=HeadPose(yaw=15, pitch=-5, roll=10, duration=1.0),
-            antenna=AntennaMotion(left=10, right=-10, duration=0.8),
-            description="Thinking - head tilted, asymmetric antennas",
+            antenna_anim=AntennaAnimation(
+                center=5, amplitude=8, frequency=0.5,
+                phase_offset=math.pi / 2, duration=3.0,
+            ),
+            description="Thinking — slow asymmetric sway",
         ),
     ],
     "confused": [
         RobotExpression(
             head=HeadPose(yaw=-10, pitch=0, roll=-15, duration=0.8),
-            antenna=AntennaMotion(left=-20, right=20, duration=0.6),
-            description="Confused - head tilt with opposite antennas",
+            antenna_anim=AntennaAnimation(
+                center=-5, amplitude=15, frequency=0.8,
+                phase_offset=math.pi, duration=2.5,
+            ),
+            description="Confused — unsteady wobble",
         ),
     ],
     "curious": [
         RobotExpression(
             head=HeadPose(yaw=10, pitch=-8, roll=5, duration=0.7),
-            antenna=AntennaMotion(left=25, right=25, duration=0.5),
-            description="Curious - slight lean forward and tilt",
+            antenna_anim=AntennaAnimation(
+                center=20, amplitude=10, frequency=1.5,
+                phase_offset=0, duration=2.0,
+            ),
+            description="Curious — perked up, gentle sync bounce",
         ),
     ],
     "sad": [
         RobotExpression(
             head=HeadPose(yaw=0, pitch=-15, roll=0, duration=1.2),
-            antenna=AntennaMotion(left=-30, right=-30, duration=1.0),
-            description="Sad - head down, antennas drooping",
+            antenna_anim=AntennaAnimation(
+                center=-25, amplitude=5, frequency=0.3,
+                phase_offset=0, duration=3.0,
+            ),
+            description="Sad — drooping, barely moving",
         ),
     ],
     "angry": [
         RobotExpression(
             head=HeadPose(yaw=0, pitch=-5, roll=0, duration=0.3),
-            antenna=AntennaMotion(left=-10, right=-10, duration=0.2),
-            description="Angry - slight head forward, antennas down",
+            antenna_anim=AntennaAnimation(
+                center=-10, amplitude=12, frequency=4.0,
+                phase_offset=0, duration=1.5,
+            ),
+            description="Angry — tense fast vibration",
         ),
     ],
     "surprised": [
         RobotExpression(
             head=HeadPose(yaw=0, pitch=15, roll=0, duration=0.3),
-            antenna=AntennaMotion(left=50, right=50, duration=0.2),
-            description="Surprised - head back, antennas way up",
+            antenna_anim=AntennaAnimation(
+                center=40, amplitude=20, frequency=3.0,
+                phase_offset=math.pi, duration=2.0,
+            ),
+            description="Surprised — snap up then wag",
         ),
     ],
     "fear": [
         RobotExpression(
             head=HeadPose(yaw=-5, pitch=-10, roll=-5, duration=0.4),
-            antenna=AntennaMotion(left=-20, right=-20, duration=0.3),
-            description="Fear - slight retreat",
+            antenna_anim=AntennaAnimation(
+                center=-15, amplitude=10, frequency=5.0,
+                phase_offset=0, duration=2.0,
+            ),
+            description="Fear — trembling shiver",
         ),
     ],
     "neutral": [
@@ -128,20 +185,31 @@ EMOTION_MAP: dict[str, list[RobotExpression]] = {
     "listening": [
         RobotExpression(
             head=HeadPose(yaw=5, pitch=-3, roll=3, duration=0.6),
-            antenna=AntennaMotion(left=15, right=15, duration=0.5),
-            description="Listening - slight lean with attentive antennas",
+            antenna_anim=AntennaAnimation(
+                center=15, amplitude=5, frequency=0.8,
+                phase_offset=math.pi / 3, duration=3.0,
+            ),
+            description="Listening — attentive gentle sway",
         ),
     ],
     "agreeing": [
         RobotExpression(
             head=HeadPose(yaw=0, pitch=8, roll=0, duration=0.4),
-            description="Agreeing - nod",
+            antenna_anim=AntennaAnimation(
+                center=15, amplitude=10, frequency=2.0,
+                phase_offset=0, duration=1.5,
+            ),
+            description="Agreeing — nod with happy bounce",
         ),
     ],
     "disagreeing": [
         RobotExpression(
             head=HeadPose(yaw=15, pitch=0, roll=0, duration=0.3),
-            description="Disagreeing - head shake",
+            antenna_anim=AntennaAnimation(
+                center=-5, amplitude=12, frequency=2.5,
+                phase_offset=math.pi, duration=1.5,
+            ),
+            description="Disagreeing — shake with agitated wag",
         ),
     ],
 }
@@ -186,6 +254,16 @@ class EmotionMapper:
             )
             if template.antenna
             else None,
+            antenna_anim=AntennaAnimation(
+                center=template.antenna_anim.center,
+                amplitude=template.antenna_anim.amplitude,
+                frequency=template.antenna_anim.frequency,
+                phase_offset=template.antenna_anim.phase_offset,
+                duration=template.antenna_anim.duration,
+                description=template.antenna_anim.description,
+            )
+            if template.antenna_anim
+            else None,
             description=template.description,
         )
 
@@ -197,6 +275,9 @@ class EmotionMapper:
         if expr.antenna:
             expr.antenna.left *= self._intensity
             expr.antenna.right *= self._intensity
+        if expr.antenna_anim:
+            expr.antenna_anim.center *= self._intensity
+            expr.antenna_anim.amplitude *= self._intensity
 
         return expr
 
@@ -228,9 +309,14 @@ class EmotionMapper:
         yaw = random.uniform(-5, 5)
         pitch = random.uniform(-3, 3)
         roll = random.uniform(-3, 3)
-        antenna = random.uniform(-10, 10)
         return RobotExpression(
             head=HeadPose(yaw=yaw, pitch=pitch, roll=roll, duration=2.0),
-            antenna=AntennaMotion(left=antenna, right=antenna, duration=1.5),
+            antenna_anim=AntennaAnimation(
+                center=random.uniform(-5, 5),
+                amplitude=random.uniform(3, 8),
+                frequency=random.uniform(0.3, 0.7),
+                phase_offset=random.uniform(0, math.pi),
+                duration=2.5,
+            ),
             description="Idle breathing",
         )

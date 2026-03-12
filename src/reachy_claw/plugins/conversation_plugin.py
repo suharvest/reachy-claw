@@ -90,6 +90,9 @@ class ConversationPlugin(Plugin):
         # Monologue mode state
         self._monologue_mode = False
         self._last_speech_time: float = 0.0  # for monologue auto-trigger
+        self._pending_speech: str | None = None  # speech heard while speaking (monologue)
+        self._bg_speech_frames: list[np.ndarray] = []  # frames for bg listening
+        self._bg_silence_count: int = 0  # silence counter for bg listening
 
     def setup(self) -> bool:
         return True
@@ -274,6 +277,11 @@ class ConversationPlugin(Plugin):
 
     # ── State helpers ─────────────────────────────────────────────────
 
+    # State → emotion mapping for antenna animations
+    _STATE_EMOTION_MAP = {
+        ConvState.LISTENING: "listening",
+    }
+
     def _set_state(self, new_state: ConvState) -> None:
         if self._state != new_state:
             old_state = self._state
@@ -286,6 +294,10 @@ class ConversationPlugin(Plugin):
             # a full monologue_interval gap for ASR to process user speech
             if old_state == ConvState.SPEAKING and new_state == ConvState.IDLE:
                 self._last_speech_time = time.monotonic()
+            # Drive antenna animation from state changes
+            emotion = self._STATE_EMOTION_MAP.get(new_state)
+            if emotion:
+                self.app.emotions.queue_emotion(emotion)
 
     def _spawn_task(self, coro: Coroutine[Any, Any, Any], *, name: str) -> None:
         """Track background tasks so they can be cancelled on shutdown."""
@@ -707,9 +719,14 @@ class ConversationPlugin(Plugin):
             if not isinstance(chunk, np.ndarray):
                 chunk = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
 
-            # ── SPEAKING state: detect barge-in (3-layer defense) ──
-            # Skip normal VAD path — barge-in uses its own energy+probability checks
+            # ── SPEAKING state ──
             if self._state == ConvState.SPEAKING:
+                # Monologue mode: always listen in background (no barge-in)
+                if self._monologue_mode:
+                    await self._bg_listen(chunk, streaming_stt)
+                    continue
+
+                # Conversation mode: detect barge-in (3-layer defense)
                 if not self.app.config.barge_in_enabled:
                     continue
 
@@ -750,8 +767,10 @@ class ConversationPlugin(Plugin):
                     barge_in_count = 0
                 continue
 
-            # ── TRANSCRIBING / THINKING states: wait ──
+            # ── TRANSCRIBING / THINKING states ──
             if self._state in (ConvState.TRANSCRIBING, ConvState.THINKING):
+                if self._monologue_mode:
+                    await self._bg_listen(chunk, streaming_stt)
                 continue
 
             # ── Monologue auto-trigger: if idle too long, generate monologue ──
@@ -764,7 +783,10 @@ class ConversationPlugin(Plugin):
                 and time.monotonic() - self._last_speech_time
                     >= self.app.config.monologue_interval
             ):
-                prompt = self._compose_monologue_prompt(None)
+                # Use any speech captured in background, then clear
+                transcript = self._pending_speech
+                self._pending_speech = None
+                prompt = self._compose_monologue_prompt(transcript)
                 self._spawn_task(
                     self._process_and_send_raw(prompt),
                     name="conversation.monologue_auto",
@@ -844,6 +866,66 @@ class ConversationPlugin(Plugin):
                             self._transcribe_and_send(audio_data),
                             name="conversation.transcribe_and_send",
                         )
+
+    async def _bg_listen(self, chunk: np.ndarray, streaming_stt: bool) -> None:
+        """Background listening during SPEAKING/THINKING in monologue mode.
+
+        Runs VAD on audio and feeds speech to streaming STT without
+        interrupting playback. Detected speech is stored in _pending_speech
+        for inclusion in the next monologue prompt.
+        """
+        max_silence_bg = int(
+            self.app.config.silence_duration * self.app.config.sample_rate / 1024
+        )
+        has_speech = await asyncio.to_thread(self._audio._detect_speech, chunk)
+
+        if has_speech:
+            if not self._bg_speech_frames:
+                # Speech start — begin streaming STT
+                logger.debug("BG listen: speech detected while speaking")
+                if streaming_stt:
+                    self._stt.cancel_stream()  # cancel any stale stream
+                    await asyncio.to_thread(
+                        self._stt.start_stream, self.app.config.sample_rate
+                    )
+            self._bg_speech_frames.append(chunk)
+            self._bg_silence_count = 0
+
+            if streaming_stt:
+                partial = await asyncio.to_thread(self._stt.feed_chunk, chunk)
+                if partial and partial.text:
+                    self.app.events.emit("asr_partial", {"text": partial.text})
+                    if partial.is_final:
+                        # STT says utterance complete
+                        text = await asyncio.to_thread(self._stt.finish_stream)
+                        if text and text.strip():
+                            logger.info(f'BG heard: "{text}"')
+                            self.app.events.emit("asr_final", {"text": text})
+                            self._pending_speech = text
+                        self._bg_speech_frames = []
+                        self._bg_silence_count = 0
+                        if self._vad:
+                            self._vad.reset()
+
+        elif self._bg_speech_frames:
+            # Silence after speech — keep feeding STT
+            self._bg_silence_count += 1
+            self._bg_speech_frames.append(chunk)
+            if streaming_stt:
+                await asyncio.to_thread(self._stt.feed_chunk, chunk)
+
+            if self._bg_silence_count >= max_silence_bg:
+                # End of bg utterance
+                if streaming_stt:
+                    text = await asyncio.to_thread(self._stt.finish_stream)
+                    if text and text.strip():
+                        logger.info(f'BG heard: "{text}"')
+                        self.app.events.emit("asr_final", {"text": text})
+                        self._pending_speech = text
+                self._bg_speech_frames = []
+                self._bg_silence_count = 0
+                if self._vad:
+                    self._vad.reset()
 
     async def _transcribe_and_send(self, audio: np.ndarray) -> None:
         """Transcribe audio (batch) and send to AI."""
