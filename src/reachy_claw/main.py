@@ -284,6 +284,11 @@ async def run_demo() -> int:
 async def async_main(config: Config) -> int:
     app = ReachyClawApp(config)
 
+    # Start health endpoint for container orchestration
+    from reachy_claw.healthcheck import start_health_server
+
+    asyncio.create_task(start_health_server(app, port=8640))
+
     # Connect robot
     app.connect_robot()
 
@@ -306,6 +311,11 @@ async def async_main(config: Config) -> int:
     from reachy_claw.plugins.conversation_plugin import ConversationPlugin
 
     app.register(ConversationPlugin(app))
+
+    if config.dashboard_enabled:
+        from reachy_claw.plugins.dashboard_plugin import DashboardPlugin
+
+        app.register(DashboardPlugin(app))
 
     # Handle shutdown signals (first = graceful, second = force)
     loop = asyncio.get_running_loop()
