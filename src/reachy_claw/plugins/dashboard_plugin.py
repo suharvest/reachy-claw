@@ -187,6 +187,9 @@ class DashboardPlugin(Plugin):
             await self._set_volume(vol)
             await self._broadcast({"type": "volume", "volume": vol})
 
+        elif msg_type == "restart_services":
+            await self._restart_services()
+
         elif msg_type == "set_motor":
             motion = self.app.get_plugin("motion")
             if motion:
@@ -419,6 +422,49 @@ class DashboardPlugin(Plugin):
             "type": "smile_capture",
             "count": self._capture_count,
         })
+
+    async def _restart_services(self) -> None:
+        """Restart Docker containers via Docker Engine API (Unix socket)."""
+        import aiohttp
+
+        sock_path = "/var/run/docker.sock"
+        containers = ["vision-trt", "reachy-daemon", "reachy-claw"]
+
+        await self._broadcast({"type": "restart_status", "status": "starting"})
+
+        conn = aiohttp.UnixConnector(path=sock_path)
+        try:
+            async with aiohttp.ClientSession(connector=conn) as session:
+                for name in containers:
+                    await self._broadcast({
+                        "type": "restart_status",
+                        "status": "restarting",
+                        "container": name,
+                    })
+                    try:
+                        url = f"http://localhost/containers/{name}/restart?t=10"
+                        async with session.post(
+                            url, timeout=aiohttp.ClientTimeout(total=30)
+                        ) as resp:
+                            if resp.status == 204:
+                                logger.info("Restarted container: %s", name)
+                            else:
+                                body = await resp.text()
+                                logger.warning(
+                                    "Restart %s: HTTP %d — %s", name, resp.status, body
+                                )
+                    except Exception as e:
+                        logger.error("Failed to restart %s: %s", name, e)
+        except Exception as e:
+            logger.error("Docker socket error: %s", e)
+            await self._broadcast({
+                "type": "restart_status",
+                "status": "error",
+                "error": str(e),
+            })
+            return
+
+        await self._broadcast({"type": "restart_status", "status": "done"})
 
     async def _clear_captures(self) -> None:
         """Call vision-trt API to clear captures, broadcast reset."""

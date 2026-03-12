@@ -231,6 +231,10 @@ function handleDashboardMsg(msg) {
             updateMuteUI();
             break;
 
+        case 'restart_status':
+            handleRestartStatus(msg);
+            break;
+
         case 'motor_state':
             motorEnabled = msg.enabled !== false;
             motorPreset = msg.preset || 'moderate';
@@ -724,6 +728,9 @@ function initSettings() {
 
     // Motor control
     initMotor();
+
+    // Restart services
+    initRestart();
 }
 
 let currentVolume = 80;
@@ -944,8 +951,6 @@ function initMotor() {
         motorEnabled = !motorEnabled;
         toggle.classList.toggle('active', motorEnabled);
         presets.classList.toggle('disabled', !motorEnabled);
-        toggle.querySelector('.motor-sleep-label');
-        // Update label in the row
         document.querySelector('.motor-sleep-label').textContent =
             motorEnabled ? 'Motor Enabled' : 'Motor Disabled (Sleep)';
         updateMotorStatus();
@@ -953,7 +958,8 @@ function initMotor() {
     };
 
     document.querySelectorAll('#motor-presets .mode-option').forEach(opt => {
-        opt.onclick = () => {
+        opt.onclick = (e) => {
+            e.preventDefault(); // prevent label→radio double-fire
             const preset = opt.dataset.motor;
             if (preset === motorPreset) return;
             motorPreset = preset;
@@ -962,6 +968,10 @@ function initMotor() {
             sendMotorState();
         };
     });
+
+    // Apply initial state
+    syncMotorPresetUI();
+    updateMotorStatus();
 }
 
 function syncMotorPresetUI() {
@@ -1006,6 +1016,46 @@ function savePrompt(mode, text) {
         text = document.getElementById(id).value;
     }
     dashboardWs.send(JSON.stringify({ type: 'set_prompt', mode, prompt: text }));
+}
+
+// ── Restart Services ─────────────────────────────────────────────
+function initRestart() {
+    const btn = document.getElementById('restart-btn');
+    if (!btn) return;
+    btn.onclick = () => {
+        if (!dashboardWs || dashboardWs.readyState !== 1) {
+            showToast('Not connected', true);
+            return;
+        }
+        if (!confirm('Restart all services? The dashboard will briefly disconnect.')) return;
+        btn.disabled = true;
+        document.getElementById('restart-status').textContent = 'Sending restart command...';
+        dashboardWs.send(JSON.stringify({ type: 'restart_services' }));
+    };
+}
+
+function handleRestartStatus(msg) {
+    const statusEl = document.getElementById('restart-status');
+    const btn = document.getElementById('restart-btn');
+    if (!statusEl) return;
+
+    switch (msg.status) {
+        case 'starting':
+            statusEl.textContent = 'Restarting services...';
+            break;
+        case 'restarting':
+            statusEl.textContent = `Restarting ${msg.container}...`;
+            break;
+        case 'done':
+            statusEl.textContent = 'All services restarted. Reconnecting...';
+            if (btn) btn.disabled = false;
+            break;
+        case 'error':
+            statusEl.textContent = 'Error: ' + (msg.error || 'unknown');
+            if (btn) btn.disabled = false;
+            showToast('Restart failed', true);
+            break;
+    }
 }
 
 // ── Init ────────────────────────────────────────────────────────────

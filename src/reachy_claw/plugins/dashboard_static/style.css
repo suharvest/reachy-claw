@@ -659,6 +659,24 @@ body {
     font-size: 11px; color: var(--green);
 }
 
+/* Restart section */
+.restart-section { margin-top: 20px; }
+.restart-section h3 { font-size: 13px; color: var(--text); margin-bottom: 10px; }
+
+.restart-btn {
+    width: 100%; padding: 10px 16px;
+    background: rgba(255, 51, 102, 0.15); border: 1px solid rgba(255, 51, 102, 0.4);
+    border-radius: 6px; color: var(--red); font-size: 13px; font-weight: 600;
+    cursor: pointer; transition: all 0.2s;
+}
+.restart-btn:hover { background: rgba(255, 51, 102, 0.25); border-color: var(--red); }
+.restart-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.restart-status {
+    margin-top: 8px; font-size: 11px; color: var(--text-dim);
+    min-height: 16px;
+}
+
 /* Face management */
 .face-section { margin-bottom: 20px; }
 .face-section h3 {
