@@ -40,22 +40,23 @@ body {
     inset: 0;
 }
 
-/* ── 3-Column Grid ────────────────────────────────────────────────── */
+/* ── 3-Column × 2-Row Grid ────────────────────────────────────────── */
 
 .grid-container {
     display: grid;
-    /* Use 1fr/auto/1fr to ensure left and right columns are exactly symmetrical, mirroring around center */
     grid-template-columns: 1fr auto 1fr;
+    grid-template-rows: 1fr auto;
     height: 100vh;
-    padding: 64px 80px; 
-    gap: 80px;          
+    padding: 40px 64px 48px;
+    column-gap: 4vw;
+    row-gap: 4vw;
     box-sizing: border-box;
 }
 
 /* ── Section headers ──────────────────────────────────────────────── */
 
 .section-header {
-    font-size: 32px;
+    font-size: 40px;
     font-weight: 600;
     color: var(--green);
     padding: 0 0 16px;
@@ -65,7 +66,7 @@ body {
 }
 
 .header-emoji {
-    font-size: 40px;
+    font-size: 48px;
     line-height: 1;
 }
 
@@ -78,40 +79,57 @@ body {
 }
 
 .mind-logo {
-    width: 80px;
-    height: 80px;
-    color: var(--text-bright);
-    filter: drop-shadow(0 0 4px rgba(255,255,255,0.3));
+    width: 64px;
+    height: 64px;
+    color: var(--green);
+    filter: drop-shadow(0 0 8px rgba(170, 255, 0, 0.6));
 }
 
 .mind-title {
     display: flex;
-    flex-direction: column;
-    font-size: 34px;
+    flex-direction: row;
+    gap: 8px;
+    font-size: 36px;
     font-weight: 600;
     line-height: 1.1;
     color: var(--green);
+    white-space: nowrap;
 }
+
+/* ── Grid Cell Placement ──────────────────────────────────────────── */
+
+.cell-left-top     { grid-column: 1; grid-row: 1; }
+.cell-center-top   { grid-column: 2; grid-row: 1; }
+.cell-right         { grid-column: 3; grid-row: 1 / -1; } /* span both rows */
+.cell-left-bottom  { grid-column: 1; grid-row: 2; }
+.cell-center-bottom{ grid-column: 2; grid-row: 2; }
 
 /* ── Left Column ──────────────────────────────────────────────────── */
 
-.col-left {
+.cell-left-top {
     display: flex;
     flex-direction: column;
     gap: 16px;
     overflow: hidden;
-    align-items: flex-start; /* Restore left alignment */
+    align-items: flex-start;
+    justify-content: flex-start;
+}
+
+.cell-left-bottom {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    align-items: flex-start;
 }
 
 .video-container {
     position: relative;
     width: 100%;
-    aspect-ratio: 16 / 9;
-    max-height: 40vh; /* Make slightly smaller to match scale */
+    flex: 1;
+    min-height: 0;
     background: #111;
     border-radius: 24px;
     overflow: hidden;
-    margin-bottom: 120px; /* ENORMOUS space to match the new drawing */
 }
 
 .video-container img {
@@ -153,7 +171,7 @@ body {
 }
 
 .hear-label {
-    font-size: 32px;
+    font-size: 40px;
     font-weight: 600;
     color: var(--green);
     white-space: nowrap;
@@ -207,20 +225,26 @@ body {
 
 /* ── Center Column ────────────────────────────────────────────────── */
 
-.col-center {
+.cell-center-top {
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: flex-start; /* Align top with video */
-    padding-top: 64px; /* Align top exactly with video container (header 48px + gap 16px) */
-    gap: 40px;
+    justify-content: center;
+    gap: 32px;
+}
+
+.cell-center-bottom {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 24px;
 }
 
 /* Face viewport with thick green brackets */
 .face-viewport {
     position: relative;
-    width: 240px; /* Slightly larger to match reference scale */
-    height: 240px;
+    width: min(320px, 20vw);
+    height: min(320px, 20vw);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -235,8 +259,8 @@ body {
 /* Thick green corner brackets */
 .bracket {
     position: absolute;
-    width: 32px;
-    height: 32px;
+    width: 40px;
+    height: 40px;
     border-color: var(--green);
     border-style: solid;
     border-width: 0;
@@ -278,11 +302,10 @@ body {
 
 /* Face description label */
 .emotion-label {
-    font-size: 28px;
+    font-size: 36px;
     font-weight: 500;
     color: var(--text-bright);
     text-align: center;
-    margin-top: 0; /* Let flex gap handle spacing uniformly */
 }
 
 /* Capture counter */
@@ -293,10 +316,10 @@ body {
     margin-top: 0px;
 }
 
-.heart-icon { font-size: 56px; line-height: 1; }
+.heart-icon { font-size: 72px; line-height: 1; }
 
 .capture-count {
-    font-size: 64px;
+    font-size: 80px;
     font-weight: 700;
     color: var(--red);
     line-height: 1;
@@ -327,12 +350,12 @@ body {
 
 /* ── Right Column: Reachy's Mind ──────────────────────────────────── */
 
-.col-right {
+.cell-right {
     display: flex;
     flex-direction: column;
-    overflow: hidden;
-    padding: 0; 
-    align-items: flex-start; /* Red box logic: Right column starts from left edge of its track */
+    align-items: flex-start;
+    gap: 24px;
+    min-width: 0; /* allow shrink but don't clip header */
 }
 
 .thought-list {
@@ -600,6 +623,41 @@ body {
     background: var(--green); border-radius: 50%; cursor: pointer;
 }
 .volume-value { font-size: 13px; color: var(--green); min-width: 36px; text-align: right; }
+
+/* Motor control */
+.motor-section { margin-top: 20px; }
+.motor-section h3 { font-size: 13px; color: var(--text); margin-bottom: 10px; }
+
+.motor-sleep-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px;
+    margin-bottom: 12px;
+}
+.motor-sleep-label { font-size: 12px; color: var(--text-bright); font-weight: 600; }
+
+.motor-sleep-toggle {
+    background: none; border: none; cursor: pointer; padding: 0;
+}
+.toggle-track {
+    display: block; width: 40px; height: 22px; border-radius: 11px;
+    background: var(--border); position: relative; transition: background 0.2s;
+}
+.toggle-thumb {
+    display: block; width: 18px; height: 18px; border-radius: 50%;
+    background: var(--text-dim); position: absolute; top: 2px; left: 2px;
+    transition: all 0.2s;
+}
+.motor-sleep-toggle.active .toggle-track { background: var(--green-dim); }
+.motor-sleep-toggle.active .toggle-thumb { background: var(--green); left: 20px; }
+
+.motor-presets { display: flex; flex-direction: column; gap: 8px; }
+.motor-presets.disabled { opacity: 0.35; pointer-events: none; }
+
+.motor-status {
+    margin-top: 12px; padding: 8px 12px;
+    background: rgba(118, 185, 0, 0.08); border-radius: 4px;
+    font-size: 11px; color: var(--green);
+}
 
 /* Face management */
 .face-section { margin-bottom: 20px; }

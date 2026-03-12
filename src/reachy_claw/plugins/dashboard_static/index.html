@@ -4,15 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>EMOTION MIRROR</title>
-<link rel="stylesheet" href="/static/style.css?v=8">
+<link rel="stylesheet" href="/static/style.css?v=11">
 </head>
 <body>
 
 <div class="dashboard">
-    <!-- 3-column grid -->
+    <!-- 3-column × 2-row grid: shared row boundary keeps top/bottom aligned -->
     <div class="grid-container">
-        <!-- LEFT: What I See + What I Hear + ASR -->
-        <div class="col-left">
+        <!-- Row 1: top sections -->
+        <div class="cell-left-top">
             <div class="section-header"><span class="header-emoji">&#x1F440;</span> What I see</div>
             <div class="video-container">
                 <img id="video-stream" alt="">
@@ -22,7 +22,32 @@
                     <div>Connecting to vision...</div>
                 </div>
             </div>
+        </div>
 
+        <div class="cell-center-top">
+            <div class="face-viewport">
+                <canvas id="face-crop-canvas" width="320" height="400"></canvas>
+                <div class="bracket tl"></div>
+                <div class="bracket tr"></div>
+                <div class="bracket bl"></div>
+                <div class="bracket br"></div>
+            </div>
+            <div class="emotion-pill" id="emotion-pill">Neutral</div>
+        </div>
+
+        <div class="cell-right">
+            <div class="section-header mind-header">
+                <img src="/static/brain-bulb.svg" class="mind-logo" alt="logo">
+                <div class="mind-title">
+                    <span>Reachy's</span>
+                    <span>Mind</span>
+                </div>
+            </div>
+            <div class="thought-list" id="thought-list"></div>
+        </div>
+
+        <!-- Row 2: bottom sections -->
+        <div class="cell-left-bottom">
             <div class="hear-row">
                 <span class="header-emoji">&#x1F442;</span>
                 <span class="hear-label">What I hear</span>
@@ -33,34 +58,13 @@
             </div>
         </div>
 
-        <!-- CENTER: Face crop + Emotion + Capture counter -->
-        <div class="col-center">
-            <div class="face-viewport">
-                <canvas id="face-crop-canvas" width="320" height="400"></canvas>
-                <div class="bracket tl"></div>
-                <div class="bracket tr"></div>
-                <div class="bracket bl"></div>
-                <div class="bracket br"></div>
-            </div>
-            <div class="emotion-pill" id="emotion-pill">Neutral</div>
-            <div class="emotion-label" id="emotion-label">Waiting for face...</div>
+        <div class="cell-center-bottom">
+            <div class="emotion-label" id="emotion-label">Smiling face</div>
             <div class="capture-counter" id="capture-counter">
                 <span class="heart-icon">&#x2764;&#xFE0F;</span>
                 <span class="capture-count" id="capture-count">0</span>
             </div>
             <div class="capture-float-area" id="capture-float-area"></div>
-        </div>
-
-        <!-- RIGHT: Reachy's Mind -->
-        <div class="col-right">
-            <div class="section-header mind-header">
-                <img src="/static/brain-bulb.svg" class="mind-logo" alt="logo">
-                <div class="mind-title">
-                    <span>Reachy's</span>
-                    <span>Mind</span>
-                </div>
-            </div>
-            <div class="thought-list" id="thought-list"></div>
         </div>
     </div>
 </div>
@@ -85,7 +89,7 @@
             <button class="settings-close" id="settings-close">&times;</button>
         </div>
         <div class="settings-tabs">
-            <button class="settings-tab active" data-tab="mode">Mode</button>
+            <button class="settings-tab active" data-tab="mode">Configuration</button>
             <button class="settings-tab" data-tab="faces">Face Management</button>
             <button class="settings-tab" data-tab="prompt">Prompt</button>
         </div>
@@ -120,6 +124,42 @@
                         <input type="range" class="volume-slider" id="volume-slider" min="0" max="100" value="80">
                         <span class="volume-value" id="volume-value">80%</span>
                     </div>
+                </div>
+                <div class="motor-section">
+                    <h3>Motor Control</h3>
+                    <div class="motor-sleep-row">
+                        <span class="motor-sleep-label">Motor Enabled</span>
+                        <button class="motor-sleep-toggle active" id="motor-toggle" title="Toggle motor on/off">
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </button>
+                    </div>
+                    <div class="motor-presets" id="motor-presets">
+                        <label class="mode-option" data-motor="sensitive">
+                            <input type="radio" name="motor-preset" value="sensitive">
+                            <div class="mode-radio"></div>
+                            <div class="mode-info">
+                                <h3>Sensitive</h3>
+                                <p>Fast, responsive tracking. Best for demos and close interaction.</p>
+                            </div>
+                        </label>
+                        <label class="mode-option selected" data-motor="moderate">
+                            <input type="radio" name="motor-preset" value="moderate" checked>
+                            <div class="mode-radio"></div>
+                            <div class="mode-info">
+                                <h3>Moderate</h3>
+                                <p>Balanced speed and smoothness. Default for most scenarios.</p>
+                            </div>
+                        </label>
+                        <label class="mode-option" data-motor="smart">
+                            <input type="radio" name="motor-preset" value="smart">
+                            <div class="mode-radio"></div>
+                            <div class="mode-info">
+                                <h3>Smart</h3>
+                                <p>Adaptive tracking that learns movement patterns. Smoother, more natural.</p>
+                            </div>
+                        </label>
+                    </div>
+                    <div class="motor-status" id="motor-status">Motor: moderate</div>
                 </div>
             </div>
             <div class="tab-pane" id="tab-faces">

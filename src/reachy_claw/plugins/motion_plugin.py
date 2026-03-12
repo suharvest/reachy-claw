@@ -29,8 +29,19 @@ class MotionPlugin(Plugin):
 
     name = "motion"
 
+    # Motor preset definitions: smoothing, deadband, poll_interval, body_smoothing, body_deadband
+    MOTOR_PRESETS = {
+        "sensitive": {"smoothing": 0.50, "deadband": 1.0, "poll": 0.03, "body_smoothing": 0.45, "body_deadband": 1.0},
+        "moderate":  {"smoothing": 0.35, "deadband": 2.0, "poll": 0.05, "body_smoothing": 0.35, "body_deadband": 2.0},
+        "smart":     {"smoothing": 0.20, "deadband": 3.0, "poll": 0.07, "body_smoothing": 0.25, "body_deadband": 3.0},
+    }
+
     def __init__(self, app):
         super().__init__(app)
+        # Motor enable/disable (sleep mode)
+        self._motor_enabled = True
+        self._motor_preset = "moderate"
+
         # Head tracking EMA state (Stewart platform — pitch/roll mirroring)
         self._current_yaw = 0.0
         self._current_pitch = 0.0
@@ -61,6 +72,31 @@ class MotionPlugin(Plugin):
         """Called by HeadWobbler to set speech-driven head offsets."""
         self._speech_roll, self._speech_pitch, self._speech_yaw = offsets
 
+    def set_motor_enabled(self, enabled: bool) -> None:
+        """Enable or disable motor output (sleep mode)."""
+        self._motor_enabled = enabled
+        logger.info("Motor %s", "enabled" if enabled else "disabled (sleep)")
+
+    def apply_motor_preset(self, preset: str) -> None:
+        """Apply a motor tracking preset (sensitive/moderate/smart)."""
+        params = self.MOTOR_PRESETS.get(preset)
+        if not params:
+            logger.warning("Unknown motor preset: %s", preset)
+            return
+        self._motor_preset = preset
+        self._smoothing = params["smoothing"]
+        self._min_angle_change = params["deadband"]
+        self._body_smoothing = params["body_smoothing"]
+        self._body_min_angle = params["body_deadband"]
+        # poll_interval is read each iteration from config, so update config
+        self.app.config.motion_head_tracking_poll_interval = params["poll"]
+        logger.info("Motor preset: %s (smoothing=%.2f, deadband=%.1f°, poll=%.3fs)",
+                     preset, params["smoothing"], params["deadband"], params["poll"])
+
+    def get_motor_state(self) -> dict:
+        """Return current motor state for dashboard sync."""
+        return {"enabled": self._motor_enabled, "preset": self._motor_preset}
+
     async def start(self):
         await asyncio.gather(
             self._motion_loop(),
@@ -75,6 +111,9 @@ class MotionPlugin(Plugin):
         config = self.app.config
 
         while self._running:
+            if not self._motor_enabled:
+                await asyncio.sleep(0.2)
+                continue
             expr = self.app.emotions.get_next_expression()
             if expr:
                 self._execute_expression(expr)
@@ -97,9 +136,14 @@ class MotionPlugin(Plugin):
     async def _head_tracking_loop(self):
         """Consume fused head targets and drive body rotation + head pose."""
         logger.info("Head tracking fusion loop started")
-        poll_interval = self.app.config.motion_head_tracking_poll_interval
 
         while self._running:
+            poll_interval = self.app.config.motion_head_tracking_poll_interval
+
+            if not self._motor_enabled:
+                await asyncio.sleep(poll_interval)
+                continue
+
             if self.app.is_speaking and self.app.config.conversation_mode != "monologue":
                 # During speech in conversation mode, apply wobble offsets instead of tracking
                 # In monologue mode, keep tracking the user's face while speaking
@@ -150,6 +194,9 @@ class MotionPlugin(Plugin):
         interval = 1.0 / _ANIM_HZ
 
         while self._running:
+            if not self._motor_enabled:
+                await asyncio.sleep(interval)
+                continue
             anim = self._antenna_anim
             if anim is None:
                 await asyncio.sleep(interval)

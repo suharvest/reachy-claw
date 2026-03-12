@@ -230,6 +230,17 @@ function handleDashboardMsg(msg) {
             if (!isMuted) volumeBeforeMute = msg.volume;
             updateMuteUI();
             break;
+
+        case 'motor_state':
+            motorEnabled = msg.enabled !== false;
+            motorPreset = msg.preset || 'moderate';
+            document.getElementById('motor-toggle').classList.toggle('active', motorEnabled);
+            document.getElementById('motor-presets').classList.toggle('disabled', !motorEnabled);
+            document.querySelector('.motor-sleep-label').textContent =
+                motorEnabled ? 'Motor Enabled' : 'Motor Disabled (Sleep)';
+            syncMotorPresetUI();
+            updateMotorStatus();
+            break;
     }
 }
 
@@ -257,8 +268,8 @@ function updateEmotionDisplay() {
         : latestFaces;
 
     if (!faces || faces.length === 0) {
-        emotionPill.textContent = 'No face';
-        emotionLabel.textContent = 'Waiting for face...';
+        emotionPill.textContent = 'Neutral';
+        emotionLabel.textContent = 'Smiling face';
         return;
     }
 
@@ -641,6 +652,7 @@ function initSettings() {
         loadFaces();
         if (dashboardWs && dashboardWs.readyState === 1) {
             dashboardWs.send(JSON.stringify({ type: 'get_volume' }));
+            dashboardWs.send(JSON.stringify({ type: 'get_motor' }));
         }
     };
     document.getElementById('settings-close').onclick = () => {
@@ -709,6 +721,9 @@ function initSettings() {
 
     // Volume control
     initVolume();
+
+    // Motor control
+    initMotor();
 }
 
 let currentVolume = 80;
@@ -915,6 +930,64 @@ async function importFaces() {
         showToast('Import failed', true);
     }
     input.value = '';
+}
+
+// ── Motor Control ───────────────────────────────────────────────────
+let motorEnabled = true;
+let motorPreset = 'moderate';
+
+function initMotor() {
+    const toggle = document.getElementById('motor-toggle');
+    const presets = document.getElementById('motor-presets');
+
+    toggle.onclick = () => {
+        motorEnabled = !motorEnabled;
+        toggle.classList.toggle('active', motorEnabled);
+        presets.classList.toggle('disabled', !motorEnabled);
+        toggle.querySelector('.motor-sleep-label');
+        // Update label in the row
+        document.querySelector('.motor-sleep-label').textContent =
+            motorEnabled ? 'Motor Enabled' : 'Motor Disabled (Sleep)';
+        updateMotorStatus();
+        sendMotorState();
+    };
+
+    document.querySelectorAll('#motor-presets .mode-option').forEach(opt => {
+        opt.onclick = () => {
+            const preset = opt.dataset.motor;
+            if (preset === motorPreset) return;
+            motorPreset = preset;
+            syncMotorPresetUI();
+            updateMotorStatus();
+            sendMotorState();
+        };
+    });
+}
+
+function syncMotorPresetUI() {
+    document.querySelectorAll('#motor-presets .mode-option').forEach(opt => {
+        opt.classList.toggle('selected', opt.dataset.motor === motorPreset);
+        opt.querySelector('input').checked = opt.dataset.motor === motorPreset;
+    });
+}
+
+function updateMotorStatus() {
+    const el = document.getElementById('motor-status');
+    if (!motorEnabled) {
+        el.textContent = 'Motor: sleep (disabled)';
+    } else {
+        el.textContent = 'Motor: ' + motorPreset;
+    }
+}
+
+function sendMotorState() {
+    if (dashboardWs && dashboardWs.readyState === 1) {
+        dashboardWs.send(JSON.stringify({
+            type: 'set_motor',
+            enabled: motorEnabled,
+            preset: motorPreset,
+        }));
+    }
 }
 
 // ── Prompt Management ───────────────────────────────────────────────

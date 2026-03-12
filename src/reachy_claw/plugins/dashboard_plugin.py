@@ -56,6 +56,9 @@ class DashboardPlugin(Plugin):
         # Set default volume on startup (prevent 0% after container restart)
         await self._set_volume(80)
 
+        # Restore capture count from vision-trt
+        await self._restore_capture_count()
+
         # Subscribe to EventBus
         bus = self.app.events
         bus.subscribe("asr_partial", self._on_asr_partial)
@@ -184,6 +187,27 @@ class DashboardPlugin(Plugin):
             await self._set_volume(vol)
             await self._broadcast({"type": "volume", "volume": vol})
 
+        elif msg_type == "set_motor":
+            motion = self.app.get_plugin("motion")
+            if motion:
+                enabled = data.get("enabled", True)
+                preset = data.get("preset", "moderate")
+                motion.set_motor_enabled(enabled)
+                if enabled:
+                    motion.apply_motor_preset(preset)
+                await self._broadcast({
+                    "type": "motor_state",
+                    **motion.get_motor_state(),
+                })
+
+        elif msg_type == "get_motor":
+            motion = self.app.get_plugin("motion")
+            if motion:
+                await self._broadcast({
+                    "type": "motor_state",
+                    **motion.get_motor_state(),
+                })
+
     async def _get_volume(self) -> int:
         """Read current ALSA volume for Reachy Mini Audio (card 2)."""
         try:
@@ -217,6 +241,23 @@ class DashboardPlugin(Plugin):
             logger.info("Volume set to %d%%", percent)
         except Exception as e:
             logger.warning("Failed to set volume: %s", e)
+
+    async def _restore_capture_count(self) -> None:
+        """Fetch existing capture count from vision-trt on startup."""
+        vision_url = self.app.config.vision_service_url
+        host = vision_url.replace("tcp://", "").split(":")[0]
+        api_url = f"http://{host}:8630/api/captures/count"
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        self._capture_count = data.get("count", 0)
+                        if self._capture_count:
+                            logger.info("Restored capture count: %d", self._capture_count)
+        except Exception as e:
+            logger.debug("Could not restore capture count: %s", e)
 
     async def _handle_stream_proxy(self, request):
         """Proxy MJPEG stream from vision-trt (same-origin for browser)."""
