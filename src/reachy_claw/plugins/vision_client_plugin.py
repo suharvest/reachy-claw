@@ -53,6 +53,7 @@ class VisionClientPlugin(Plugin):
         self._zmq_url = cfg.vision_service_url
         self._max_yaw = cfg.vision_max_yaw
         self._max_pitch = cfg.vision_max_pitch
+        self._pitch_offset = cfg.vision_pitch_offset
         self._max_roll = cfg.vision_max_roll
         self._smoothing_alpha = cfg.vision_smoothing_alpha
         self._deadzone = cfg.vision_deadzone
@@ -67,9 +68,15 @@ class VisionClientPlugin(Plugin):
         self._last_face_time = 0.0
         self._face_lost_published = False
 
+        # Body yaw: accumulated angle (closed-loop centering)
+        self._body_yaw_acc = 0.0
+        self._body_yaw_gain = cfg.vision_body_yaw_gain
+
         # Emotion state
         self._last_emotion = "neutral"
+        self._last_emotion_conf = 0.0
         self._last_emotion_time = 0.0
+        self._emotion_sustain = cfg.vision_emotion_sustain
 
         # Identity (shared with app for conversation context)
         self.current_identity = None
@@ -214,10 +221,13 @@ class VisionClientPlugin(Plugin):
                     self._smooth_x += self._smoothing_alpha * (face_x - self._smooth_x)
                     self._smooth_y += self._smoothing_alpha * (face_y - self._smooth_y)
 
-                # Body rotation: face_x → body base Z-axis tracking
+                # Body rotation: proportional centering
+                # Camera is on robot head, so as body rotates, face naturally
+                # moves toward center — no integral needed
                 body_yaw = -self._smooth_x * self._max_yaw
-                # Head mirroring: face_y → pitch
-                pitch = -self._smooth_y * self._max_pitch
+                # Head pitch: face in upper frame (y<0) → look up (negative pitch in SDK)
+                # SDK convention: positive pitch = look DOWN, negative = look UP
+                pitch = self._smooth_y * self._max_pitch - self._pitch_offset
 
                 # Roll estimation from eye landmarks (points 0=left_eye, 1=right_eye)
                 roll = 0.0
@@ -231,9 +241,12 @@ class VisionClientPlugin(Plugin):
                     self._smooth_roll += self._smoothing_alpha * (raw_roll - self._smooth_roll)
                     roll = float(np.clip(self._smooth_roll, -self._max_roll, self._max_roll))
 
+                # Head yaw follows body yaw for natural look
+                head_yaw = -self._smooth_x * self._max_pitch  # gentle head turn toward face
+
                 self.app.head_targets.publish(
                     HeadTarget(
-                        yaw=0.0, pitch=pitch, roll=roll,
+                        yaw=head_yaw, pitch=pitch, roll=roll,
                         body_yaw=body_yaw, confidence=0.9,
                         source="face", timestamp=now,
                     )
@@ -248,14 +261,32 @@ class VisionClientPlugin(Plugin):
                 and (now - self._last_emotion_time) >= self._emotion_cooldown
             ):
                 mapped = _EMOTION_REMAP.get(emotion)
-                if mapped and mapped != self._last_emotion:
-                    self.app.emotions.queue_emotion(mapped)
-                    self._last_emotion = mapped
-                    self._last_emotion_time = now
-                    logger.debug(
-                        f"Vision emotion: {emotion} → {mapped} "
-                        f"(conf={emotion_conf:.2f})"
+                if mapped:
+                    changed = mapped != self._last_emotion
+                    # Resend same emotion if: sustained for N seconds,
+                    # or confidence jumped significantly
+                    sustained = (
+                        not changed
+                        and (now - self._last_emotion_time) >= self._emotion_sustain
                     )
+                    conf_jump = (
+                        not changed
+                        and (emotion_conf - self._last_emotion_conf) >= 0.15
+                    )
+                    if changed or sustained or conf_jump:
+                        self.app.emotions.queue_emotion(mapped)
+                        self._last_emotion = mapped
+                        self._last_emotion_conf = emotion_conf
+                        self._last_emotion_time = now
+                        reason = (
+                            "change" if changed
+                            else "sustain" if sustained
+                            else "conf_jump"
+                        )
+                        logger.debug(
+                            f"Vision emotion: {emotion} → {mapped} "
+                            f"(conf={emotion_conf:.2f}, {reason})"
+                        )
 
             # Identity
             identity = primary.get("identity")

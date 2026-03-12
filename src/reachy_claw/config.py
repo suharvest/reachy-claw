@@ -97,26 +97,29 @@ class Config:
     standalone_mode: bool = False
 
     # Motion settings
-    motion_emotion_intensity: float = 0.7
-    motion_head_tracking_smoothing: float = 0.3
-    motion_head_tracking_poll_interval: float = 0.1
+    motion_emotion_intensity: float = 1.0
+    motion_head_tracking_smoothing: float = 0.35
+    motion_head_tracking_poll_interval: float = 0.05
     motion_idle_animation_interval: float = 5.0
 
     # Vision / face tracking
     vision_tracker_type: str = "mediapipe"  # "mediapipe", "remote", "none"
     vision_camera_source: str = "auto"  # "auto" (SDK if available, else OpenCV), "sdk", "opencv"
     vision_camera_index: int = 0
-    vision_max_yaw: float = 25.0
-    vision_max_pitch: float = 15.0
+    vision_max_yaw: float = 55.0
+    vision_body_yaw_gain: float = 3.0  # degrees per frame per unit offset (closed-loop)
+    vision_max_pitch: float = 25.0
+    vision_pitch_offset: float = 8.0  # degrees, positive = look up (compensate camera angle)
     vision_max_roll: float = 15.0
-    vision_smoothing_alpha: float = 0.3
-    vision_deadzone: float = 0.02
+    vision_smoothing_alpha: float = 0.35
+    vision_deadzone: float = 0.01
     vision_face_lost_delay: float = 2.0
 
     # Vision TRT service (used when vision_tracker_type == "remote")
     vision_service_url: str = "tcp://127.0.0.1:8631"
-    vision_emotion_threshold: float = 0.6
-    vision_emotion_cooldown: float = 3.0
+    vision_emotion_threshold: float = 0.45
+    vision_emotion_cooldown: float = 2.0
+    vision_emotion_sustain: float = 5.0  # resend same emotion after N seconds
     vision_identity_threshold: float = 0.4
 
     # Conversation mode
@@ -218,6 +221,7 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("vision", "camera_index"): "vision_camera_index",
     ("vision", "max_yaw"): "vision_max_yaw",
     ("vision", "max_pitch"): "vision_max_pitch",
+    ("vision", "pitch_offset"): "vision_pitch_offset",
     ("vision", "max_roll"): "vision_max_roll",
     ("vision", "smoothing_alpha"): "vision_smoothing_alpha",
     ("vision", "deadzone"): "vision_deadzone",

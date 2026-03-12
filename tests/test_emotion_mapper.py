@@ -99,17 +99,18 @@ class TestEmotionQueue:
         em = EmotionMapper()
         assert em.get_next_expression() is None
 
-    def test_queue_debounce_same_emotion(self):
+    def test_queue_accepts_repeated_emotions(self):
+        # Dedup is caller's responsibility (VisionClient cooldown/sustain)
         em = EmotionMapper()
         em.queue_emotion("happy")
-        em.queue_emotion("happy")  # debounced
-        em.queue_emotion("happy")  # debounced
+        em.queue_emotion("happy")
+        em.queue_emotion("happy")
 
-        # Only 1 should be queued
-        expr1 = em.get_next_expression()
-        expr2 = em.get_next_expression()
-        assert expr1 is not None
-        assert expr2 is None
+        # All 3 should be queued
+        assert em.get_next_expression() is not None
+        assert em.get_next_expression() is not None
+        assert em.get_next_expression() is not None
+        assert em.get_next_expression() is None
 
     def test_queue_allows_different_emotions(self):
         em = EmotionMapper()

@@ -282,17 +282,17 @@ class EmotionMapper:
         return expr
 
     def queue_emotion(self, emotion: str) -> None:
-        """Map an emotion and add it to the motion queue."""
-        now = time.monotonic()
-        if emotion == self._last_emotion and (now - self._last_expression_time) < 2.0:
-            return
+        """Map an emotion and add it to the motion queue.
 
+        Callers are responsible for rate-limiting (e.g. VisionClient
+        cooldown/sustain, LLM tag dedup). The mapper just maps and queues.
+        """
         expr = self.map_emotion(emotion)
         if expr:
             try:
                 self._move_queue.put_nowait(expr)
                 self._last_emotion = emotion
-                self._last_expression_time = now
+                self._last_expression_time = time.monotonic()
                 logger.info(f"Queued expression: {expr.description}")
             except Exception:
                 logger.warning("Motion queue full, dropping expression")
