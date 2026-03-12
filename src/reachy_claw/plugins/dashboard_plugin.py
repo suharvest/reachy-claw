@@ -41,6 +41,7 @@ class DashboardPlugin(Plugin):
         app = web.Application()
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/ws", self._handle_ws)
+        app.router.add_get("/stream", self._handle_stream_proxy)
         app.router.add_static("/static", STATIC_DIR, show_index=False)
 
         self._runner = web.AppRunner(app)
@@ -58,6 +59,7 @@ class DashboardPlugin(Plugin):
         bus.subscribe("llm_end", self._on_llm_end)
         bus.subscribe("state_change", self._on_state_change)
         bus.subscribe("emotion", self._on_emotion)
+        bus.subscribe("observation", self._on_observation)
 
         # State polling loop (5Hz)
         while self._running:
@@ -74,6 +76,7 @@ class DashboardPlugin(Plugin):
         bus.unsubscribe("llm_end", self._on_llm_end)
         bus.unsubscribe("state_change", self._on_state_change)
         bus.unsubscribe("emotion", self._on_emotion)
+        bus.unsubscribe("observation", self._on_observation)
 
         # Close all WebSocket connections
         for ws in list(self._ws_clients):
@@ -126,6 +129,65 @@ class DashboardPlugin(Plugin):
             if conv and hasattr(conv, "switch_mode"):
                 conv.switch_mode(mode)
             await self._broadcast({"type": "mode_changed", "mode": mode})
+
+        elif msg_type == "get_prompts":
+            from ..llm import DEFAULT_SYSTEM_PROMPT, MONOLOGUE_SYSTEM_PROMPT
+
+            cfg = self.app.config
+            await self._broadcast({
+                "type": "prompts",
+                "conversation": cfg.ollama_system_prompt or DEFAULT_SYSTEM_PROMPT,
+                "monologue": cfg.ollama_monologue_prompt or MONOLOGUE_SYSTEM_PROMPT,
+            })
+
+        elif msg_type == "set_prompt":
+            from ..llm import DEFAULT_SYSTEM_PROMPT, MONOLOGUE_SYSTEM_PROMPT, OllamaClient
+
+            mode = data.get("mode")
+            prompt = data.get("prompt", "").strip()
+            if mode == "conversation":
+                self.app.config.ollama_system_prompt = prompt
+            elif mode == "monologue":
+                self.app.config.ollama_monologue_prompt = prompt
+            else:
+                return
+
+            # Hot-apply: if OllamaClient is active in matching mode, update live
+            conv = self.app.get_plugin("conversation")
+            if conv and hasattr(conv, "_client") and isinstance(conv._client, OllamaClient):
+                is_monologue = getattr(conv, "_monologue_mode", False)
+                if (mode == "monologue" and is_monologue) or (mode == "conversation" and not is_monologue):
+                    conv._client._config.system_prompt = prompt or (
+                        MONOLOGUE_SYSTEM_PROMPT if is_monologue else DEFAULT_SYSTEM_PROMPT
+                    )
+
+            await self._broadcast({"type": "prompt_saved", "mode": mode})
+
+    async def _handle_stream_proxy(self, request):
+        """Proxy MJPEG stream from vision-trt (same-origin for browser)."""
+        from aiohttp import web, ClientSession, ClientTimeout
+
+        vision_url = self.app.config.vision_service_url  # tcp://127.0.0.1:8631
+        host = vision_url.replace("tcp://", "").split(":")[0]
+        stream_url = f"http://{host}:8630/stream"
+
+        response = web.StreamResponse(
+            status=200,
+            headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"},
+        )
+        await response.prepare(request)
+
+        no_timeout = ClientTimeout(total=None, connect=10, sock_read=None)
+        try:
+            async with ClientSession(timeout=no_timeout) as session:
+                async with session.get(stream_url) as upstream:
+                    async for chunk in upstream.content.iter_any():
+                        await response.write(chunk)
+        except (asyncio.CancelledError, ConnectionResetError):
+            pass
+        except Exception as e:
+            logger.debug("Stream proxy error: %s", e)
+        return response
 
     # ── Broadcasting ──────────────────────────────────────────────────
 
@@ -186,6 +248,7 @@ class DashboardPlugin(Plugin):
                 "pitch": round(target.pitch, 1),
                 "roll": round(target.roll, 1),
             },
+            "body_yaw": round(target.body_yaw, 1),
             "antenna": antenna,
             "emotion": emotion,
             "emotion_mapping": mapping_info,
@@ -236,4 +299,10 @@ class DashboardPlugin(Plugin):
         await self._broadcast({
             "type": "emotion",
             "emotion": data.get("emotion", "neutral"),
+        })
+
+    async def _on_observation(self, data: dict) -> None:
+        await self._broadcast({
+            "type": "observation",
+            "text": data.get("text", ""),
         })

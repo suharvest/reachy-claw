@@ -30,6 +30,7 @@
     </button>
 
     <div class="monologue-area">
+        <div class="observation-line" id="observation-text" style="display:none"></div>
         <div class="monologue-bubble" id="monologue-bubble">
             <div class="monologue-text" id="monologue-text">...</div>
         </div>
@@ -58,6 +59,7 @@
         <div class="settings-tabs">
             <button class="settings-tab active" data-tab="mode">Mode</button>
             <button class="settings-tab" data-tab="faces">Face Management</button>
+            <button class="settings-tab" data-tab="prompt">Prompt</button>
         </div>
         <div class="settings-content">
             <!-- Tab: Mode -->
@@ -120,6 +122,26 @@
                         <button class="action-btn" id="export-btn">Export ZIP</button>
                         <button class="action-btn" id="import-btn">Import ZIP</button>
                         <input type="file" id="import-input" accept=".zip" style="display:none">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab: Prompt -->
+            <div class="tab-pane" id="tab-prompt">
+                <div class="face-section">
+                    <h3>Conversation Prompt</h3>
+                    <textarea id="prompt-conversation" rows="8" class="prompt-textarea"></textarea>
+                    <div class="prompt-actions">
+                        <button class="action-btn" id="prompt-conv-reset">Reset Default</button>
+                        <button class="enroll-btn" id="prompt-conv-save">Save</button>
+                    </div>
+                </div>
+                <div class="face-section">
+                    <h3>Monologue Prompt</h3>
+                    <textarea id="prompt-monologue" rows="8" class="prompt-textarea"></textarea>
+                    <div class="prompt-actions">
+                        <button class="action-btn" id="prompt-mono-reset">Reset Default</button>
+                        <button class="enroll-btn" id="prompt-mono-save">Save</button>
                     </div>
                 </div>
             </div>

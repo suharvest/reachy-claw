@@ -120,6 +120,10 @@ function handleDashboardMsg(msg) {
             resetAsrIdleTimer();
             break;
 
+        case 'observation':
+            updateObservation(msg.text);
+            break;
+
         case 'llm_delta':
             if (msg.run_id !== currentRunId) {
                 currentRunId = msg.run_id;
@@ -156,6 +160,15 @@ function handleDashboardMsg(msg) {
             syncModeUI();
             showToast('Mode: ' + msg.mode);
             break;
+
+        case 'prompts':
+            document.getElementById('prompt-conversation').value = msg.conversation || '';
+            document.getElementById('prompt-monologue').value = msg.monologue || '';
+            break;
+
+        case 'prompt_saved':
+            showToast('Prompt saved: ' + msg.mode);
+            break;
     }
 }
 
@@ -166,6 +179,18 @@ function resetAsrIdleTimer() {
         asrTextEl.innerHTML = '<i>\u503E\u542C\u4E2D...</i>';
         asrTextEl.className = 'asr-text idle';
     }, 5000);
+}
+
+// ── Observation (monologue mode input) ──────────────────────────────
+let lastObsText = '';
+function updateObservation(text) {
+    lastObsText = text;
+    // Show observation as a small line above the monologue bubble
+    const obsEl = document.getElementById('observation-text');
+    if (obsEl) {
+        obsEl.textContent = text;
+        obsEl.style.display = 'block';
+    }
 }
 
 // ── Monologue bubble ────────────────────────────────────────────────
@@ -201,6 +226,19 @@ function updateRobotState(msg) {
 }
 
 // ── Canvas overlay (face detection) ─────────────────────────────────
+function getImageRect() {
+    // Calculate actual rendered image area within object-fit: contain element
+    const rect = videoEl.getBoundingClientRect();
+    const natW = videoEl.naturalWidth || 640;
+    const natH = videoEl.naturalHeight || 360;
+    const scale = Math.min(rect.width / natW, rect.height / natH);
+    const imgW = natW * scale;
+    const imgH = natH * scale;
+    const offsetX = (rect.width - imgW) / 2;
+    const offsetY = (rect.height - imgH) / 2;
+    return { offsetX, offsetY, imgW, imgH, fullW: rect.width, fullH: rect.height };
+}
+
 function drawOverlay() {
     const rect = videoEl.getBoundingClientRect();
     canvasEl.width = rect.width;
@@ -212,15 +250,19 @@ function drawOverlay() {
         return;
     }
 
-    const cw = canvasEl.width;
-    const ch = canvasEl.height;
+    // Map normalized coords to actual image area (not full canvas)
+    const ir = getImageRect();
+    const cw = ir.imgW;
+    const ch = ir.imgH;
+    const ox = ir.offsetX;
+    const oy = ir.offsetY;
 
     for (const face of latestFaces) {
         const [x1, y1, x2, y2] = face.bbox;
         const color = EMOTION_COLORS[face.emotion] || '#3498db';
 
-        const bx = x1 * cw;
-        const by = y1 * ch;
+        const bx = ox + x1 * cw;
+        const by = oy + y1 * ch;
         const bw = (x2 - x1) * cw;
         const bh = (y2 - y1) * ch;
 
@@ -287,7 +329,7 @@ function drawOverlay() {
         const pillH = 20;
         const pillX = bx + (bw - pillW) / 2;
         let pillY = by + bh + 6;
-        if (pillY + pillH > ch - 4) pillY = by + bh - pillH - 4;
+        if (pillY + pillH > oy + ch - 4) pillY = by + bh - pillH - 4;
 
         // Pill background
         const pillAlpha = 0.7;
@@ -309,7 +351,7 @@ function drawOverlay() {
             ctx.fillStyle = '#00d2ff';
             for (const [lx, ly] of face.landmarks) {
                 ctx.beginPath();
-                ctx.arc(lx * cw, ly * ch, 2.5, 0, 2 * Math.PI);
+                ctx.arc(ox + lx * cw, oy + ly * ch, 2.5, 0, 2 * Math.PI);
                 ctx.fill();
             }
         }
@@ -340,21 +382,52 @@ function hexToRgba(hex, alpha) {
     return `rgba(${r},${g},${b},${alpha})`;
 }
 
-// ── MJPEG video ─────────────────────────────────────────────────────
+// ── MJPEG video (fetch + ReadableStream, vision-trt has CORS enabled) ─
 function setupVideo() {
     const streamUrl = `http://${VISION_HOST}/stream`;
-    videoEl.src = streamUrl;
 
-    videoEl.onload = () => {
-        videoEl.style.display = 'block';
-        noVideoEl.style.display = 'none';
-    };
+    async function readStream() {
+        try {
+            const res = await fetch(streamUrl);
+            const reader = res.body.getReader();
+            let buf = new Uint8Array(0);
 
-    videoEl.onerror = () => {
-        videoEl.style.display = 'none';
-        noVideoEl.style.display = 'flex';
-        setTimeout(() => { videoEl.src = streamUrl; }, 5000);
-    };
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                // Append chunk
+                const tmp = new Uint8Array(buf.length + value.length);
+                tmp.set(buf); tmp.set(value, buf.length);
+                buf = tmp;
+
+                // Extract complete JPEG frames (FFD8..FFD9)
+                let start = -1;
+                for (let i = 0; i < buf.length - 1; i++) {
+                    if (buf[i] === 0xFF && buf[i+1] === 0xD8) start = i;
+                    if (buf[i] === 0xFF && buf[i+1] === 0xD9 && start >= 0) {
+                        const jpeg = buf.slice(start, i + 2);
+                        const blob = new Blob([jpeg], { type: 'image/jpeg' });
+                        const url = URL.createObjectURL(blob);
+                        const prev = videoEl.src;
+                        videoEl.src = url;
+                        videoEl.style.display = 'block';
+                        noVideoEl.style.display = 'none';
+                        if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev);
+                        buf = buf.slice(i + 2);
+                        break;  // process one frame per read cycle
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('MJPEG stream error:', e);
+            videoEl.style.display = 'none';
+            noVideoEl.style.display = 'flex';
+            setTimeout(readStream, 3000);
+        }
+    }
+
+    readStream();
 }
 
 // ── Settings Panel ──────────────────────────────────────────────────
@@ -378,6 +451,7 @@ function initSettings() {
             document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
             tab.classList.add('active');
             document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+            if (tab.dataset.tab === 'prompt') loadPrompts();
         };
     });
 
@@ -414,6 +488,18 @@ function initSettings() {
     document.getElementById('export-btn').onclick = exportFaces;
     document.getElementById('import-btn').onclick = () => document.getElementById('import-input').click();
     document.getElementById('import-input').onchange = importFaces;
+
+    // Prompt tab
+    document.getElementById('prompt-conv-save').onclick = () => savePrompt('conversation');
+    document.getElementById('prompt-mono-save').onclick = () => savePrompt('monologue');
+    document.getElementById('prompt-conv-reset').onclick = () => {
+        document.getElementById('prompt-conversation').value = '';
+        savePrompt('conversation', '');
+    };
+    document.getElementById('prompt-mono-reset').onclick = () => {
+        document.getElementById('prompt-monologue').value = '';
+        savePrompt('monologue', '');
+    };
 }
 
 function syncModeUI() {
@@ -563,6 +649,24 @@ async function importFaces() {
         showToast('Import failed', true);
     }
     input.value = '';
+}
+
+// ── Prompt Management ────────────────────────────────────────────────
+function loadPrompts() {
+    if (!dashboardWs || dashboardWs.readyState !== 1) return;
+    dashboardWs.send(JSON.stringify({ type: 'get_prompts' }));
+}
+
+function savePrompt(mode, text) {
+    if (!dashboardWs || dashboardWs.readyState !== 1) {
+        showToast('Not connected', true);
+        return;
+    }
+    if (text === undefined) {
+        const id = mode === 'conversation' ? 'prompt-conversation' : 'prompt-monologue';
+        text = document.getElementById(id).value;
+    }
+    dashboardWs.send(JSON.stringify({ type: 'set_prompt', mode, prompt: text }));
 }
 
 // ── Init ────────────────────────────────────────────────────────────

@@ -86,6 +86,7 @@ class Config:
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3.5:0.8b"
     ollama_system_prompt: str = ""  # empty = use default
+    ollama_monologue_prompt: str = ""  # empty = use default MONOLOGUE_SYSTEM_PROMPT
     ollama_temperature: float = 0.7
     ollama_max_history: int = 0  # conversation turns to keep (0 = stateless)
 
@@ -205,6 +206,7 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("llm", "model"): "ollama_model",
     ("llm", "base_url"): "ollama_base_url",
     ("llm", "system_prompt"): "ollama_system_prompt",
+    ("llm", "monologue_prompt"): "ollama_monologue_prompt",
     ("llm", "temperature"): "ollama_temperature",
     ("llm", "max_history"): "ollama_max_history",
     ("motion", "emotion_intensity"): "motion_emotion_intensity",

@@ -141,7 +141,7 @@ class ConversationPlugin(Plugin):
                 from ..llm import DEFAULT_SYSTEM_PROMPT
 
                 if self._monologue_mode:
-                    system_prompt = MONOLOGUE_SYSTEM_PROMPT
+                    system_prompt = config.ollama_monologue_prompt or MONOLOGUE_SYSTEM_PROMPT
                     skip_emotion = True
                 else:
                     system_prompt = config.ollama_system_prompt or DEFAULT_SYSTEM_PROMPT
@@ -276,11 +276,16 @@ class ConversationPlugin(Plugin):
 
     def _set_state(self, new_state: ConvState) -> None:
         if self._state != new_state:
-            logger.debug(f"State: {self._state.value} → {new_state.value}")
+            old_state = self._state
+            logger.debug(f"State: {old_state.value} → {new_state.value}")
             self._state = new_state
             self.app.events.emit("state_change", {"state": new_state.value})
             if new_state == ConvState.SPEAKING:
                 self._speaking_since = time.monotonic()
+            # Reset monologue timer when finishing speaking, so there's
+            # a full monologue_interval gap for ASR to process user speech
+            if old_state == ConvState.SPEAKING and new_state == ConvState.IDLE:
+                self._last_speech_time = time.monotonic()
 
     def _spawn_task(self, coro: Coroutine[Any, Any, Any], *, name: str) -> None:
         """Track background tasks so they can be cancelled on shutdown."""
@@ -415,7 +420,9 @@ class ConversationPlugin(Plugin):
 
         if isinstance(self._client, OllamaClient):
             if self._monologue_mode:
-                self._client._config.system_prompt = MONOLOGUE_SYSTEM_PROMPT
+                self._client._config.system_prompt = (
+                    self.app.config.ollama_monologue_prompt or MONOLOGUE_SYSTEM_PROMPT
+                )
                 self._client._config.skip_emotion_extraction = True
             else:
                 self._client._config.system_prompt = (
@@ -748,6 +755,8 @@ class ConversationPlugin(Plugin):
                 continue
 
             # ── Monologue auto-trigger: if idle too long, generate monologue ──
+            # Note: _last_speech_time is reset by _set_state(IDLE) after speaking
+            # finishes, so monologue_interval is measured from end of last utterance.
             if (
                 self._monologue_mode
                 and self._state == ConvState.IDLE
@@ -755,7 +764,6 @@ class ConversationPlugin(Plugin):
                 and time.monotonic() - self._last_speech_time
                     >= self.app.config.monologue_interval
             ):
-                self._last_speech_time = time.monotonic()
                 prompt = self._compose_monologue_prompt(None)
                 self._spawn_task(
                     self._process_and_send_raw(prompt),
@@ -917,6 +925,8 @@ class ConversationPlugin(Plugin):
         if not text or not self._client:
             return
         logger.info(f"Monologue prompt: {text[:60]}")
+        # Emit observation for dashboard monologue area
+        self.app.events.emit("observation", {"text": text})
         self._set_state(ConvState.THINKING)
         self._t_send = time.perf_counter()
         try:
