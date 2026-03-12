@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EMOTION MIRROR</title>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+    --bg: #0a0a0a;
+    --panel: #111111;
+    --border: #1a1a1a;
+    --green: #76b900;
+    --green-dim: #4a7200;
+    --green-glow: rgba(118, 185, 0, 0.3);
+    --text: #e0e0e0;
+    --text-dim: #666;
+    --text-bright: #ffffff;
+    --red: #e94560;
+    --blue: #3498db;
+    --yellow: #f39c12;
+}
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Scanline overlay */
+body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0, 0, 0, 0.03) 2px,
+        rgba(0, 0, 0, 0.03) 4px
+    );
+    pointer-events: none;
+    z-index: 1000;
+}
+
+/* Vignette */
+body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.5) 100%);
+    pointer-events: none;
+    z-index: 999;
+}
+
+/* Header */
+.header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.header h1 {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    color: var(--green);
+    text-transform: uppercase;
+}
+
+.header .status-badges {
+    display: flex;
+    gap: 12px;
+    font-size: 11px;
+    color: var(--text-dim);
+}
+
+.badge {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.badge .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-dim);
+}
+
+.badge .dot.live { background: var(--green); box-shadow: 0 0 6px var(--green-glow); }
+.badge .dot.warn { background: var(--yellow); }
+.badge .dot.off { background: var(--red); }
+
+/* Main layout */
+.main {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+}
+
+/* Video panel */
+.video-panel {
+    flex: 1;
+    position: relative;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+
+.video-panel img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+.video-panel canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+
+.video-panel .no-video {
+    color: var(--text-dim);
+    font-size: 13px;
+    text-align: center;
+}
+
+.video-panel .no-video .icon {
+    font-size: 48px;
+    margin-bottom: 8px;
+    opacity: 0.3;
+}
+
+/* HUD corners */
+.hud-corner {
+    position: absolute;
+    width: 24px;
+    height: 24px;
+    border-color: var(--green);
+    border-style: solid;
+    border-width: 0;
+    opacity: 0.6;
+}
+.hud-corner.tl { top: 12px; left: 12px; border-top-width: 2px; border-left-width: 2px; }
+.hud-corner.tr { top: 12px; right: 12px; border-top-width: 2px; border-right-width: 2px; }
+.hud-corner.bl { bottom: 12px; left: 12px; border-bottom-width: 2px; border-left-width: 2px; }
+.hud-corner.br { bottom: 12px; right: 12px; border-bottom-width: 2px; border-right-width: 2px; }
+
+/* Sidebar */
+.sidebar {
+    width: 360px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid var(--border);
+    background: var(--panel);
+}
+
+.panel-section {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+}
+
+.panel-section h2 {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    color: var(--green);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+}
+
+/* Observation log */
+.observation-log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 16px;
+    min-height: 0;
+}
+
+.observation-log h2 {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    color: var(--green);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    position: sticky;
+    top: 0;
+    background: var(--panel);
+    padding-bottom: 4px;
+}
+
+.log-entry {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+    margin-bottom: 12px;
+    border-left: 2px solid var(--border);
+    padding-left: 10px;
+}
+
+.log-entry.current {
+    border-left-color: var(--green);
+    color: var(--text-bright);
+}
+
+.log-entry .timestamp {
+    font-size: 10px;
+    color: var(--text-dim);
+}
+
+.typing-cursor {
+    display: inline-block;
+    width: 7px;
+    height: 14px;
+    background: var(--green);
+    animation: blink 0.8s infinite;
+    vertical-align: text-bottom;
+    margin-left: 2px;
+}
+
+@keyframes blink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
+}
+
+/* Robot state panel */
+.state-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 12px;
+    font-size: 12px;
+}
+
+.state-grid .label {
+    color: var(--text-dim);
+}
+
+.state-grid .value {
+    color: var(--text);
+    font-weight: 500;
+}
+
+.state-grid .value.highlight {
+    color: var(--green);
+}
+
+.emotion-tag {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    background: rgba(118, 185, 0, 0.15);
+    color: var(--green);
+    border: 1px solid rgba(118, 185, 0, 0.3);
+}
+
+.emotion-mapping {
+    margin-top: 8px;
+    padding: 6px 8px;
+    background: rgba(255,255,255,0.03);
+    border-radius: 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+}
+
+.emotion-mapping .mapping-desc {
+    color: var(--text);
+    font-style: italic;
+}
+
+/* ASR bar */
+.asr-bar {
+    padding: 10px 16px;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 44px;
+}
+
+.asr-bar .asr-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    color: var(--green);
+    text-transform: uppercase;
+    flex-shrink: 0;
+}
+
+.asr-bar .asr-text {
+    font-size: 14px;
+    color: var(--text-bright);
+    flex: 1;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.asr-bar .asr-text.partial {
+    color: var(--text-dim);
+    font-style: italic;
+}
+
+/* State indicator */
+.state-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 10px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.state-indicator[data-state="idle"] { color: var(--text-dim); }
+.state-indicator[data-state="listening"] { color: var(--blue); }
+.state-indicator[data-state="transcribing"] { color: var(--yellow); }
+.state-indicator[data-state="thinking"] { color: var(--yellow); }
+.state-indicator[data-state="speaking"] { color: var(--green); }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+    <h1>Emotion Mirror</h1>
+    <div class="status-badges">
+        <div class="badge"><span class="dot" id="dot-jetson"></span>Jetson</div>
+        <div class="badge"><span class="dot" id="dot-robot"></span>Reachy Mini</div>
+        <div class="badge"><span class="dot" id="dot-vision"></span>Vision</div>
+        <div class="badge"><span class="dot live" id="dot-live"></span>LIVE</div>
+    </div>
+</div>
+
+<div class="main">
+    <div class="video-panel">
+        <div class="hud-corner tl"></div>
+        <div class="hud-corner tr"></div>
+        <div class="hud-corner bl"></div>
+        <div class="hud-corner br"></div>
+        <img id="video-stream" alt="" style="display:none;">
+        <canvas id="overlay-canvas"></canvas>
+        <div class="no-video" id="no-video">
+            <div class="icon">&#x1f4f7;</div>
+            <div>Connecting to vision service...</div>
+        </div>
+    </div>
+
+    <div class="sidebar">
+        <div class="observation-log" id="observation-log">
+            <h2>Observation Log</h2>
+            <div id="log-entries">
+                <div class="log-entry" style="color: var(--text-dim)">Waiting for conversation...</div>
+            </div>
+        </div>
+
+        <div class="panel-section">
+            <h2>Robot State</h2>
+            <div class="state-grid">
+                <span class="label">State</span>
+                <span class="value"><span class="state-indicator" id="robot-state" data-state="idle">idle</span></span>
+
+                <span class="label">Emotion</span>
+                <span class="value" id="robot-emotion"><span class="emotion-tag">neutral</span></span>
+
+                <span class="label">Head</span>
+                <span class="value" id="robot-head">Y:0.0 P:0.0</span>
+
+                <span class="label">Antenna</span>
+                <span class="value" id="robot-antenna">L:0.0 R:0.0</span>
+
+                <span class="label">Tracking</span>
+                <span class="value" id="robot-tracking">none</span>
+
+                <span class="label">Speaking</span>
+                <span class="value" id="robot-speaking">no</span>
+            </div>
+            <div class="emotion-mapping" id="emotion-mapping" style="display:none">
+                <span class="mapping-desc" id="mapping-desc"></span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="asr-bar">
+    <span class="asr-label">ASR</span>
+    <span class="asr-text" id="asr-text">--</span>
+</div>
+
+<script>
+// ── Config ───────────────────────────────────────────────────────────
+const VISION_HOST = location.hostname + ':8630';
+const DASHBOARD_WS = `ws://${location.host}/ws`;
+
+const EMOTION_COLORS = {
+    angry: '#e94560', happy: '#2ecc71', neutral: '#3498db',
+    sad: '#2c3e50', surprised: '#f39c12', fear: '#9b59b6',
+    thinking: '#f39c12', confused: '#a0a0c0', curious: '#00d2ff',
+    excited: '#2ecc71', laugh: '#2ecc71', listening: '#3498db',
+    Anger: '#e94560', Happiness: '#2ecc71', Neutral: '#3498db',
+    Sadness: '#2c3e50', Surprise: '#f39c12', Fear: '#9b59b6',
+    Contempt: '#a0a0c0', Disgust: '#8b5e3c',
+};
+
+// ── State ────────────────────────────────────────────────────────────
+let visionWs = null;
+let dashboardWs = null;
+let latestFaces = null;
+let currentLlmText = '';
+let currentRunId = null;
+let logEntries = [];
+
+// ── DOM refs ─────────────────────────────────────────────────────────
+const videoEl = document.getElementById('video-stream');
+const canvasEl = document.getElementById('overlay-canvas');
+const ctx = canvasEl.getContext('2d');
+const noVideoEl = document.getElementById('no-video');
+const asrTextEl = document.getElementById('asr-text');
+const logEntriesEl = document.getElementById('log-entries');
+
+// ── Vision WebSocket (face detection) ────────────────────────────────
+let visionRetry = 1000;
+
+function connectVision() {
+    const url = `ws://${VISION_HOST}/ws`;
+    visionWs = new WebSocket(url);
+
+    visionWs.onopen = () => {
+        console.log('Vision WS connected');
+        visionRetry = 1000;
+        document.getElementById('dot-vision').className = 'dot live';
+    };
+
+    visionWs.onmessage = (e) => {
+        try {
+            const data = JSON.parse(e.data);
+            latestFaces = data.faces || [];
+        } catch(err) {
+            console.error('Vision WS parse error:', err);
+        }
+    };
+
+    visionWs.onclose = () => {
+        document.getElementById('dot-vision').className = 'dot off';
+        latestFaces = null;
+        visionRetry = Math.min(visionRetry * 1.5, 10000);
+        setTimeout(connectVision, visionRetry);
+    };
+
+    visionWs.onerror = () => visionWs.close();
+}
+
+// ── Dashboard WebSocket (ASR, LLM, state) ────────────────────────────
+let dashRetry = 1000;
+
+function connectDashboard() {
+    dashboardWs = new WebSocket(DASHBOARD_WS);
+
+    dashboardWs.onopen = () => {
+        console.log('Dashboard WS connected');
+        dashRetry = 1000;
+        document.getElementById('dot-jetson').className = 'dot live';
+    };
+
+    dashboardWs.onmessage = (e) => {
+        try {
+            const msg = JSON.parse(e.data);
+            handleDashboardMsg(msg);
+        } catch(err) {
+            console.error('Dashboard WS parse error:', err);
+        }
+    };
+
+    dashboardWs.onclose = () => {
+        document.getElementById('dot-jetson').className = 'dot off';
+        dashRetry = Math.min(dashRetry * 1.5, 10000);
+        setTimeout(connectDashboard, dashRetry);
+    };
+
+    dashboardWs.onerror = () => dashboardWs.close();
+}
+
+function handleDashboardMsg(msg) {
+    switch(msg.type) {
+        case 'asr_partial':
+            asrTextEl.textContent = msg.text;
+            asrTextEl.className = 'asr-text partial';
+            break;
+
+        case 'asr_final':
+            asrTextEl.textContent = msg.text;
+            asrTextEl.className = 'asr-text';
+            break;
+
+        case 'llm_delta':
+            if (msg.run_id !== currentRunId) {
+                currentRunId = msg.run_id;
+                currentLlmText = '';
+                addLogEntry();
+            }
+            currentLlmText += msg.text;
+            updateCurrentLog();
+            break;
+
+        case 'llm_end':
+            if (msg.run_id === currentRunId) {
+                currentLlmText = msg.full_text;
+                updateCurrentLog(true);
+                currentRunId = null;
+            }
+            break;
+
+        case 'state':
+            updateState(msg.state);
+            break;
+
+        case 'emotion':
+            // Handled via robot_state
+            break;
+
+        case 'robot_state':
+            updateRobotState(msg);
+            break;
+    }
+}
+
+// ── Observation Log ──────────────────────────────────────────────────
+function addLogEntry() {
+    const now = new Date();
+    const ts = now.toTimeString().slice(0, 8);
+    logEntries.push({ timestamp: ts, text: '', done: false });
+    renderLog();
+}
+
+function updateCurrentLog(done = false) {
+    if (logEntries.length === 0) addLogEntry();
+    const last = logEntries[logEntries.length - 1];
+    last.text = currentLlmText;
+    last.done = done;
+    renderLog();
+}
+
+function renderLog() {
+    if (logEntries.length === 0) {
+        logEntriesEl.innerHTML = '<div class="log-entry" style="color: var(--text-dim)">Waiting for conversation...</div>';
+        return;
+    }
+
+    // Keep last 20 entries
+    if (logEntries.length > 20) logEntries = logEntries.slice(-20);
+
+    let html = '';
+    for (let i = 0; i < logEntries.length; i++) {
+        const entry = logEntries[i];
+        const isCurrent = i === logEntries.length - 1 && !entry.done;
+        const cls = isCurrent ? 'log-entry current' : 'log-entry';
+        const cursor = isCurrent ? '<span class="typing-cursor"></span>' : '';
+        html += `<div class="${cls}">
+            <div class="timestamp">${entry.timestamp}</div>
+            <div>${entry.text}${cursor}</div>
+        </div>`;
+    }
+    logEntriesEl.innerHTML = html;
+
+    // Auto-scroll
+    const container = document.getElementById('observation-log');
+    container.scrollTop = container.scrollHeight;
+}
+
+// ── State & Robot State ──────────────────────────────────────────────
+function updateState(state) {
+    const el = document.getElementById('robot-state');
+    el.textContent = state;
+    el.dataset.state = state;
+}
+
+function updateRobotState(msg) {
+    // Emotion
+    const emotionEl = document.getElementById('robot-emotion');
+    const color = EMOTION_COLORS[msg.emotion] || '#3498db';
+    emotionEl.innerHTML = `<span class="emotion-tag" style="color:${color}; border-color:${color}40; background:${color}15">${msg.emotion}</span>`;
+
+    // Head
+    document.getElementById('robot-head').textContent =
+        `Y:${msg.head.yaw.toFixed(1)} P:${msg.head.pitch.toFixed(1)}`;
+
+    // Antenna
+    document.getElementById('robot-antenna').textContent =
+        `L:${msg.antenna.left.toFixed(1)} R:${msg.antenna.right.toFixed(1)}`;
+
+    // Tracking
+    const trackEl = document.getElementById('robot-tracking');
+    trackEl.textContent = `${msg.tracking.source} (${(msg.tracking.confidence * 100).toFixed(0)}%)`;
+    trackEl.className = msg.tracking.source === 'face' ? 'value highlight' : 'value';
+
+    // Speaking
+    const speakEl = document.getElementById('robot-speaking');
+    speakEl.textContent = msg.speaking ? 'yes' : 'no';
+    speakEl.className = msg.speaking ? 'value highlight' : 'value';
+
+    // Robot connected indicator
+    document.getElementById('dot-robot').className = 'dot live';
+
+    // Emotion mapping
+    const mappingEl = document.getElementById('emotion-mapping');
+    const descEl = document.getElementById('mapping-desc');
+    if (msg.emotion_mapping) {
+        mappingEl.style.display = 'block';
+        const m = msg.emotion_mapping;
+        descEl.textContent = `${m.description} | Antenna: L${m.antenna_target.left} R${m.antenna_target.right}`;
+    } else {
+        mappingEl.style.display = 'none';
+    }
+}
+
+// ── Canvas overlay (face detection) ──────────────────────────────────
+function drawOverlay() {
+    const rect = videoEl.getBoundingClientRect();
+    canvasEl.width = rect.width;
+    canvasEl.height = rect.height;
+    ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+
+    if (!latestFaces || latestFaces.length === 0) {
+        requestAnimationFrame(drawOverlay);
+        return;
+    }
+
+    const cw = canvasEl.width;
+    const ch = canvasEl.height;
+
+    for (const face of latestFaces) {
+        const [x1, y1, x2, y2] = face.bbox;
+        const color = EMOTION_COLORS[face.emotion] || '#3498db';
+
+        const bx = x1 * cw;
+        const by = y1 * ch;
+        const bw = (x2 - x1) * cw;
+        const bh = (y2 - y1) * ch;
+
+        // HUD corner brackets instead of full rectangle
+        const cornerLen = Math.min(bw, bh) * 0.2;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.8;
+
+        // Top-left
+        ctx.beginPath();
+        ctx.moveTo(bx, by + cornerLen);
+        ctx.lineTo(bx, by);
+        ctx.lineTo(bx + cornerLen, by);
+        ctx.stroke();
+
+        // Top-right
+        ctx.beginPath();
+        ctx.moveTo(bx + bw - cornerLen, by);
+        ctx.lineTo(bx + bw, by);
+        ctx.lineTo(bx + bw, by + cornerLen);
+        ctx.stroke();
+
+        // Bottom-left
+        ctx.beginPath();
+        ctx.moveTo(bx, by + bh - cornerLen);
+        ctx.lineTo(bx, by + bh);
+        ctx.lineTo(bx + cornerLen, by + bh);
+        ctx.stroke();
+
+        // Bottom-right
+        ctx.beginPath();
+        ctx.moveTo(bx + bw - cornerLen, by + bh);
+        ctx.lineTo(bx + bw, by + bh);
+        ctx.lineTo(bx + bw, by + bh - cornerLen);
+        ctx.stroke();
+
+        ctx.globalAlpha = 1.0;
+
+        // Labels
+        ctx.font = '12px monospace';
+        ctx.fillStyle = color;
+
+        const identity = face.identity || '?';
+        const conf = ((face.emotion_confidence || 0) * 100).toFixed(0);
+        let labelY = by - 6;
+        if (labelY < 14) labelY = by + bh + 16;
+
+        // Background for label
+        const labelText = `${identity} | ${face.emotion} ${conf}%`;
+        const metrics = ctx.measureText(labelText);
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(bx - 1, labelY - 12, metrics.width + 6, 16);
+        ctx.fillStyle = color;
+        ctx.fillText(labelText, bx + 2, labelY);
+
+        // 5-point landmarks
+        if (face.landmarks) {
+            ctx.fillStyle = '#00d2ff';
+            for (const [lx, ly] of face.landmarks) {
+                ctx.beginPath();
+                ctx.arc(lx * cw, ly * ch, 2.5, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+        }
+    }
+
+    requestAnimationFrame(drawOverlay);
+}
+
+// ── MJPEG video ──────────────────────────────────────────────────────
+function setupVideo() {
+    const streamUrl = `http://${VISION_HOST}/stream`;
+    videoEl.src = streamUrl;
+
+    videoEl.onload = () => {
+        videoEl.style.display = 'block';
+        noVideoEl.style.display = 'none';
+    };
+
+    videoEl.onerror = () => {
+        videoEl.style.display = 'none';
+        noVideoEl.style.display = 'flex';
+        // Retry after 5s
+        setTimeout(() => { videoEl.src = streamUrl; }, 5000);
+    };
+}
+
+// ── Init ─────────────────────────────────────────────────────────────
+function init() {
+    setupVideo();
+    connectVision();
+    connectDashboard();
+    requestAnimationFrame(drawOverlay);
+}
+
+init();
+</script>
+</body>
+</html>
