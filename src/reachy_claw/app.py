@@ -9,6 +9,7 @@ import logging
 from typing import List
 
 from .config import Config
+from .event_bus import EventBus
 from .motion.emotion_mapper import EmotionMapper
 from .motion.head_target import HeadTargetBus
 from .plugin import Plugin
@@ -23,6 +24,7 @@ class ReachyClawApp:
         self.config = config
         self.reachy = None  # ReachyMini instance, set by connect_robot() or externally
         self._owns_reachy = False  # True if we created the connection ourselves
+        self.events = EventBus()
         self.head_targets = HeadTargetBus()
         self.emotions = EmotionMapper(
             intensity=config.motion_emotion_intensity,
@@ -31,6 +33,7 @@ class ReachyClawApp:
         # Shared flags for inter-plugin coordination
         self.is_speaking = False
         self.running = False
+        self.healthy = False
 
         self._plugins: List[Plugin] = []
 
@@ -340,6 +343,9 @@ class ReachyClawApp:
             plugin._running = True
             tasks.append(asyncio.create_task(plugin.start(), name=plugin.name))
 
+        self.healthy = True
+        logger.info("App marked healthy")
+
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
@@ -353,6 +359,7 @@ class ReachyClawApp:
         """Stop all plugins in reverse registration order."""
         logger.info("Shutting down plugins...")
         self.running = False
+        self.healthy = False
         for plugin in reversed(self._plugins):
             try:
                 await plugin.stop()
