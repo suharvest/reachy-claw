@@ -218,13 +218,17 @@ class ConversationPlugin(Plugin):
             logger.info("Speak anytime - always listening!")
         logger.info("=" * 50)
 
+        tasks = [
+            self._audio_loop(),
+            self._sentence_accumulator(),
+            self._tts_worker(),
+            self._output_pipeline(),
+        ]
+        if self._monologue_mode:
+            tasks.append(self._monologue_timer())
+
         try:
-            await asyncio.gather(
-                self._audio_loop(),
-                self._sentence_accumulator(),
-                self._tts_worker(),
-                self._output_pipeline(),
-            )
+            await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             logger.info("Conversation pipeline cancelled")
 
@@ -443,6 +447,18 @@ class ConversationPlugin(Plugin):
                 self._client._config.skip_emotion_extraction = False
             # Reset history on mode switch
             self._client._history.clear()
+
+        # Start/stop monologue timer on mode switch
+        if self._monologue_mode:
+            # Start timer if not already running
+            if not hasattr(self, '_monologue_timer_task') or self._monologue_timer_task.done():
+                self._monologue_timer_task = asyncio.ensure_future(self._monologue_timer())
+                self._last_speech_time = time.monotonic()
+        else:
+            # Cancel timer when leaving monologue mode
+            task = getattr(self, '_monologue_timer_task', None)
+            if task and not task.done():
+                task.cancel()
 
         logger.info(f"Conversation mode switched to: {mode}")
 
@@ -773,26 +789,6 @@ class ConversationPlugin(Plugin):
                     await self._bg_listen(chunk, streaming_stt)
                 continue
 
-            # ── Monologue auto-trigger: if idle too long, generate monologue ──
-            # Note: _last_speech_time is reset by _set_state(IDLE) after speaking
-            # finishes, so monologue_interval is measured from end of last utterance.
-            if (
-                self._monologue_mode
-                and self._state == ConvState.IDLE
-                and self._client
-                and time.monotonic() - self._last_speech_time
-                    >= self.app.config.monologue_interval
-            ):
-                # Use any speech captured in background, then clear
-                transcript = self._pending_speech
-                self._pending_speech = None
-                prompt = self._compose_monologue_prompt(transcript)
-                self._spawn_task(
-                    self._process_and_send_raw(prompt),
-                    name="conversation.monologue_auto",
-                )
-                continue
-
             # ── IDLE / LISTENING states: accumulate speech ──
             has_speech = await asyncio.to_thread(self._audio._detect_speech, chunk)
             if has_speech:
@@ -1016,6 +1012,38 @@ class ConversationPlugin(Plugin):
         except Exception as e:
             logger.error(f"Monologue send error: {e}")
             self._set_state(ConvState.IDLE)
+
+    # ── Monologue timer (independent of audio input) ───────────────────
+
+    async def _monologue_timer(self) -> None:
+        """Periodically trigger monologue when idle, independent of audio stream.
+
+        Runs as a separate async task so monologue generation works even when
+        the microphone device is missing or no audio chunks are flowing.
+        """
+        interval = self.app.config.monologue_interval
+        logger.info(f"Monologue timer started (interval={interval}s)")
+
+        while self._running:
+            await asyncio.sleep(1.0)  # check every second
+
+            if (
+                self._state != ConvState.IDLE
+                or not self._client
+                or time.monotonic() - self._last_speech_time < interval
+            ):
+                continue
+
+            # Grab any speech captured in background, then clear
+            transcript = self._pending_speech
+            self._pending_speech = None
+            prompt = self._compose_monologue_prompt(transcript)
+            self._spawn_task(
+                self._process_and_send_raw(prompt),
+                name="conversation.monologue_auto",
+            )
+            # Reset timer so next monologue waits a full interval
+            self._last_speech_time = time.monotonic()
 
     # ── Pipeline task 2: Sentence accumulator ─────────────────────────
 

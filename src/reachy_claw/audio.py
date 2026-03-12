@@ -95,9 +95,14 @@ class AudioCapture:
             self.reachy.media.start_recording()
             logger.info("Started continuous Reachy media recording")
         else:
-            # Pre-open the local mic stream
-            await self._read_local_mic(1024)
-            logger.info("Started continuous local mic capture")
+            # Pre-open the local mic stream (with timeout to avoid blocking forever)
+            try:
+                await asyncio.wait_for(self._read_local_mic(1024), timeout=5.0)
+                logger.info("Started continuous local mic capture")
+            except asyncio.TimeoutError:
+                logger.warning("Local mic read timed out during start — will retry in audio loop")
+            except Exception as e:
+                logger.warning(f"Local mic pre-open failed: {e} — will retry in audio loop")
 
     async def read_chunk(self, frames: int = 1024) -> np.ndarray | None:
         """Read one audio chunk. Non-blocking (uses asyncio.to_thread)."""
