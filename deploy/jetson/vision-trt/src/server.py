@@ -31,6 +31,92 @@ _zmq = None
 _msgpack = None
 
 
+class SmileCaptureTracker:
+    """Track smile events and save face crops with per-person cooldown."""
+
+    def __init__(self, capture_dir: str,
+                 confidence_threshold: float = 0.6, distance_threshold: float = 0.8):
+        self._dir = os.path.join(capture_dir, "captures")
+        os.makedirs(self._dir, exist_ok=True)
+        self._conf_threshold = confidence_threshold
+        self._dist_threshold = distance_threshold
+        # Store all captured person embeddings — each person captured only once
+        self._captured_embeddings: list[list[float]] = []
+        # Count existing files for persistence across restarts
+        self.count = len([f for f in os.listdir(self._dir) if f.endswith(".jpg")])
+        if self.count:
+            logger.info(f"SmileCaptureTracker: found {self.count} existing captures")
+
+    def check_and_capture(self, results, frame: np.ndarray) -> dict | None:
+        """Check for smile capture trigger. Returns capture info or None."""
+        if not results:
+            return None
+
+        # Find largest face
+        primary = max(
+            results,
+            key=lambda r: (r.bbox[2] - r.bbox[0]) * (r.bbox[3] - r.bbox[1]),
+        )
+
+        # Check happiness with sufficient confidence
+        if primary.emotion != "Happiness" or (primary.emotion_confidence or 0) < self._conf_threshold:
+            return None
+
+        # Per-person dedup: same person is only captured once (no time limit)
+        if primary.embedding:
+            emb = np.array(primary.embedding, dtype=np.float32)
+            for cap_emb in self._captured_embeddings:
+                dist = float(np.linalg.norm(emb - np.array(cap_emb, dtype=np.float32)))
+                if dist < self._dist_threshold:
+                    return None  # Already captured this person
+
+        # Save face crop
+        h, w = frame.shape[:2]
+        x1 = max(0, int(primary.bbox[0] * w))
+        y1 = max(0, int(primary.bbox[1] * h))
+        x2 = min(w, int(primary.bbox[2] * w))
+        y2 = min(h, int(primary.bbox[3] * h))
+
+        # Add padding (20%)
+        pad_w = int((x2 - x1) * 0.2)
+        pad_h = int((y2 - y1) * 0.2)
+        x1 = max(0, x1 - pad_w)
+        y1 = max(0, y1 - pad_h)
+        x2 = min(w, x2 + pad_w)
+        y2 = min(h, y2 + pad_h)
+
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None
+
+        self.count += 1
+        fname = f"smile_{int(time.time())}_{self.count:04d}.jpg"
+        fpath = os.path.join(self._dir, fname)
+        cv2.imwrite(fpath, crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+
+        # Record this person's embedding permanently
+        if primary.embedding:
+            self._captured_embeddings.append(primary.embedding)
+
+        logger.info(f"Smile captured: {fname} (total: {self.count})")
+        return {"count": self.count, "event": True, "file": fname}
+
+    def clear(self) -> int:
+        """Delete all captures and reset count. Returns deleted count."""
+        deleted = 0
+        for f in os.listdir(self._dir):
+            if f.endswith(".jpg"):
+                try:
+                    os.remove(os.path.join(self._dir, f))
+                    deleted += 1
+                except OSError:
+                    pass
+        self.count = 0
+        self._captured_embeddings.clear()
+        logger.info(f"Cleared {deleted} captures")
+        return deleted
+
+
 class VisionService:
     """Core vision inference service."""
 
@@ -42,6 +128,7 @@ class VisionService:
         self.face_db = None
         self.streamer = None
         self.capture = None
+        self.smile_tracker = None
         self._zmq_pub = None
         self._zmq_ctx = None
         self._ws_clients: set = set()
@@ -69,6 +156,9 @@ class VisionService:
 
         # Face database
         self.face_db = FaceDatabase(config.DATA_DIR)
+
+        # Smile capture tracker
+        self.smile_tracker = SmileCaptureTracker(config.DATA_DIR)
 
         # Video streamer (simple JPEG buffer now)
         self.streamer = VideoStreamer(config.STREAM_PORT)
@@ -118,6 +208,10 @@ class VisionService:
         if self.pipeline:
             results = self.pipeline.process_frame(frame)
 
+        # Cache for debug snapshot endpoint
+        self._last_frame = frame
+        self._last_results = results
+
         t1 = time.monotonic()
         self._inference_ms = (t1 - t0) * 1000
 
@@ -129,25 +223,35 @@ class VisionService:
             self._frame_count = 0
             self._last_stats_time = t1
 
-        # Build messages
+        # Check for smile capture
+        capture_info = None
+        if self.smile_tracker and results:
+            capture_info = self.smile_tracker.check_and_capture(results, frame)
+
+        # Build messages (cast numpy scalars to Python floats for msgpack)
+        def _f(v):
+            return float(v) if v is not None else 0.0
+
         zmq_msg = {
             "timestamp": t0,
             "frame_id": frame_id,
             "faces": [
                 {
-                    "center": r.center,
-                    "bbox": r.bbox,
-                    "landmarks": r.landmarks,
-                    "confidence": r.confidence,
-                    "embedding": r.embedding,
+                    "center": [float(c) for c in r.center],
+                    "bbox": [float(b) for b in r.bbox],
+                    "landmarks": [[float(x) for x in pt] for pt in r.landmarks],
+                    "confidence": _f(r.confidence),
+                    "embedding": r.embedding,  # already list[float] via .tolist()
                     "emotion": r.emotion,
-                    "emotion_confidence": r.emotion_confidence,
+                    "emotion_confidence": _f(r.emotion_confidence),
                     "identity": r.identity,
-                    "identity_distance": r.identity_distance,
+                    "identity_distance": _f(r.identity_distance),
                 }
                 for r in results
             ],
         }
+        if capture_info:
+            zmq_msg["capture"] = capture_info
 
         ws_msg = {
             "frame_id": frame_id,
@@ -174,7 +278,8 @@ class VisionService:
                 _msgpack.packb(zmq_msg, use_bin_type=True),
             ])
         except Exception as e:
-            logger.debug(f"ZMQ pub error: {e}")
+            if self._frame_id <= 3 or self._frame_id % 1000 == 0:
+                logger.warning(f"ZMQ pub error: {e}")
 
         # WebSocket broadcast
         ws_json = json.dumps(ws_msg)
@@ -263,6 +368,15 @@ from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="Vision TRT Service", lifespan=lifespan)
 
+# CORS — allow dashboard (different port) to access stream and APIs
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Serve static files (frontend)
 _static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 if os.path.isdir(_static_dir):
@@ -281,12 +395,59 @@ async def health():
 
 @app.get("/api/stats")
 async def stats():
+    inf_shape = None
+    if service.capture:
+        frame = service.capture.get_inference_frame()
+        if frame is not None:
+            inf_shape = list(frame.shape)  # [H, W, C]
     return {
         "fps": round(service._fps, 1),
         "inference_ms": round(service._inference_ms, 1),
         "pipeline_ready": service.pipeline is not None,
         "faces_registered": len(service.face_db.list_faces()) if service.face_db else 0,
+        "inference_frame_shape": inf_shape,
     }
+
+
+@app.get("/api/snapshot")
+async def snapshot(target: str = "inference"):
+    """Debug: return frame as JPEG with bbox overlay.
+
+    ?target=inference (default): 640x640 inference frame
+    ?target=stream: 640x360 stream frame with mapped overlay
+    """
+    from fastapi.responses import Response
+
+    results = getattr(service, '_last_results', [])
+
+    if target == "stream":
+        # Get stream frame and map inference coords onto it
+        jpeg = service.capture.get_stream_jpeg() if service.capture else None
+        if not jpeg:
+            return Response(content='{"error":"no stream"}', media_type="application/json", status_code=503)
+        arr = np.frombuffer(jpeg, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    else:
+        frame = getattr(service, '_last_frame', None)
+        if frame is None:
+            return Response(content='{"error":"no frame"}', media_type="application/json", status_code=503)
+        frame = frame.copy()
+
+    h, w = frame.shape[:2]
+    for r in results:
+        x1 = int(r.bbox[0] * w)
+        y1 = int(r.bbox[1] * h)
+        x2 = int(r.bbox[2] * w)
+        y2 = int(r.bbox[3] * h)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        for lx, ly in r.landmarks:
+            cv2.circle(frame, (int(lx * w), int(ly * h)), 3, (0, 0, 255), -1)
+        label = f"{r.emotion} {r.emotion_confidence:.0%}"
+        cv2.putText(frame, label, (x1, max(y1-5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    # Add frame info
+    cv2.putText(frame, f"{w}x{h}", (5, h-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+    _, jpg = cv2.imencode(".jpg", frame)
+    return Response(content=jpg.tobytes(), media_type="image/jpeg")
 
 
 @app.get("/api/faces")
@@ -294,6 +455,20 @@ async def list_faces():
     if not service.face_db:
         return {"faces": []}
     return {"faces": service.face_db.list_faces()}
+
+
+@app.delete("/api/captures")
+async def clear_captures():
+    if not service.smile_tracker:
+        return {"error": "Smile tracker not initialized"}, 503
+    deleted = service.smile_tracker.clear()
+    return {"status": "cleared", "deleted": deleted, "count": 0}
+
+
+@app.get("/api/captures/count")
+async def capture_count():
+    count = service.smile_tracker.count if service.smile_tracker else 0
+    return {"count": count}
 
 
 @app.post("/api/faces/enroll")

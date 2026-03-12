@@ -1,14 +1,15 @@
-"""GStreamer camera capture with hardware-accelerated decode, resize, and encode.
+"""GStreamer camera capture with hardware-accelerated resize and encode.
 
-Full HW pipeline (no CPU involvement in video path):
-  v4l2src (MJPEG) → jpegparse → nvv4l2decoder → tee
-    ├→ nvvidconv 640x640 BGRx → appsink (inference)
-    └→ nvvidconv 640w → nvjpegenc → appsink (MJPEG stream)
+HW pipeline (Jetson, GST_V4L2_USE_LIBV4L2=1):
+  v4l2src (libnvv4l2 decodes MJPEG→YUY2) → tee
+    ├→ nvvidconv YUY2→BGRx 640x640 → appsink (inference)
+    └→ nvvidconv 640w NVMM → nvjpegenc → appsink (MJPEG stream)
 
-IMPORTANT: Do NOT set GST_V4L2_USE_LIBV4L2=1 — it loads libnvv4l2 which
-transparently decodes MJPEG and hides the format from GStreamer, forcing
-v4l2src to output raw YUY2 at max resolution (10MP). Without it, v4l2src
-exposes image/jpeg caps and we can use nvv4l2decoder for HW MJPEG decode.
+  Camera pre-set to 1080p via V4L2 ioctl. nvvidconv (VIC HW) handles
+  both colorspace conversion and resize — no CPU videoconvert needed.
+
+CPU fallback (no NVIDIA plugins):
+  v4l2src → videoscale → videoconvert → tee → appsinks
 """
 
 import logging
@@ -27,7 +28,7 @@ class GstCameraCapture:
         device: str = "/dev/video0",
         cam_width: int = 1920,
         cam_height: int = 1080,
-        cam_fps: int = 30,
+        cam_fps: int = 60,
         inf_width: int = 640,
         inf_height: int = 640,
         stream_width: int = 640,
@@ -51,12 +52,45 @@ class GstCameraCapture:
         self._latest_jpeg: bytes | None = None
         self._jpeg_lock = threading.Lock()
 
+    def _set_camera_format(self):
+        """Pre-set camera to MJPEG at desired resolution via V4L2 ioctl.
+
+        Must be called BEFORE GStreamer opens v4l2src. This forces the camera
+        to output MJPEG at 1920x1080 instead of the max 3840x2592, so
+        libnvv4l2's transparent decode handles a much smaller frame.
+        """
+        import fcntl
+        import os
+        import struct
+
+        try:
+            fd = os.open(self._device, os.O_RDWR)
+            V4L2_PIX_FMT_MJPEG = 0x47504A4D  # 'MJPG'
+            VIDIOC_S_FMT = 0xC0D05605
+
+            fmt = bytearray(208)
+            struct.pack_into("I", fmt, 0, 1)  # V4L2_BUF_TYPE_VIDEO_CAPTURE
+            struct.pack_into("I", fmt, 4, self._cam_width)
+            struct.pack_into("I", fmt, 8, self._cam_height)
+            struct.pack_into("I", fmt, 12, V4L2_PIX_FMT_MJPEG)
+
+            fcntl.ioctl(fd, VIDIOC_S_FMT, fmt)
+            actual_w = struct.unpack_from("I", fmt, 4)[0]
+            actual_h = struct.unpack_from("I", fmt, 8)[0]
+            logger.info(f"Camera format set to {actual_w}x{actual_h} MJPEG via ioctl")
+            os.close(fd)
+        except Exception as e:
+            logger.warning(f"Could not pre-set camera format: {e}")
+
     def start(self) -> bool:
         """Build and start the GStreamer pipeline.
 
         Tries HW-accelerated pipeline first, falls back to CPU.
         Returns True if pipeline started successfully.
         """
+        # Pre-set camera to desired resolution before GStreamer opens it
+        self._set_camera_format()
+
         try:
             import gi
             gi.require_version("Gst", "1.0")
@@ -68,32 +102,42 @@ class GstCameraCapture:
             logger.error(f"GStreamer not available: {e}")
             return False
 
-        # Try HW pipeline first (nvv4l2decoder + nvvidconv)
-        if self._try_hw_pipeline():
-            self._hw_pipeline = True
-            logger.info("Camera capture started (HW: nvv4l2decoder + nvvidconv + nvjpegenc)")
-            return True
+        # Retry loop — camera device may not be ready immediately after container start
+        import time
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            # Try HW pipeline first (nvvidconv + nvjpegenc)
+            if self._try_hw_pipeline():
+                self._hw_pipeline = True
+                logger.info("Camera capture started (HW: nvvidconv + nvjpegenc)")
+                return True
 
-        # Fall back to CPU pipeline
-        if self._try_cpu_pipeline():
-            self._hw_pipeline = False
-            logger.info("Camera capture started (CPU fallback: jpegdec + videoconvert)")
-            return True
+            # Fall back to CPU pipeline
+            if self._try_cpu_pipeline():
+                self._hw_pipeline = False
+                logger.info("Camera capture started (CPU fallback: videoconvert)")
+                return True
 
-        logger.error("Failed to start camera capture (both HW and CPU)")
+            if attempt < max_retries:
+                wait = attempt * 3
+                logger.warning(f"Camera start failed (attempt {attempt}/{max_retries}), retrying in {wait}s")
+                time.sleep(wait)
+                self._set_camera_format()  # re-set format before retry
+
+        logger.error("Failed to start camera capture after all retries")
         return False
 
     def _try_hw_pipeline(self) -> bool:
-        """Full HW pipeline: MJPEG decode + resize + JPEG encode all on GPU/VIC.
+        """HW pipeline: libnvv4l2 MJPEG decode → nvvidconv resize/colorspace.
 
-        v4l2src exposes image/jpeg when GST_V4L2_USE_LIBV4L2 is NOT set.
-        nvv4l2decoder does HW MJPEG decode, nvvidconv does HW resize.
-        No CPU videoconvert needed — entire path is hardware-accelerated.
+        With GST_V4L2_USE_LIBV4L2=1, libnvv4l2 transparently decodes MJPEG
+        and outputs raw YUY2. We use nvvidconv (VIC hardware) instead of CPU
+        videoconvert for both colorspace conversion and resize in one step.
+        Camera is pre-set to 1080p via V4L2 ioctl to minimize frame size.
         """
         Gst = self._Gst
 
-        # Check required plugins
-        for name in ("nvv4l2decoder", "nvvidconv", "nvjpegenc"):
+        for name in ("nvvidconv", "nvjpegenc"):
             if Gst.ElementFactory.find(name) is None:
                 logger.debug(f"HW plugin {name} not found")
                 return False
@@ -102,17 +146,14 @@ class GstCameraCapture:
 
         pipeline_str = (
             f"v4l2src device={self._device} "
-            f"! image/jpeg,width={self._cam_width},height={self._cam_height} "
-            "! jpegparse "
-            "! nvv4l2decoder mjpeg=1 "
             "! tee name=t "
-            # Inference branch: nvvidconv resize to 640x640 BGRx
+            # Inference: nvvidconv does YUY2→BGRx + resize in one shot (VIC HW)
             "t. ! queue leaky=downstream max-size-buffers=1 "
             f"! nvvidconv ! video/x-raw,format=BGRx,width={self._inf_width},"
             f"height={self._inf_height} "
             "! appsink name=inference_sink emit-signals=false "
             "drop=true max-buffers=1 sync=false "
-            # Stream branch: nvvidconv resize + HW JPEG encode
+            # Stream: nvvidconv resize + HW JPEG encode
             "t. ! queue leaky=downstream max-size-buffers=1 "
             f"! nvvidconv ! video/x-raw(memory:NVMM),width={self._stream_width},"
             f"height={stream_height} "
@@ -124,21 +165,15 @@ class GstCameraCapture:
         return self._launch_pipeline(pipeline_str)
 
     def _try_cpu_pipeline(self) -> bool:
-        """CPU fallback: jpegdec + videoscale + videoconvert."""
-        stream_height = int(self._cam_height * self._stream_width / self._cam_width)
-
+        """CPU fallback: videoscale + videoconvert."""
         pipeline_str = (
             f"v4l2src device={self._device} "
-            f"! image/jpeg,width={self._cam_width},height={self._cam_height} "
-            "! jpegdec "
             f"! videoscale ! video/x-raw,width={self._inf_width},height={self._inf_height} "
             "! videoconvert ! video/x-raw,format=BGR "
             "! tee name=t "
-            # Inference branch (already at target size)
             "t. ! queue leaky=downstream max-size-buffers=1 "
             "! appsink name=inference_sink emit-signals=false "
             "drop=true max-buffers=1 sync=false "
-            # Stream branch (CPU JPEG encode)
             "t. ! queue leaky=downstream max-size-buffers=1 "
             "! jpegenc quality=70 "
             "! appsink name=stream_sink emit-signals=false "
@@ -166,8 +201,8 @@ class GstCameraCapture:
                 pipeline.set_state(Gst.State.NULL)
                 return False
 
-            # Wait for pipeline to reach PLAYING (5s timeout)
-            _, state, _ = pipeline.get_state(5 * Gst.SECOND)
+            # Wait for pipeline to reach PLAYING (10s timeout)
+            _, state, _ = pipeline.get_state(10 * Gst.SECOND)
             logger.info(f"Pipeline state after preroll: {state.value_name}")
 
             # Check bus for errors
@@ -202,7 +237,6 @@ class GstCameraCapture:
             return None
 
         Gst = self._Gst
-        # Use 100ms timeout instead of non-blocking to catch preroll
         sample = self._inference_sink.try_pull_sample(100 * 1000000)  # 100ms in ns
         if sample is None:
             return None

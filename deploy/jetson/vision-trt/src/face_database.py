@@ -1,6 +1,6 @@
 """Face database for identity management.
 
-Stores face embeddings (128-dim vectors) with names.
+Stores face embeddings with names (dimension auto-detected from model output).
 Persistence via JSON metadata + npy embedding files.
 """
 
@@ -55,8 +55,9 @@ class FaceDatabase:
     def enroll(self, name: str, embedding: np.ndarray) -> None:
         """Register a face embedding."""
         embedding = embedding.astype(np.float32).flatten()
-        if embedding.shape[0] != 128:
-            raise ValueError(f"Expected 128-dim embedding, got {embedding.shape[0]}")
+        # Accept any reasonable embedding dimension (128 or 512 depending on model)
+        if embedding.shape[0] not in (128, 512):
+            raise ValueError(f"Expected 128 or 512-dim embedding, got {embedding.shape[0]}")
 
         # L2 normalize
         norm = np.linalg.norm(embedding)
@@ -91,7 +92,7 @@ class FaceDatabase:
         """Find the closest matching face.
 
         Args:
-            embedding: 128-dim face embedding (L2 normalized).
+            embedding: Face embedding vector (L2 normalized).
             threshold: Maximum cosine distance for a match.
 
         Returns:
