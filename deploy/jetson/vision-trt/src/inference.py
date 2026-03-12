@@ -110,8 +110,10 @@ class VisionPipeline:
                 emotion, emotion_conf = self._classify_emotion(
                     emotion_engine, face_crop
                 )
-                # Temporal smoothing
-                smoothed = self._smooth_emotion(0, emotion)
+                # Temporal smoothing — use spatial bucket as track_id
+                # Quantize center to grid cells so nearby positions share a window
+                bucket = int((cx + 1) * 5) * 10 + int((cy + 1) * 5)
+                smoothed = self._smooth_emotion(bucket, emotion)
                 result.emotion = smoothed
                 result.emotion_confidence = emotion_conf
 
