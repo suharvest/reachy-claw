@@ -673,6 +673,7 @@ function initSettings() {
             document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
             tab.classList.add('active');
             document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+            if (tab.dataset.tab === 'faces') loadCaptureInfo();
             if (tab.dataset.tab === 'prompt') loadPrompts();
         };
     });
@@ -938,6 +939,55 @@ async function importFaces() {
     }
     input.value = '';
 }
+
+// ── Capture Data Management ──────────────────────────────────────────
+async function loadCaptureInfo() {
+    try {
+        const res = await fetch(`${VISION_API}/api/captures/count`);
+        const data = await res.json();
+        document.getElementById('capture-data-count').textContent = (data.count || 0) + ' photos';
+        document.getElementById('capture-storage-path').textContent = data.path || '/data/captures';
+    } catch (e) {
+        document.getElementById('capture-data-count').textContent = 'unavailable';
+        document.getElementById('capture-storage-path').textContent = 'unavailable';
+    }
+}
+
+document.getElementById('capture-clear-btn').onclick = async () => {
+    if (!confirm('Clear all smile capture photos? This cannot be undone.')) return;
+    try {
+        const res = await fetch(`${VISION_API}/api/captures`, { method: 'DELETE' });
+        if (res.ok) {
+            showToast('Captures cleared');
+            captureCount = 0;
+            captureCountEl.textContent = '0';
+            loadCaptureInfo();
+            if (dashboardWs && dashboardWs.readyState === 1) {
+                dashboardWs.send(JSON.stringify({ type: 'clear_captures' }));
+            }
+        } else {
+            showToast('Clear failed', true);
+        }
+    } catch (e) {
+        showToast('Clear failed', true);
+    }
+};
+
+document.getElementById('capture-export-btn').onclick = async () => {
+    try {
+        const res = await fetch(`${VISION_API}/api/captures/export`);
+        if (!res.ok) { showToast('Export failed', true); return; }
+        const blob = await res.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'smile-captures.zip';
+        a.click();
+        URL.revokeObjectURL(a.href);
+        showToast('Exported captures');
+    } catch (e) {
+        showToast('Export failed', true);
+    }
+};
 
 // ── Motor Control ───────────────────────────────────────────────────
 let motorEnabled = true;

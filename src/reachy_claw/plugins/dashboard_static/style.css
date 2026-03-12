@@ -745,6 +745,24 @@ body {
 .prompt-textarea:focus { border-color: var(--green-dim); }
 .prompt-actions { display: flex; gap: 8px; justify-content: flex-end; }
 
+/* Capture data section */
+.capture-info-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 12px; border-bottom: 1px solid var(--border);
+    font-size: 12px;
+}
+.capture-info-label { color: var(--text-dim); }
+.capture-info-value {
+    color: var(--text-bright); font-family: 'JetBrains Mono', 'SF Mono', monospace;
+    font-size: 11px; word-break: break-all; text-align: right; max-width: 65%;
+}
+.capture-actions { display: flex; gap: 8px; margin-top: 10px; }
+.danger-btn {
+    background: rgba(233, 69, 96, 0.08); border-color: rgba(233, 69, 96, 0.4);
+    color: var(--red);
+}
+.danger-btn:hover { background: rgba(233, 69, 96, 0.15); border-color: var(--red); }
+
 /* Toast */
 .toast {
     position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%);
