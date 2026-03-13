@@ -32,26 +32,38 @@ _msgpack = None
 
 
 class SmileCaptureTracker:
-    """Track smile events and save face crops with per-person cooldown."""
+    """Track smile events and save face crops with per-person cooldown.
+
+    Dedup strategy (layered):
+    1. Identity name — if face is recognized, same name is captured only once
+    2. Embedding L2 distance — same embedding within threshold is captured only once
+    3. Per-person cooldown — after any capture, same spatial region has a time cooldown
+    """
 
     def __init__(self, capture_dir: str,
-                 confidence_threshold: float = 0.6, distance_threshold: float = 0.8,
-                 stable_frames: int = 5):
+                 confidence_threshold: float = 0.6, distance_threshold: float = 1.0,
+                 stable_frames: int = 5, person_cooldown: float = 30.0):
         self._dir = os.path.join(capture_dir, "captures")
         os.makedirs(self._dir, exist_ok=True)
         self._conf_threshold = confidence_threshold
         self._dist_threshold = distance_threshold
         self._stable_frames = stable_frames  # consecutive happy frames before capture
+        self._person_cooldown = person_cooldown  # seconds before same region can re-trigger
         self._embeddings_path = os.path.join(self._dir, "embeddings.json")
         # Store all captured person embeddings — each person captured only once
         self._captured_embeddings: list[list[float]] = self._load_embeddings()
+        # Set of captured identity names (persistent across frames)
+        self._captured_names: set[str] = self._load_captured_names()
         # Smile streak: spatial bucket → consecutive happy frame count
         self._smile_streak: dict[int, int] = {}
+        # Per-bucket cooldown: bucket → last capture timestamp
+        self._bucket_cooldown: dict[int, float] = {}
         # Count existing files for persistence across restarts
         self.count = len([f for f in os.listdir(self._dir) if f.endswith(".jpg")])
         if self.count:
             logger.info(f"SmileCaptureTracker: found {self.count} existing captures, "
-                        f"{len(self._captured_embeddings)} dedup embeddings")
+                        f"{len(self._captured_embeddings)} dedup embeddings, "
+                        f"{len(self._captured_names)} captured names")
 
     def _load_embeddings(self) -> list[list[float]]:
         """Load persisted dedup embeddings from disk."""
@@ -66,13 +78,30 @@ class SmileCaptureTracker:
             logger.warning(f"Failed to load embeddings: {e}")
             return []
 
+    def _load_captured_names(self) -> set[str]:
+        """Load captured identity names from disk."""
+        names_path = os.path.join(self._dir, "captured_names.json")
+        if not os.path.exists(names_path):
+            return set()
+        try:
+            with open(names_path, "r") as f:
+                return set(json.load(f))
+        except Exception:
+            return set()
+
     def _save_embeddings(self) -> None:
-        """Persist dedup embeddings to disk."""
+        """Persist dedup embeddings and captured names to disk."""
         try:
             with open(self._embeddings_path, "w") as f:
                 json.dump(self._captured_embeddings, f)
         except Exception as e:
             logger.warning(f"Failed to save embeddings: {e}")
+        try:
+            names_path = os.path.join(self._dir, "captured_names.json")
+            with open(names_path, "w") as f:
+                json.dump(list(self._captured_names), f)
+        except Exception as e:
+            logger.warning(f"Failed to save captured names: {e}")
 
     def _is_duplicate(self, embedding: list[float]) -> bool:
         """Check if this face embedding matches any previously captured person."""
@@ -111,20 +140,40 @@ class SmileCaptureTracker:
 
     @staticmethod
     def _face_bucket(face) -> int:
-        """Spatial bucket for tracking a face across consecutive frames."""
+        """Spatial bucket for tracking a face across consecutive frames.
+
+        Uses a coarse 5×5 grid so slight movements don't break the streak.
+        """
         cx = (face.bbox[0] + face.bbox[2]) / 2
         cy = (face.bbox[1] + face.bbox[3]) / 2
-        return int(cx * 10) * 100 + int(cy * 10)
+        return int(cx * 5) * 10 + int(cy * 5)
+
+    def _is_duplicate_person(self, face) -> bool:
+        """Layered dedup check: identity name → embedding distance.
+
+        Returns True if this person has already been captured.
+        """
+        # Layer 1: recognized identity name (most reliable)
+        if face.identity and face.identity in self._captured_names:
+            return True
+
+        # Layer 2: embedding L2 distance
+        if face.embedding and self._is_duplicate(face.embedding):
+            return True
+
+        return False
 
     def check_and_capture(self, results, frame: np.ndarray) -> dict | None:
         """Check all faces for smile capture trigger. Returns capture info or None.
 
         Requires stable_frames consecutive frames of happiness before capturing.
+        Layered dedup: identity name → embedding distance → spatial cooldown.
         """
         if not results:
             self._smile_streak.clear()
             return None
 
+        now = time.monotonic()
         active_buckets: set[int] = set()
         captures = []
 
@@ -146,19 +195,28 @@ class SmileCaptureTracker:
                 # Reset streak so same face needs to re-stabilize
                 self._smile_streak[bucket] = 0
 
-                # Per-person dedup: same person is only captured once
-                if face.embedding and self._is_duplicate(face.embedding):
+                # Spatial cooldown: same region can't re-trigger within N seconds
+                last_capture_time = self._bucket_cooldown.get(bucket, 0)
+                if (now - last_capture_time) < self._person_cooldown:
+                    continue
+
+                # Per-person dedup: identity name or embedding distance
+                if self._is_duplicate_person(face):
                     continue
 
                 fname = self._crop_and_save(face, frame)
                 if not fname:
                     continue
 
-                # Record this person's embedding permanently
+                # Record this person permanently
+                if face.identity:
+                    self._captured_names.add(face.identity)
                 if face.embedding:
                     self._captured_embeddings.append(face.embedding)
+                self._bucket_cooldown[bucket] = now
 
-                logger.info(f"Smile captured: {fname} (total: {self.count})")
+                logger.info(f"Smile captured: {fname} (total: {self.count}, "
+                            f"identity={face.identity})")
                 captures.append(fname)
             else:
                 # Not happy → reset streak for this position
@@ -188,6 +246,9 @@ class SmileCaptureTracker:
                     pass
         self.count = 0
         self._captured_embeddings.clear()
+        self._captured_names.clear()
+        self._bucket_cooldown.clear()
+        self._smile_streak.clear()
         self._save_embeddings()
         logger.info(f"Cleared {deleted} captures")
         return deleted
