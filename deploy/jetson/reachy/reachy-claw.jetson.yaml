@@ -53,7 +53,7 @@ vision:
   tracker: remote
   service_url: tcp://127.0.0.1:8631
   emotion_threshold: 0.6
-  emotion_cooldown: 3.0
+  emotion_cooldown: 5.0
 
 conversation:
   mode: monologue
