@@ -608,6 +608,11 @@ body {
     font-size: 11px; color: var(--green);
 }
 
+/* Memory */
+.memory-section { margin-top: 20px; }
+.memory-section h3 { font-size: 13px; color: var(--text); margin-bottom: 10px; }
+.memory-hint { font-size: 10px; color: var(--text-dim); margin-top: 6px; }
+
 /* Volume */
 .volume-section { margin-top: 20px; }
 .volume-section h3 { font-size: 13px; color: var(--text); margin-bottom: 10px; }

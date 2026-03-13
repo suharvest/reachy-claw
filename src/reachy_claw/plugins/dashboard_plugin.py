@@ -205,6 +205,23 @@ class DashboardPlugin(Plugin):
             self._save_overrides(["dashboard_volume"])
             await self._broadcast({"type": "volume", "volume": vol})
 
+        elif msg_type == "get_history":
+            conv = self.app.get_plugin("conversation")
+            turns = 0
+            if conv and hasattr(conv, "_client") and hasattr(conv._client, "_config"):
+                turns = conv._client._config.max_history
+            await self._broadcast({"type": "history", "turns": turns})
+
+        elif msg_type == "set_history":
+            turns = max(0, min(20, int(data.get("turns", 0))))
+            conv = self.app.get_plugin("conversation")
+            if conv and hasattr(conv, "_client") and hasattr(conv._client, "_config"):
+                conv._client._config.max_history = turns
+                conv._client._history.clear()  # reset on change
+            self.app.config.ollama_max_history = turns
+            self._save_overrides(["ollama_max_history"])
+            await self._broadcast({"type": "history", "turns": turns})
+
         elif msg_type == "restart_services":
             await self._restart_services()
 
@@ -239,10 +256,8 @@ class DashboardPlugin(Plugin):
     async def _send_capture_info(self) -> None:
         """Send capture storage info (path + count) to dashboard."""
         import os
-        data_dir = os.environ.get("DATA_DIR", "~/reachy-data")
-        # Expand ~ for display
-        if data_dir.startswith("~"):
-            data_dir = os.path.expanduser(data_dir)
+        # Use HOST_DATA_DIR for display (host-visible path), fall back to DATA_DIR
+        data_dir = os.environ.get("HOST_DATA_DIR") or os.environ.get("DATA_DIR", "~/reachy-data")
         host_path = os.path.join(data_dir, "vision", "captures")
 
         # Get count from vision-trt API
