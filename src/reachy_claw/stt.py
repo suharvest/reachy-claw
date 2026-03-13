@@ -409,40 +409,42 @@ class ParaformerStreamingSTT(STTBackend):
             self._close_ws()
             return None
 
-        # Non-blocking receive — drain all buffered results, keep the latest
-        result: PartialResult | None = None
-        while True:
-            try:
-                raw = self._ws.recv(timeout=0)
-            except (TimeoutError, Exception):
-                break
+        # Non-blocking receive — check if server sent a result
+        try:
+            raw = self._ws.recv(timeout=0)
+        except (TimeoutError, Exception):
+            return None
 
-            try:
-                msg = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                continue
+        try:
+            msg = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
 
-            text = msg.get("text", "")
-            is_final = msg.get("is_final", False)
-            is_stable = msg.get("is_stable", False)
+        text = msg.get("text", "")
+        is_final = msg.get("is_final", False)
+        is_stable = msg.get("is_stable", False)
 
-            if is_final:
-                self._final_text = text
-            else:
-                self._partial_text = text
+        if is_final:
+            self._final_text = text
+        else:
+            self._partial_text = text
 
-            result = PartialResult(text=text, is_final=is_final, is_stable=is_stable)
-
-        return result
+        return PartialResult(text=text, is_final=is_final, is_stable=is_stable)
 
     def finish_stream(self) -> str:
-        """Get final result for current utterance. Keeps connection open."""
+        """Get final result for current utterance.
+
+        Always sends EOF to the server and drains until is_final,
+        regardless of whether a mid-utterance endpoint was seen.
+        The server may close the connection after responding;
+        feed_chunk will auto-reconnect on the next call.
+        """
         import json
 
-        result = self._final_text or self._partial_text
+        # Fallback: best text we have so far
+        result = self._partial_text or self._final_text or ""
 
-        if self._ws is not None and not self._final_text:
-            # Send empty bytes to signal end of utterance
+        if self._ws is not None:
             try:
                 self._ws.send(b"")
                 # Drain all buffered messages until we get is_final
@@ -466,8 +468,6 @@ class ParaformerStreamingSTT(STTBackend):
 
         self._partial_text = ""
         self._final_text = ""
-        # NOTE: connection stays open — server may close after EOF,
-        # feed_chunk will auto-reconnect on next call
         return result
 
     def cancel_stream(self) -> None:
