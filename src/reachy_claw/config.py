@@ -358,10 +358,67 @@ def _apply_env(config: Config) -> None:
         setattr(config, field_name, value)
 
 
-def load_config(config_path: str | Path | None = None) -> Config:
-    """Load configuration: defaults → YAML file → environment variables.
+def _get_overrides_path(config_dir: Path | None) -> Path:
+    """Return path to runtime-overrides.yaml.
 
-    Priority (highest wins): environment variables > YAML file > defaults.
+    Prefers DATA_DIR env (Docker persistent volume), then config dir,
+    then ~/.reachy-claw/ as fallback.
+    """
+    data_dir = os.environ.get("DATA_DIR")
+    if data_dir:
+        p = Path(os.path.expanduser(data_dir))
+        return p / "runtime-overrides.yaml"
+    if config_dir:
+        return config_dir / "runtime-overrides.yaml"
+    return Path.home() / ".reachy-claw" / "runtime-overrides.yaml"
+
+
+# Reverse lookup: Config field name → (section, key)
+_FIELD_TO_YAML: dict[str, tuple[str, str]] = {v: k for k, v in _YAML_FIELD_MAP.items()}
+
+
+def save_runtime_overrides(config: Config, fields: list[str]) -> None:
+    """Save specific config fields to runtime-overrides.yaml.
+
+    Merges into existing overrides file so different handlers
+    don't clobber each other.
+    """
+    overrides_path = _get_overrides_path(getattr(config, "_config_dir", None))
+    overrides_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load existing overrides
+    existing: dict[str, Any] = {}
+    if overrides_path.is_file():
+        try:
+            existing = _load_yaml_file(overrides_path)
+        except Exception:
+            pass
+
+    # Merge requested fields
+    for field_name in fields:
+        value = getattr(config, field_name, None)
+        if value is None:
+            continue
+        # Convert Path to str for YAML
+        if isinstance(value, Path):
+            value = str(value)
+        yaml_key = _FIELD_TO_YAML.get(field_name)
+        if yaml_key:
+            section, key = yaml_key
+            existing.setdefault(section, {})[key] = value
+        else:
+            # Store as flat key in _extra section
+            existing.setdefault("_extra", {})[field_name] = value
+
+    with open(overrides_path, "w") as f:
+        yaml.dump(existing, f, default_flow_style=False, allow_unicode=True)
+    logger.info("Saved runtime overrides to %s (fields: %s)", overrides_path, fields)
+
+
+def load_config(config_path: str | Path | None = None) -> Config:
+    """Load configuration: defaults → YAML file → overrides → environment variables.
+
+    Priority (highest wins): environment variables > overrides > YAML file > defaults.
 
     Args:
         config_path: Explicit path to a YAML config file. If None,
@@ -371,12 +428,29 @@ def load_config(config_path: str | Path | None = None) -> Config:
 
     # Layer 1: YAML file
     found = _find_config_file(config_path)
+    config_dir: Path | None = None
     if found:
         logger.info(f"Loading config from {found}")
         data = _load_yaml_file(found)
         _apply_yaml(config, data)
+        config_dir = found.parent
 
-    # Layer 2: Environment variables (override YAML)
+    # Layer 2: Runtime overrides (saved by dashboard)
+    overrides_path = _get_overrides_path(config_dir)
+    if overrides_path.is_file():
+        logger.info(f"Loading runtime overrides from {overrides_path}")
+        overrides = _load_yaml_file(overrides_path)
+        _apply_yaml(config, overrides)
+        # Also apply _extra flat keys (dynamic attributes like dashboard_volume)
+        extra = overrides.get("_extra")
+        if isinstance(extra, dict):
+            for field_name, value in extra.items():
+                setattr(config, field_name, value)
+
+    # Store config dir for later save_runtime_overrides calls
+    config._config_dir = config_dir  # type: ignore[attr-defined]
+
+    # Layer 3: Environment variables (override everything)
     _apply_env(config)
 
     return config

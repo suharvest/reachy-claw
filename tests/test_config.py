@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from reachy_claw.config import Config, load_config
+from reachy_claw.config import Config, load_config, save_runtime_overrides
 
 
 def test_config_loads_tokens_from_environment(monkeypatch):
@@ -173,3 +173,75 @@ tts:
     assert config.tts_backend == "kokoro"
     assert config.kokoro_speaker_id == 7
     assert config.kokoro_speed == 1.5
+
+
+# ── Runtime overrides persistence ────────────────────────────────────
+
+
+def test_save_and_load_runtime_overrides(tmp_path):
+    """save_runtime_overrides persists fields that load_config restores."""
+    cfg_file = tmp_path / "reachy-claw.yaml"
+    cfg_file.write_text("conversation:\n  mode: conversation\n")
+
+    # Load, change, save
+    config = load_config(cfg_file)
+    assert config.conversation_mode == "conversation"
+
+    config.conversation_mode = "monologue"
+    config.ollama_system_prompt = "You are a test robot."
+    save_runtime_overrides(config, ["conversation_mode", "ollama_system_prompt"])
+
+    # Verify overrides file was created
+    overrides_path = tmp_path / "runtime-overrides.yaml"
+    assert overrides_path.is_file()
+
+    # Reload — overrides should apply
+    config2 = load_config(cfg_file)
+    assert config2.conversation_mode == "monologue"
+    assert config2.ollama_system_prompt == "You are a test robot."
+
+
+def test_runtime_overrides_merge_not_clobber(tmp_path):
+    """Multiple save calls merge fields, not overwrite the whole file."""
+    cfg_file = tmp_path / "reachy-claw.yaml"
+    cfg_file.write_text("conversation:\n  mode: conversation\n")
+
+    config = load_config(cfg_file)
+    config.conversation_mode = "monologue"
+    save_runtime_overrides(config, ["conversation_mode"])
+
+    # Save a different field
+    config.ollama_system_prompt = "custom prompt"
+    save_runtime_overrides(config, ["ollama_system_prompt"])
+
+    # Both should survive
+    config2 = load_config(cfg_file)
+    assert config2.conversation_mode == "monologue"
+    assert config2.ollama_system_prompt == "custom prompt"
+
+
+def test_runtime_overrides_extra_fields(tmp_path):
+    """Fields not in _YAML_FIELD_MAP are stored in _extra section."""
+    cfg_file = tmp_path / "reachy-claw.yaml"
+    cfg_file.write_text("")
+
+    config = load_config(cfg_file)
+    config.dashboard_volume = 60  # type: ignore[attr-defined]
+    save_runtime_overrides(config, ["dashboard_volume"])
+
+    config2 = load_config(cfg_file)
+    assert getattr(config2, "dashboard_volume", None) == 60
+
+
+def test_env_overrides_runtime_overrides(tmp_path, monkeypatch):
+    """Environment variables still take priority over runtime overrides."""
+    cfg_file = tmp_path / "reachy-claw.yaml"
+    cfg_file.write_text("")
+
+    config = load_config(cfg_file)
+    config.stt_backend = "whisper"
+    save_runtime_overrides(config, ["stt_backend"])
+
+    monkeypatch.setenv("STT_BACKEND", "openai")
+    config2 = load_config(cfg_file)
+    assert config2.stt_backend == "openai"  # env wins
