@@ -13,11 +13,67 @@ CPU fallback (no NVIDIA plugins):
 """
 
 import logging
+import os
 import threading
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+def find_camera_device(name_pattern: str = "Reachy Mini") -> str | None:
+    """Auto-detect video device by scanning /sys/class/video4linux/*/name.
+
+    Returns the first /dev/videoN whose name contains `name_pattern` and
+    actually supports video capture (VIDIOC_QUERYCAP check).
+    """
+    v4l_dir = "/sys/class/video4linux"
+    if not os.path.isdir(v4l_dir):
+        return None
+
+    candidates = []
+    for entry in sorted(os.listdir(v4l_dir)):
+        name_file = os.path.join(v4l_dir, entry, "name")
+        try:
+            with open(name_file) as f:
+                dev_name = f.read().strip()
+        except OSError:
+            continue
+        if name_pattern.lower() in dev_name.lower():
+            candidates.append(f"/dev/{entry}")
+
+    # Try each candidate — pick the one that supports MJPEG capture
+    for dev in candidates:
+        try:
+            import fcntl
+            import struct
+
+            fd = os.open(dev, os.O_RDWR)
+            V4L2_PIX_FMT_MJPEG = 0x47504A4D
+            VIDIOC_S_FMT = 0xC0D05605
+            fmt = bytearray(208)
+            struct.pack_into("I", fmt, 0, 1)  # V4L2_BUF_TYPE_VIDEO_CAPTURE
+            struct.pack_into("I", fmt, 4, 640)
+            struct.pack_into("I", fmt, 8, 480)
+            struct.pack_into("I", fmt, 12, V4L2_PIX_FMT_MJPEG)
+            fcntl.ioctl(fd, VIDIOC_S_FMT, fmt)
+            actual_fmt = struct.unpack_from("I", fmt, 12)[0]
+            os.close(fd)
+            if actual_fmt == V4L2_PIX_FMT_MJPEG:
+                logger.info(f"Auto-detected camera: {dev} ({dev_name})")
+                return dev
+        except Exception:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            continue
+
+    # Fallback: return first candidate
+    if candidates:
+        logger.info(f"Using first matching camera: {candidates[0]}")
+        return candidates[0]
+    return None
 
 
 class GstCameraCapture:

@@ -35,14 +35,18 @@ class SmileCaptureTracker:
     """Track smile events and save face crops with per-person cooldown."""
 
     def __init__(self, capture_dir: str,
-                 confidence_threshold: float = 0.6, distance_threshold: float = 0.8):
+                 confidence_threshold: float = 0.6, distance_threshold: float = 0.8,
+                 stable_frames: int = 5):
         self._dir = os.path.join(capture_dir, "captures")
         os.makedirs(self._dir, exist_ok=True)
         self._conf_threshold = confidence_threshold
         self._dist_threshold = distance_threshold
+        self._stable_frames = stable_frames  # consecutive happy frames before capture
         self._embeddings_path = os.path.join(self._dir, "embeddings.json")
         # Store all captured person embeddings — each person captured only once
         self._captured_embeddings: list[list[float]] = self._load_embeddings()
+        # Smile streak: spatial bucket → consecutive happy frame count
+        self._smile_streak: dict[int, int] = {}
         # Count existing files for persistence across restarts
         self.count = len([f for f in os.listdir(self._dir) if f.endswith(".jpg")])
         if self.count:
@@ -105,31 +109,65 @@ class SmileCaptureTracker:
         cv2.imwrite(fpath, crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
         return fname
 
+    @staticmethod
+    def _face_bucket(face) -> int:
+        """Spatial bucket for tracking a face across consecutive frames."""
+        cx = (face.bbox[0] + face.bbox[2]) / 2
+        cy = (face.bbox[1] + face.bbox[3]) / 2
+        return int(cx * 10) * 100 + int(cy * 10)
+
     def check_and_capture(self, results, frame: np.ndarray) -> dict | None:
-        """Check all faces for smile capture trigger. Returns capture info or None."""
+        """Check all faces for smile capture trigger. Returns capture info or None.
+
+        Requires stable_frames consecutive frames of happiness before capturing.
+        """
         if not results:
+            self._smile_streak.clear()
             return None
 
+        active_buckets: set[int] = set()
         captures = []
+
         for face in results:
-            # Check happiness with sufficient confidence
-            if face.emotion != "Happiness" or (face.emotion_confidence or 0) < self._conf_threshold:
-                continue
+            bucket = self._face_bucket(face)
+            active_buckets.add(bucket)
 
-            # Per-person dedup: same person is only captured once
-            if face.embedding and self._is_duplicate(face.embedding):
-                continue
+            is_happy = (
+                face.emotion == "Happiness"
+                and (face.emotion_confidence or 0) >= self._conf_threshold
+            )
 
-            fname = self._crop_and_save(face, frame)
-            if not fname:
-                continue
+            if is_happy:
+                self._smile_streak[bucket] = self._smile_streak.get(bucket, 0) + 1
 
-            # Record this person's embedding permanently
-            if face.embedding:
-                self._captured_embeddings.append(face.embedding)
+                if self._smile_streak[bucket] < self._stable_frames:
+                    continue  # not stable yet
 
-            logger.info(f"Smile captured: {fname} (total: {self.count})")
-            captures.append(fname)
+                # Reset streak so same face needs to re-stabilize
+                self._smile_streak[bucket] = 0
+
+                # Per-person dedup: same person is only captured once
+                if face.embedding and self._is_duplicate(face.embedding):
+                    continue
+
+                fname = self._crop_and_save(face, frame)
+                if not fname:
+                    continue
+
+                # Record this person's embedding permanently
+                if face.embedding:
+                    self._captured_embeddings.append(face.embedding)
+
+                logger.info(f"Smile captured: {fname} (total: {self.count})")
+                captures.append(fname)
+            else:
+                # Not happy → reset streak for this position
+                self._smile_streak[bucket] = 0
+
+        # Clean up stale buckets (face left the frame)
+        for b in list(self._smile_streak):
+            if b not in active_buckets:
+                del self._smile_streak[b]
 
         if not captures:
             return None
@@ -225,8 +263,19 @@ class VisionService:
             logger.warning("Running in passthrough mode (no inference)")
 
         # Camera capture via GStreamer (after TRT engines to avoid GPU memory contention)
+        self._start_camera()
+
+    def _start_camera(self) -> bool:
+        """Detect camera device and start capture. Returns True on success."""
+        from .capture import GstCameraCapture, find_camera_device
+        from .config import config
+
+        # Auto-detect device, fall back to config
+        device = find_camera_device() or config.CAMERA_DEVICE
+        logger.info(f"Starting camera on {device}")
+
         self.capture = GstCameraCapture(
-            device=config.CAMERA_DEVICE,
+            device=device,
             cam_width=config.CAMERA_WIDTH,
             cam_height=config.CAMERA_HEIGHT,
             cam_fps=config.CAMERA_FPS,
@@ -234,8 +283,12 @@ class VisionService:
             inf_height=config.INPUT_HEIGHT,
             stream_width=config.STREAM_WIDTH,
         )
-        if not self.capture.start():
-            logger.error("Camera capture failed to start")
+        if self.capture.start():
+            return True
+
+        logger.error("Camera capture failed to start")
+        self.capture = None
+        return False
 
     def process_and_publish(self, frame: np.ndarray, frame_id: int):
         """Run inference and publish results to all outputs."""
@@ -344,18 +397,35 @@ class VisionService:
         target_interval = 1.0 / self.config.TARGET_FPS
         logger.info(f"Inference loop started (target {self.config.TARGET_FPS} FPS)")
 
+        camera_retry_interval = 30  # seconds between camera retry attempts
+        last_camera_retry = 0.0
+        no_frame_count = 0
+
         while self._running:
             t0 = time.monotonic()
 
-            if not self.capture:
-                time.sleep(0.1)
+            # Camera not available — retry periodically
+            if not self.capture or not self.capture._running:
+                if t0 - last_camera_retry >= camera_retry_interval:
+                    last_camera_retry = t0
+                    logger.info("Camera not available, attempting to start...")
+                    self._start_camera()
+                time.sleep(1.0)
                 continue
 
             frame = self.capture.get_inference_frame()
             if frame is None:
+                no_frame_count += 1
+                # If no frames for 30s, camera may have disconnected
+                if no_frame_count > self.config.TARGET_FPS * 30:
+                    logger.warning("No frames for 30s, restarting camera...")
+                    self.capture.close()
+                    self.capture = None
+                    no_frame_count = 0
                 time.sleep(0.01)
                 continue
 
+            no_frame_count = 0
             self._frame_id += 1
             self.process_and_publish(frame, self._frame_id)
 

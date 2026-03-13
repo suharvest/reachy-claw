@@ -1,68 +1,245 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vision TRT - Reachy Mini</title>
-    <link rel="stylesheet" href="/static/style.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EMOTION MIRROR</title>
+<link rel="stylesheet" href="/static/style.css?v=11">
 </head>
 <body>
-    <div class="header">
-        <h1>Vision TRT</h1>
-        <div class="stats">
-            <span>FPS: <span class="value" id="fps-value">--</span></span>
-            <span>Latency: <span class="value" id="latency-value">--</span></span>
-            <span>Faces: <span class="value" id="faces-value">0</span></span>
-        </div>
-    </div>
 
-    <div class="main">
-        <div class="video-panel">
-            <img id="video-stream" alt="Video stream">
-            <canvas id="overlay-canvas" class="interactive"></canvas>
-            <div class="no-connection" id="connection-status">
-                <div class="icon">&#x1F4F7;</div>
-                <p>Connecting to vision service...</p>
-            </div>
-        </div>
-
-        <div class="sidebar">
-            <div class="panel">
-                <h2>Detection</h2>
-                <div class="detection-info" id="detection-info">
-                    <span class="label">Waiting for data...</span>
-                </div>
-            </div>
-
-            <div class="panel">
-                <h2>Face Database</h2>
-                <ul class="face-list" id="face-list">
-                    <li style="color: #a0a0c0">Loading...</li>
-                </ul>
-                <div style="margin-top: 10px;">
-                    <button class="btn btn-primary" onclick="showEnrollDialog()" style="width: 100%">
-                        + Enroll Face
-                    </button>
+<div class="dashboard">
+    <!-- 3-column × 2-row grid: shared row boundary keeps top/bottom aligned -->
+    <div class="grid-container">
+        <!-- Row 1: top sections -->
+        <div class="cell-left-top">
+            <div class="section-header"><span class="header-emoji">&#x1F440;</span> What I see</div>
+            <div class="video-container">
+                <img id="video-stream" alt="">
+                <canvas id="overlay-canvas"></canvas>
+                <div class="no-video" id="no-video">
+                    <div class="nv-icon">&#x1f4f7;</div>
+                    <div>Connecting to vision...</div>
                 </div>
             </div>
         </div>
-    </div>
 
-    <!-- Enroll Dialog -->
-    <div class="dialog-overlay" id="enroll-dialog">
-        <div class="dialog">
-            <h3>Enroll Face</h3>
-            <p style="font-size: 13px; color: #a0a0c0; margin-bottom: 12px;">
-                Look at the camera. The largest detected face will be registered.
-            </p>
-            <input type="text" id="enroll-name" placeholder="Enter name...">
-            <div class="actions">
-                <button class="btn" style="color: #a0a0c0" onclick="hideEnrollDialog()">Cancel</button>
-                <button class="btn btn-primary" onclick="enrollFace()">Enroll</button>
+        <div class="cell-center-top">
+            <div class="face-viewport">
+                <canvas id="face-crop-canvas" width="320" height="400"></canvas>
+                <div class="bracket tl"></div>
+                <div class="bracket tr"></div>
+                <div class="bracket bl"></div>
+                <div class="bracket br"></div>
+            </div>
+            <div class="emotion-pill" id="emotion-pill">Neutral</div>
+        </div>
+
+        <div class="cell-right">
+            <div class="section-header mind-header">
+                <img src="/static/brain-bulb.svg" class="mind-logo" alt="logo">
+                <div class="mind-title">
+                    <span>Reachy's</span>
+                    <span>Mind</span>
+                </div>
+            </div>
+            <div class="thought-list" id="thought-list"></div>
+        </div>
+
+        <!-- Row 2: bottom sections -->
+        <div class="cell-left-bottom">
+            <div class="hear-row">
+                <span class="header-emoji">&#x1F442;</span>
+                <span class="hear-label">What I hear</span>
+                <img src="/static/waveform.svg" class="waveform-img" id="waveform-img" alt="waveform">
+            </div>
+            <div class="asr-bubble" id="asr-bubble">
+                <span class="asr-text" id="asr-text">Listening...</span>
+            </div>
+        </div>
+
+        <div class="cell-center-bottom">
+            <div class="emotion-label" id="emotion-label">Smiling face</div>
+            <div class="capture-counter" id="capture-counter">
+                <span class="heart-icon">&#x2764;&#xFE0F;</span>
+                <span class="capture-count" id="capture-count">0</span>
+            </div>
+            <div class="capture-float-area" id="capture-float-area"></div>
+        </div>
+    </div>
+</div>
+
+<!-- Hidden: status dots for JS to update -->
+<span id="dot-jetson" class="dot-hidden"></span>
+<span id="dot-robot" class="dot-hidden"></span>
+<span id="dot-vision" class="dot-hidden"></span>
+<span id="dot-live" class="dot-hidden"></span>
+<span id="robot-state" class="dot-hidden" data-state="idle"></span>
+
+<!-- Settings button (floating) -->
+<button class="settings-btn" id="settings-open">
+    <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
+</button>
+
+<!-- Settings Overlay -->
+<div class="settings-overlay" id="settings-overlay">
+    <div class="settings-panel">
+        <div class="settings-header">
+            <h2>Settings</h2>
+            <button class="settings-close" id="settings-close">&times;</button>
+        </div>
+        <div class="settings-tabs">
+            <button class="settings-tab active" data-tab="mode">Configuration</button>
+            <button class="settings-tab" data-tab="faces">Face Management</button>
+            <button class="settings-tab" data-tab="prompt">Prompt</button>
+        </div>
+        <div class="settings-content">
+            <div class="tab-pane active" id="tab-mode">
+                <div class="mode-group">
+                    <label class="mode-option selected" data-mode="conversation">
+                        <input type="radio" name="mode" value="conversation" checked>
+                        <div class="mode-radio"></div>
+                        <div class="mode-info">
+                            <h3>Conversation</h3>
+                            <p>Normal dialogue mode. Robot responds to user speech with emotion tags driving expressions.</p>
+                        </div>
+                    </label>
+                    <label class="mode-option" data-mode="monologue">
+                        <input type="radio" name="mode" value="monologue">
+                        <div class="mode-radio"></div>
+                        <div class="mode-info">
+                            <h3>Monologue</h3>
+                            <p>Inner monologue mode. Robot observes and narrates thoughts.</p>
+                        </div>
+                    </label>
+                </div>
+                <div class="mode-status" id="mode-status">Current: conversation</div>
+                <div class="volume-section">
+                    <h3>Volume</h3>
+                    <div class="volume-row">
+                        <button class="volume-mute-btn" id="volume-mute" title="Mute">
+                            <svg viewBox="0 0 24 24" fill="currentColor" id="volume-icon-on"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+                            <svg viewBox="0 0 24 24" fill="currentColor" id="volume-icon-off" style="display:none"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>
+                        </button>
+                        <input type="range" class="volume-slider" id="volume-slider" min="0" max="100" value="80">
+                        <span class="volume-value" id="volume-value">80%</span>
+                    </div>
+                </div>
+                <div class="motor-section">
+                    <h3>Motor Control</h3>
+                    <div class="motor-sleep-row">
+                        <span class="motor-sleep-label">Motor Enabled</span>
+                        <button class="motor-sleep-toggle active" id="motor-toggle" title="Toggle motor on/off">
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </button>
+                    </div>
+                    <div class="motor-presets" id="motor-presets">
+                        <label class="mode-option" data-motor="sensitive">
+                            <input type="radio" name="motor-preset" value="sensitive">
+                            <div class="mode-radio"></div>
+                            <div class="mode-info">
+                                <h3>Sensitive</h3>
+                                <p>Fast, responsive tracking. Best for demos and close interaction.</p>
+                            </div>
+                        </label>
+                        <label class="mode-option selected" data-motor="moderate">
+                            <input type="radio" name="motor-preset" value="moderate" checked>
+                            <div class="mode-radio"></div>
+                            <div class="mode-info">
+                                <h3>Moderate</h3>
+                                <p>Balanced speed and smoothness. Default for most scenarios.</p>
+                            </div>
+                        </label>
+                        <label class="mode-option" data-motor="smart">
+                            <input type="radio" name="motor-preset" value="smart">
+                            <div class="mode-radio"></div>
+                            <div class="mode-info">
+                                <h3>Smart</h3>
+                                <p>Adaptive tracking that learns movement patterns. Smoother, more natural.</p>
+                            </div>
+                        </label>
+                    </div>
+                    <div class="motor-status" id="motor-status">Motor: moderate</div>
+                </div>
+                <div class="restart-section">
+                    <h3>Services</h3>
+                    <button class="restart-btn" id="restart-btn">Restart All Services</button>
+                    <div class="restart-status" id="restart-status"></div>
+                </div>
+            </div>
+            <div class="tab-pane" id="tab-faces">
+                <div class="face-section">
+                    <h3>Registered Faces</h3>
+                    <div class="face-list" id="face-list"><div class="face-empty">Loading...</div></div>
+                </div>
+                <div class="face-section">
+                    <h3>Live Camera Enroll</h3>
+                    <div class="enroll-row">
+                        <input class="enroll-input" id="enroll-name" placeholder="Name" maxlength="32">
+                        <button class="enroll-btn" id="enroll-live-btn">Enroll</button>
+                    </div>
+                </div>
+                <div class="face-section">
+                    <h3>Upload Image</h3>
+                    <div class="enroll-row">
+                        <input class="enroll-input" id="upload-name" placeholder="Name" maxlength="32">
+                    </div>
+                    <div class="upload-area" id="upload-area">
+                        <p>Drop images here or click to select</p>
+                        <div class="upload-hint">JPG / PNG</div>
+                        <input type="file" id="upload-input" multiple accept="image/*" style="display:none">
+                    </div>
+                    <div class="upload-preview" id="upload-preview"></div>
+                    <button class="enroll-btn" id="upload-btn" disabled>Upload &amp; Enroll</button>
+                </div>
+                <div class="face-section">
+                    <h3>Backup</h3>
+                    <div class="export-import-row">
+                        <button class="action-btn" id="export-btn">Export ZIP</button>
+                        <button class="action-btn" id="import-btn">Import ZIP</button>
+                        <input type="file" id="import-input" accept=".zip" style="display:none">
+                    </div>
+                </div>
+                <div class="face-section capture-data-section">
+                    <h3>Smile Captures</h3>
+                    <div class="capture-info-row">
+                        <span class="capture-info-label">Storage</span>
+                        <span class="capture-info-value" id="capture-storage-path">--</span>
+                    </div>
+                    <div class="capture-info-row">
+                        <span class="capture-info-label">Count</span>
+                        <span class="capture-info-value" id="capture-data-count">--</span>
+                    </div>
+                    <div class="capture-actions">
+                        <button class="action-btn" id="capture-export-btn">Download ZIP</button>
+                        <button class="action-btn danger-btn" id="capture-clear-btn">Clear All</button>
+                    </div>
+                </div>
+            </div>
+            <div class="tab-pane" id="tab-prompt">
+                <div class="face-section">
+                    <h3>Conversation Prompt</h3>
+                    <textarea id="prompt-conversation" rows="8" class="prompt-textarea"></textarea>
+                    <div class="prompt-actions">
+                        <button class="action-btn" id="prompt-conv-reset">Reset Default</button>
+                        <button class="enroll-btn" id="prompt-conv-save">Save</button>
+                    </div>
+                </div>
+                <div class="face-section">
+                    <h3>Monologue Prompt</h3>
+                    <textarea id="prompt-monologue" rows="8" class="prompt-textarea"></textarea>
+                    <div class="prompt-actions">
+                        <button class="action-btn" id="prompt-mono-reset">Reset Default</button>
+                        <button class="enroll-btn" id="prompt-mono-save">Save</button>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
+</div>
 
-    <script src="/static/app.js"></script>
+<div class="toast" id="toast"></div>
+
+<script src="/static/app.js"></script>
 </body>
 </html>
