@@ -26,7 +26,7 @@ tts:
   speech_service_url: http://localhost:8621
   matcha:
     speaker_id: 0
-    speed: 1.2
+    speed: 0.8
 
 vad:
   backend: silero

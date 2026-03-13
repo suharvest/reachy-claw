@@ -218,7 +218,7 @@ class VisionPipeline:
                 detections.append(([x1, y1, x2, y2], landmarks, score))
 
         if len(detections) > 1:
-            detections = self._nms(detections, iou_threshold=0.4)
+            detections = self._nms(detections, iou_threshold=0.3)
 
         return detections
 
