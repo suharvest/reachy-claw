@@ -4,6 +4,10 @@
 # Usage:
 #   docker compose up -d                           # Ollama mode
 #   docker compose --profile openclaw up -d        # OpenClaw mode
+#
+# Data directory:
+#   All persistent data (captures, face DB, etc.) stored under DATA_DIR.
+#   Default: ~/reachy-data   Override: DATA_DIR=/path/to/dir docker compose up -d
 
 services:
   reachy-daemon:
@@ -47,7 +51,8 @@ services:
       - /dev/video0:/dev/video0
     volumes:
       - vision-trt-engines:/app/engines
-      - vision-trt-data:/app/data
+      # Persistent data (captures, face DB) — bind mount to host for easy access
+      - ${DATA_DIR:-~/reachy-data}/vision:/app/data
     environment:
       - CAMERA_DEVICE=/dev/video0
       - ZMQ_PUB_PORT=8631
@@ -80,4 +85,3 @@ services:
 volumes:
   openclaw-config:
   vision-trt-engines:
-  vision-trt-data:

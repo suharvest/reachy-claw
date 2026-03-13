@@ -8,6 +8,10 @@
 # Both modes share: reachy-daemon, reachy-claw, speech (external).
 # Ollama profile adds: ollama container.
 # OpenClaw profile adds: openclaw-gateway.
+#
+# Data directory:
+#   All persistent data (captures, face DB, etc.) is stored under DATA_DIR.
+#   Default: ~/reachy-data   Override: DATA_DIR=/path/to/dir docker compose up -d
 
 services:
   # ── Always-on services ────────────────────────────────────────────
@@ -49,6 +53,8 @@ services:
       - /dev/shm:/dev/shm
       - /run/udev:/run/udev:ro
       - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - DATA_DIR=${DATA_DIR:-~/reachy-data}
     depends_on:
       reachy-daemon:
         condition: service_healthy
@@ -81,7 +87,8 @@ services:
       - ../vision-trt/models:/app/models:ro
       # Persistent TRT engine cache (avoid rebuild on restart)
       - vision-trt-engines:/app/engines
-      - vision-trt-data:/app/data
+      # Persistent data (captures, face DB) — bind mount to host for easy access
+      - ${DATA_DIR:-~/reachy-data}/vision:/app/data
       # Host TensorRT (JetPack 6.x)
       - /usr/lib/python3.10/dist-packages/tensorrt:/usr/lib/python3.10/dist-packages/tensorrt:ro
       - /lib/aarch64-linux-gnu:/host-libs:ro
@@ -145,4 +152,3 @@ services:
 volumes:
   openclaw-config:
   vision-trt-engines:
-  vision-trt-data:
