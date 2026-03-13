@@ -53,8 +53,11 @@ class DashboardPlugin(Plugin):
         await self._site.start()
         logger.info("Dashboard listening on http://0.0.0.0:%d", port)
 
-        # Set default volume on startup (prevent 0% after container restart)
-        await self._set_volume(80)
+        # Restore persisted volume or default to 80%
+        startup_vol = getattr(self.app.config, "dashboard_volume", 80)
+        if not isinstance(startup_vol, int) or startup_vol <= 0:
+            startup_vol = 80
+        await self._set_volume(startup_vol)
 
         # Restore capture count from vision-trt
         await self._restore_capture_count()
@@ -98,6 +101,16 @@ class DashboardPlugin(Plugin):
         if self._runner:
             await self._runner.cleanup()
 
+    # ── Config persistence ──────────────────────────────────────────────
+
+    def _save_overrides(self, fields: list[str]) -> None:
+        """Persist config fields to runtime-overrides.yaml."""
+        try:
+            from ..config import save_runtime_overrides
+            save_runtime_overrides(self.app.config, fields)
+        except Exception as e:
+            logger.warning("Failed to save config overrides: %s", e)
+
     # ── HTTP handlers ─────────────────────────────────────────────────
 
     async def _handle_index(self, request):
@@ -140,6 +153,7 @@ class DashboardPlugin(Plugin):
             conv = self.app.get_plugin("conversation")
             if conv and hasattr(conv, "switch_mode"):
                 conv.switch_mode(mode)
+            self._save_overrides(["conversation_mode"])
             await self._broadcast({"type": "mode_changed", "mode": mode})
 
         elif msg_type == "get_prompts":
@@ -173,6 +187,8 @@ class DashboardPlugin(Plugin):
                         MONOLOGUE_SYSTEM_PROMPT if is_monologue else DEFAULT_SYSTEM_PROMPT
                     )
 
+            field = "ollama_system_prompt" if mode == "conversation" else "ollama_monologue_prompt"
+            self._save_overrides([field])
             await self._broadcast({"type": "prompt_saved", "mode": mode})
 
         elif msg_type == "clear_captures":
@@ -185,6 +201,8 @@ class DashboardPlugin(Plugin):
         elif msg_type == "set_volume":
             vol = max(0, min(100, int(data.get("volume", 80))))
             await self._set_volume(vol)
+            self.app.config.dashboard_volume = vol  # type: ignore[attr-defined]
+            self._save_overrides(["dashboard_volume"])
             await self._broadcast({"type": "volume", "volume": vol})
 
         elif msg_type == "restart_services":
@@ -198,6 +216,10 @@ class DashboardPlugin(Plugin):
                 motion.set_motor_enabled(enabled)
                 if enabled:
                     motion.apply_motor_preset(preset)
+                # Persist motor state
+                self.app.config.motor_enabled = enabled  # type: ignore[attr-defined]
+                self.app.config.motor_preset = preset  # type: ignore[attr-defined]
+                self._save_overrides(["motor_enabled", "motor_preset"])
                 await self._broadcast({
                     "type": "motor_state",
                     **motion.get_motor_state(),
@@ -264,30 +286,24 @@ class DashboardPlugin(Plugin):
     def _ui_to_alsa(ui_percent: int) -> int:
         """Map UI 0-100 to useful ALSA range.
 
-        ALSA 0-40% is inaudible on Reachy Mini Audio, so we map:
+        ALSA 0-60% is inaudible on Reachy Mini Audio, so we map:
           UI  0   → ALSA 0   (mute)
-          UI  1   → ALSA 40  (minimum audible)
+          UI  1   → ALSA 60  (minimum audible)
           UI 100  → ALSA 100 (maximum)
-        Uses a power curve (x^1.5) so the lower half of the slider
-        has finer control over the quiet-to-medium range.
+        Linear mapping over the audible 60-100 ALSA range.
         """
         if ui_percent <= 0:
             return 0
-        # Power curve for perceptual scaling, then map to 40-100 ALSA range
-        t = ui_percent / 100.0
-        curved = t ** 1.5  # spend more slider range in quiet region
-        return int(40 + curved * 60)
+        return int(60 + (ui_percent / 100.0) * 40)
 
     @staticmethod
     def _alsa_to_ui(alsa_percent: int) -> int:
         """Reverse map ALSA percentage back to UI 0-100."""
         if alsa_percent <= 0:
             return 0
-        if alsa_percent <= 40:
+        if alsa_percent <= 60:
             return 1
-        t = (alsa_percent - 40) / 60.0
-        # Inverse of x^1.5
-        return max(1, min(100, int((t ** (1 / 1.5)) * 100)))
+        return max(1, min(100, int((alsa_percent - 60) / 40.0 * 100)))
 
     async def _set_volume(self, ui_percent: int) -> None:
         """Set ALSA volume for Reachy Mini Audio (card 2)."""
