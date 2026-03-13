@@ -842,6 +842,8 @@ class ConversationPlugin(Plugin):
                     barge_in_count = 0
                     if self._vad:
                         self._vad.reset()
+                    # Reset STT state so stale _final_text doesn't pollute next utterance
+                    self._stt.cancel_stream()
                     self._spawn_task(
                         self._process_and_send(text),
                         name="conversation.process_and_send",
@@ -862,6 +864,8 @@ class ConversationPlugin(Plugin):
                     barge_in_count = 0
                     if self._vad:
                         self._vad.reset()
+                    # Reset STT state so stale _final_text doesn't pollute next utterance
+                    self._stt.cancel_stream()
                     self._spawn_task(
                         self._process_and_send(text),
                         name="conversation.process_and_send",
