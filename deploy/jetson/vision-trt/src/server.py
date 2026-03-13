@@ -532,7 +532,7 @@ async def lifespan(app):
 # ── FastAPI app ──────────────────────────────────────────────────────
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, File, Form, UploadFile
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="Vision TRT Service", lifespan=lifespan)
@@ -629,7 +629,7 @@ async def list_faces():
 @app.delete("/api/captures")
 async def clear_captures():
     if not service.smile_tracker:
-        return {"error": "Smile tracker not initialized"}, 503
+        return JSONResponse({"error": "Smile tracker not initialized"}, status_code=503)
     deleted = service.smile_tracker.clear()
     return {"status": "cleared", "deleted": deleted, "count": 0}
 
@@ -643,18 +643,18 @@ async def capture_count():
 @app.post("/api/faces/enroll")
 async def enroll_face(name: str = Query(...)):
     if not service.face_db or not service.pipeline:
-        return {"error": "Service not ready"}, 503
+        return JSONResponse({"error": "\1"}, status_code=\2)
 
     if not service.capture:
-        return {"error": "Camera not available"}, 503
+        return JSONResponse({"error": "\1"}, status_code=\2)
 
     frame = service.capture.get_inference_frame()
     if frame is None:
-        return {"error": "No frame available"}, 400
+        return JSONResponse({"error": "\1"}, status_code=\2)
 
     results = service.pipeline.process_frame(frame)
     if not results:
-        return {"error": "No face detected"}, 400
+        return JSONResponse({"error": "\1"}, status_code=\2)
 
     # Use the largest face
     primary = max(
@@ -662,7 +662,7 @@ async def enroll_face(name: str = Query(...)):
         key=lambda r: (r.bbox[2] - r.bbox[0]) * (r.bbox[3] - r.bbox[1]),
     )
     if not primary.embedding:
-        return {"error": "Face embedding extraction failed"}, 500
+        return JSONResponse({"error": "\1"}, status_code=\2)
 
     embedding = np.array(primary.embedding, dtype=np.float32)
     service.face_db.enroll(name, embedding)
@@ -672,37 +672,37 @@ async def enroll_face(name: str = Query(...)):
 @app.delete("/api/faces/{name}")
 async def delete_face(name: str):
     if not service.face_db:
-        return {"error": "Service not ready"}, 503
+        return JSONResponse({"error": "\1"}, status_code=\2)
 
     if service.face_db.delete(name):
         return {"status": "deleted", "name": name}
-    return {"error": "Face not found"}, 404
+    return JSONResponse({"error": "\1"}, status_code=\2)
 
 
 @app.post("/api/faces/enroll-image")
 async def enroll_face_from_image(name: str = Form(...), image: UploadFile = File(...)):
     """Register a face from an uploaded image file."""
     if not service.face_db or not service.pipeline:
-        return {"error": "Service not ready"}, 503
+        return JSONResponse({"error": "\1"}, status_code=\2)
 
     contents = await image.read()
     if not contents:
-        return {"error": "Empty file"}, 400
+        return JSONResponse({"error": "\1"}, status_code=\2)
     arr = np.frombuffer(contents, dtype=np.uint8)
     frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if frame is None:
-        return {"error": "Invalid image"}, 400
+        return JSONResponse({"error": "\1"}, status_code=\2)
 
     results = service.pipeline.process_frame(frame)
     if not results:
-        return {"error": "No face detected in image"}, 400
+        return JSONResponse({"error": "\1"}, status_code=\2)
 
     primary = max(
         results,
         key=lambda r: (r.bbox[2] - r.bbox[0]) * (r.bbox[3] - r.bbox[1]),
     )
     if not primary.embedding:
-        return {"error": "Face embedding extraction failed"}, 500
+        return JSONResponse({"error": "\1"}, status_code=\2)
 
     embedding = np.array(primary.embedding, dtype=np.float32)
     service.face_db.enroll(name, embedding)
@@ -716,7 +716,7 @@ async def export_faces():
     import zipfile
 
     if not service.face_db:
-        return {"error": "Service not ready"}, 503
+        return JSONResponse({"error": "\1"}, status_code=\2)
 
     buf = io.BytesIO()
     data_dir = service.face_db._dir
@@ -740,12 +740,12 @@ async def import_faces(file: UploadFile = File(...)):
     import zipfile
 
     if not service.face_db:
-        return {"error": "Service not ready"}, 503
+        return JSONResponse({"error": "\1"}, status_code=\2)
 
     contents = await file.read()
     buf = io.BytesIO(contents)
     if not zipfile.is_zipfile(buf):
-        return {"error": "Invalid zip file"}, 400
+        return JSONResponse({"error": "\1"}, status_code=\2)
 
     data_dir = service.face_db._dir
     buf.seek(0)
