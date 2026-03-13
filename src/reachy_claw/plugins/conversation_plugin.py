@@ -409,12 +409,25 @@ class ConversationPlugin(Plugin):
         vision = self.app.get_plugin("vision_client")
         if vision and getattr(vision, "_last_faces_summary", None):
             faces = vision._last_faces_summary
-            descs = []
+            # Deduplicate: collect named persons, count remaining strangers
+            named: dict[str, str] = {}  # name → emotion
+            stranger_count = 0
             for f in faces:
-                name = f.get("identity") or "stranger"
+                name = f.get("identity")
                 emo = f.get("emotion", "neutral")
-                descs.append(f"{name}({emo})")
-            parts.append(f"see: {', '.join(descs)}")
+                if name:
+                    named[name] = emo
+                else:
+                    stranger_count += 1
+            descs = [f"{n}({e})" for n, e in named.items()]
+            # Only count strangers that aren't duplicate detections of known people
+            real_strangers = max(0, stranger_count - len(named))
+            if real_strangers == 1:
+                descs.append("stranger")
+            elif real_strangers > 1:
+                descs.append(f"{real_strangers} strangers")
+            if descs:
+                parts.append(f"see: {', '.join(descs)}")
         elif vision:
             emo = getattr(vision, "_last_emotion", None)
             identity = getattr(vision, "current_identity", None)
@@ -812,7 +825,14 @@ class ConversationPlugin(Plugin):
                         if partial.is_final:
                             logger.info("ASR is_final received — skipping silence wait")
                             self._set_state(ConvState.TRANSCRIBING)
-                            text = await asyncio.to_thread(self._stt.finish_stream)
+                            try:
+                                text = await asyncio.wait_for(
+                                    asyncio.to_thread(self._stt.finish_stream),
+                                    timeout=10.0,
+                                )
+                            except asyncio.TimeoutError:
+                                logger.error("STT finish_stream() timed out")
+                                text = partial.text  # use last partial as fallback
                             speech_frames = []
                             silence_count = 0
                             barge_in_count = 0
@@ -838,7 +858,14 @@ class ConversationPlugin(Plugin):
 
                     if streaming_stt:
                         # Finish streaming — get final text
-                        text = await asyncio.to_thread(self._stt.finish_stream)
+                        try:
+                            text = await asyncio.wait_for(
+                                asyncio.to_thread(self._stt.finish_stream),
+                                timeout=10.0,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.error("STT finish_stream() timed out")
+                            text = ""
                         speech_frames = []
                         silence_count = 0
                         barge_in_count = 0
@@ -931,6 +958,7 @@ class ConversationPlugin(Plugin):
             )
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
+            self.app.events.emit("asr_final", {"text": ""})
             self._set_state(ConvState.IDLE)
             return
 
@@ -940,6 +968,7 @@ class ConversationPlugin(Plugin):
         """Process transcribed text (wake word check etc.) and send to AI."""
         if not text or not text.strip():
             logger.info("(no speech detected)")
+            self.app.events.emit("asr_final", {"text": ""})
             self._set_state(ConvState.IDLE)
             return
 
@@ -994,6 +1023,7 @@ class ConversationPlugin(Plugin):
             await self._client.send_message_streaming(text)
         except Exception as e:
             logger.error(f"Error sending to AI: {e}")
+            self.app.events.emit("asr_final", {"text": ""})
             if self.app.config.play_emotions:
                 self.app.emotions.queue_emotion("sad")
             self._set_state(ConvState.IDLE)
@@ -1369,8 +1399,9 @@ class ConversationPlugin(Plugin):
 
                 interrupted = False
                 chunk_size = 1600  # 100ms chunks at 16kHz
+                prebuf = 4  # push first N chunks without sleeping to fill pipeline buffer
                 try:
-                    for i in range(0, len(audio), chunk_size):
+                    for idx, i in enumerate(range(0, len(audio), chunk_size)):
                         if self._interrupt_event.is_set():
                             interrupted = True
                             break
@@ -1378,7 +1409,8 @@ class ConversationPlugin(Plugin):
                         reachy.media.push_audio_sample(chunk)
                         if self._wobbler:
                             self._wobbler.feed(chunk)
-                        await asyncio.sleep(chunk_size / sample_rate * 0.9)
+                        if idx >= prebuf:
+                            await asyncio.sleep(chunk_size / sample_rate * 0.9)
                 finally:
                     if self._wobbler:
                         self._wobbler.reset()
@@ -1506,9 +1538,10 @@ class ConversationPlugin(Plugin):
 
             chunk_size = 1600  # 100ms chunks
             chunk_duration = chunk_size / sample_rate
+            prebuf = 4  # push first N chunks without sleeping to fill pipeline buffer
             interrupted = False
 
-            for i in range(0, len(audio_float), chunk_size):
+            for idx, i in enumerate(range(0, len(audio_float), chunk_size)):
                 if self._interrupt_event.is_set():
                     interrupted = True
                     break
@@ -1519,7 +1552,8 @@ class ConversationPlugin(Plugin):
                 if self._wobbler:
                     self._wobbler.feed(chunk)
 
-                await asyncio.sleep(chunk_duration * 0.9)
+                if idx >= prebuf:
+                    await asyncio.sleep(chunk_duration * 0.9)
 
             if self._wobbler:
                 self._wobbler.reset()
