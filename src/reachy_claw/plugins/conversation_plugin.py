@@ -426,22 +426,22 @@ class ConversationPlugin(Plugin):
                     named[name] = emo
                 else:
                     stranger_count += 1
-            descs = [f"{n}({e})" for n, e in named.items()]
+            descs = [f"{n} looks {e}" for n, e in named.items()]
             # Only count strangers that aren't duplicate detections of known people
             real_strangers = max(0, stranger_count - len(named))
             if real_strangers == 1:
-                descs.append("stranger")
+                descs.append("someone you don't know")
             elif real_strangers > 1:
-                descs.append(f"{real_strangers} strangers")
+                descs.append(f"{real_strangers} people you don't know")
             if descs:
-                parts.append(f"see: {', '.join(descs)}")
+                parts.append(f"you see: {', '.join(descs)}")
         elif vision:
             emo = getattr(vision, "_last_emotion", None)
             identity = getattr(vision, "current_identity", None)
             if identity:
-                parts.append(f"see: {identity}({emo or 'neutral'})")
+                parts.append(f"you see: {identity} looks {emo or 'neutral'}")
             elif emo and emo != "neutral":
-                parts.append(f"see: someone({emo})")
+                parts.append(f"you see: someone looks {emo}")
 
         if not parts:
             parts.append("nobody around")
