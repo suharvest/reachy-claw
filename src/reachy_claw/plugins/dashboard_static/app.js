@@ -122,6 +122,14 @@ function connectDashboard() {
         console.log('Dashboard WS connected');
         dashRetry = 1000;
         document.getElementById('dot-jetson').className = 'dot live';
+        // Clear restart status on reconnect (reachy-claw restarted itself)
+        const restartStatus = document.getElementById('restart-status');
+        const restartBtn = document.getElementById('restart-btn');
+        if (restartStatus && restartStatus.textContent) {
+            restartStatus.textContent = 'All services restarted.';
+            setTimeout(() => { restartStatus.textContent = ''; }, 3000);
+        }
+        if (restartBtn) restartBtn.disabled = false;
     };
 
     dashboardWs.onmessage = (e) => {
@@ -235,6 +243,11 @@ function handleDashboardMsg(msg) {
             handleRestartStatus(msg);
             break;
 
+        case 'capture_info':
+            document.getElementById('capture-data-count').textContent = (msg.count || 0) + ' photos';
+            document.getElementById('capture-storage-path').textContent = msg.path || '--';
+            break;
+
         case 'motor_state':
             motorEnabled = msg.enabled !== false;
             motorPreset = msg.preset || 'moderate';
@@ -289,23 +302,8 @@ function updateEmotionDisplay() {
     emotionPill.style.borderColor = color;
     emotionPill.style.color = color;
 
-    // Face description label
-    const FACE_LABELS = {
-        happy: 'Smiling face', happiness: 'Smiling face',
-        sad: 'Sad face', sadness: 'Sad face',
-        angry: 'Angry face', anger: 'Angry face',
-        surprised: 'Surprised face', surprise: 'Surprised face',
-        fear: 'Fearful face',
-        neutral: 'Neutral face',
-        contempt: 'Contemptuous face',
-        disgust: 'Disgusted face',
-    };
-    const identity = face.identity;
-    if (identity && identity !== '?') {
-        emotionLabel.textContent = identity;
-    } else {
-        emotionLabel.textContent = FACE_LABELS[rawEmotion.toLowerCase()] || (emotion + ' face');
-    }
+    // Label is fixed — it's the title for the smile capture counter
+    // (emotionLabel always shows "Smiling face")
 }
 
 // ── Thought bubbles (right column) ──────────────────────────────────
@@ -466,7 +464,8 @@ function getImageRect() {
     const rect = container.getBoundingClientRect();
     const natW = videoEl.naturalWidth || 640;
     const natH = videoEl.naturalHeight || 360;
-    const scale = Math.min(rect.width / natW, rect.height / natH);
+    // CSS uses object-fit: cover — match with Math.max (not contain/min)
+    const scale = Math.max(rect.width / natW, rect.height / natH);
     const imgW = natW * scale;
     const imgH = natH * scale;
     const offsetX = (rect.width - imgW) / 2;
@@ -678,8 +677,8 @@ function initSettings() {
         };
     });
 
-    // Mode selection
-    document.querySelectorAll('.mode-option').forEach(opt => {
+    // Mode selection (only options with data-mode, not motor presets)
+    document.querySelectorAll('.mode-option[data-mode]').forEach(opt => {
         opt.onclick = () => {
             const mode = opt.dataset.mode;
             if (mode === currentMode) return;
@@ -792,7 +791,7 @@ function sendVolume(vol) {
 }
 
 function syncModeUI() {
-    document.querySelectorAll('.mode-option').forEach(opt => {
+    document.querySelectorAll('.mode-option[data-mode]').forEach(opt => {
         opt.classList.toggle('selected', opt.dataset.mode === currentMode);
         opt.querySelector('input').checked = opt.dataset.mode === currentMode;
     });
@@ -941,15 +940,9 @@ async function importFaces() {
 }
 
 // ── Capture Data Management ──────────────────────────────────────────
-async function loadCaptureInfo() {
-    try {
-        const res = await fetch(`${VISION_API}/api/captures/count`);
-        const data = await res.json();
-        document.getElementById('capture-data-count').textContent = (data.count || 0) + ' photos';
-        document.getElementById('capture-storage-path').textContent = data.path || '/data/captures';
-    } catch (e) {
-        document.getElementById('capture-data-count').textContent = 'unavailable';
-        document.getElementById('capture-storage-path').textContent = 'unavailable';
+function loadCaptureInfo() {
+    if (dashboardWs && dashboardWs.readyState === 1) {
+        dashboardWs.send(JSON.stringify({ type: 'get_capture_info' }));
     }
 }
 

@@ -45,7 +45,7 @@ body {
 .grid-container {
     display: grid;
     grid-template-columns: 1fr auto 1fr;
-    grid-template-rows: 1fr auto;
+    grid-template-rows: auto auto;
     height: 100vh;
     padding: 40px 64px 48px;
     column-gap: 4vw;
@@ -125,8 +125,7 @@ body {
 .video-container {
     position: relative;
     width: 100%;
-    flex: 1;
-    min-height: 0;
+    aspect-ratio: 16 / 9;
     background: #111;
     border-radius: 24px;
     overflow: hidden;
@@ -214,7 +213,7 @@ body {
 }
 
 .asr-text {
-    font-size: 22px;
+    font-size: 26px;
     font-weight: 500;
     color: var(--text-bright);
     word-break: break-word;
@@ -229,7 +228,7 @@ body {
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     gap: 32px;
 }
 
@@ -362,7 +361,8 @@ body {
     flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 32px; /* Better proportioned gap */
+    justify-content: flex-start;
+    gap: 4vh;
     overflow: hidden;
     width: 100%;
 }
@@ -371,14 +371,14 @@ body {
 .thought-card {
     background: var(--olive);
     border-radius: 24px;
-    padding: 16px 24px;
+    padding: 20px 28px;
     position: relative;
     animation: card-in 0.35s ease-out;
     transition: opacity 0.3s, transform 0.3s;
     width: fit-content;
-    max-width: 100%; 
-    align-self: flex-start; /* Bubbles align left within right column */
-    box-sizing: border-box; 
+    max-width: 100%;
+    box-sizing: border-box;
+    align-self: flex-start;
 }
 
 .thought-card.streaming {
@@ -396,15 +396,15 @@ body {
 }
 
 .thought-text {
-    font-size: 22px; /* Smaller text to match reference, prevents overly long wrapping */
+    font-size: 26px;
     font-weight: 600;
     line-height: 1.4;
     color: var(--text-bright);
     word-break: break-word;
     overflow: hidden;
     display: -webkit-box;
-    -webkit-line-clamp: 4;
-    line-clamp: 4;
+    -webkit-line-clamp: 5;
+    line-clamp: 5;
     -webkit-box-orient: vertical;
 }
 
