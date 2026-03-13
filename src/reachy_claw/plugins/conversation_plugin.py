@@ -401,31 +401,31 @@ class ConversationPlugin(Plugin):
     # ── Monologue mode ─────────────────────────────────────────────────
 
     def _compose_monologue_prompt(self, transcript: str | None = None) -> str:
-        """Build compact LLM input for monologue mode from speech + vision."""
+        """Build natural-language LLM input for monologue mode from speech + vision."""
         parts = []
         if transcript:
-            parts.append(f"[heard] {transcript}")
+            parts.append(f"heard: \"{transcript}\"")
 
         vision = self.app.get_plugin("vision_client")
         if vision and getattr(vision, "_last_faces_summary", None):
-            s = vision._last_faces_summary
-            p = s[0]
-            name = p.get("identity") or "stranger"
-            emo = p.get("emotion", "neutral")
-            parts.append(f"[person] {name}, {emo}")
-            if len(s) > 1:
-                parts.append(f"[+{len(s)-1} others]")
+            faces = vision._last_faces_summary
+            descs = []
+            for f in faces:
+                name = f.get("identity") or "stranger"
+                emo = f.get("emotion", "neutral")
+                descs.append(f"{name}({emo})")
+            parts.append(f"see: {', '.join(descs)}")
         elif vision:
             emo = getattr(vision, "_last_emotion", None)
-            if emo and emo != "neutral":
-                parts.append(f"[expression] {emo}")
             identity = getattr(vision, "current_identity", None)
             if identity:
-                parts.append(f"[identity] {identity}")
+                parts.append(f"see: {identity}({emo or 'neutral'})")
+            elif emo and emo != "neutral":
+                parts.append(f"see: someone({emo})")
 
         if not parts:
-            parts.append("[quiet, observing]")
-        return "\n".join(parts)
+            parts.append("nobody around")
+        return ". ".join(parts)
 
     def switch_mode(self, mode: str) -> None:
         """Hot-switch between conversation and monologue modes."""
