@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -360,23 +361,38 @@ class ParaformerStreamingSTT(STTBackend):
     # ── Streaming interface ───────────────────────────────────────────
 
     def start_stream(self, sample_rate: int = 16000) -> None:
-        import json
-
+        """Ensure WebSocket is connected. Safe to call repeatedly."""
         import websockets.sync.client
 
         self._sample_rate = sample_rate
         self._partial_text = ""
         self._final_text = ""
+        if self._ws is not None:
+            return
         ws_url = f"{self._ws_url}/asr/stream?language={self._language}&sample_rate={sample_rate}"
         self._ws = websockets.sync.client.connect(ws_url)
-        logger.debug("Paraformer streaming session started")
+        logger.debug("Paraformer streaming WebSocket connected")
+
+    def ensure_connected(self, sample_rate: int = 16000) -> None:
+        """Alias for start_stream — keep WS alive."""
+        self.start_stream(sample_rate)
 
     def feed_chunk(self, chunk: np.ndarray) -> PartialResult | None:
-        """Send audio chunk, receive partial result if available."""
+        """Send audio chunk, receive partial result if available.
+
+        Auto-reconnects if the connection was lost.
+        """
         import json
+        import websockets.sync.client
 
         if self._ws is None:
-            return None
+            # Auto-reconnect
+            try:
+                ws_url = f"{self._ws_url}/asr/stream?language={self._language}&sample_rate={self._sample_rate}"
+                self._ws = websockets.sync.client.connect(ws_url)
+                logger.debug("Paraformer WebSocket reconnected")
+            except Exception:
+                return None
 
         # Convert to int16 bytes
         if chunk.dtype != np.int16:
@@ -387,61 +403,75 @@ class ParaformerStreamingSTT(STTBackend):
         else:
             chunk_int = chunk
 
-        self._ws.send(chunk_int.tobytes())
-
-        # Non-blocking receive — check if server sent a result
         try:
-            raw = self._ws.recv(timeout=0)
-        except (TimeoutError, Exception):
+            self._ws.send(chunk_int.tobytes())
+        except Exception:
+            self._close_ws()
             return None
 
-        try:
-            msg = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            return None
+        # Non-blocking receive — drain all buffered results, keep the latest
+        result: PartialResult | None = None
+        while True:
+            try:
+                raw = self._ws.recv(timeout=0)
+            except (TimeoutError, Exception):
+                break
 
-        text = msg.get("text", "")
-        is_final = msg.get("is_final", False)
-        is_stable = msg.get("is_stable", False)
+            try:
+                msg = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
 
-        if is_final:
-            self._final_text = text
-        else:
-            self._partial_text = text
+            text = msg.get("text", "")
+            is_final = msg.get("is_final", False)
+            is_stable = msg.get("is_stable", False)
 
-        return PartialResult(text=text, is_final=is_final, is_stable=is_stable)
+            if is_final:
+                self._final_text = text
+            else:
+                self._partial_text = text
+
+            result = PartialResult(text=text, is_final=is_final, is_stable=is_stable)
+
+        return result
 
     def finish_stream(self) -> str:
-        """Send end-of-stream signal, collect final result."""
+        """Get final result for current utterance. Keeps connection open."""
         import json
 
-        if self._ws is None:
-            return self._final_text or self._partial_text
+        result = self._final_text or self._partial_text
 
-        try:
-            # Short-circuit: if we already have a final result from feed_chunk,
-            # skip the EOF round-trip to save ~40-110ms
-            if self._final_text:
-                return self._final_text
-
-            # Send empty bytes to signal end of audio
-            self._ws.send(b"")
-
-            # Wait for final result
+        if self._ws is not None and not self._final_text:
+            # Send empty bytes to signal end of utterance
             try:
-                raw = self._ws.recv(timeout=5)
-                msg = json.loads(raw)
-                if msg.get("is_final"):
-                    self._final_text = msg.get("text", "")
+                self._ws.send(b"")
+                # Drain all buffered messages until we get is_final
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    remaining = max(0.1, deadline - time.monotonic())
+                    try:
+                        raw = self._ws.recv(timeout=remaining)
+                        msg = json.loads(raw)
+                        text = msg.get("text", "")
+                        if text:
+                            result = text
+                        if msg.get("is_final"):
+                            break
+                    except TimeoutError:
+                        break
+                    except Exception:
+                        break
             except Exception:
-                pass
+                self._close_ws()
 
-            return self._final_text or self._partial_text
-        finally:
-            self._close_ws()
+        self._partial_text = ""
+        self._final_text = ""
+        # NOTE: connection stays open — server may close after EOF,
+        # feed_chunk will auto-reconnect on next call
+        return result
 
     def cancel_stream(self) -> None:
-        self._close_ws()
+        # Just reset state, connection will auto-reconnect if needed
         self._partial_text = ""
         self._final_text = ""
 
@@ -525,6 +555,10 @@ class _ReconnectingSTT(STTBackend):
 
     def cancel_stream(self) -> None:
         self._backend.cancel_stream()
+
+    def ensure_connected(self, sample_rate: int = 16000) -> None:
+        if hasattr(self._backend, "ensure_connected"):
+            self._backend.ensure_connected(sample_rate)
 
 
 def create_stt_backend(config: Config) -> STTBackend:

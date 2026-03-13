@@ -33,6 +33,8 @@ class AudioCapture:
         self._buffer: deque[np.ndarray] = deque(maxlen=1000)
         self._device_id = None
         self._vad = vad  # VADBackend instance (optional)
+        self._chunk_queue: asyncio.Queue[np.ndarray] | None = None
+        self._reader_thread = None
 
         # Find the specified audio device
         if config.audio_device:
@@ -95,23 +97,34 @@ class AudioCapture:
             self.reachy.media.start_recording()
             logger.info("Started continuous Reachy media recording")
         else:
-            # Pre-open the local mic stream (with timeout to avoid blocking forever)
-            try:
-                await asyncio.wait_for(self._read_local_mic(1024), timeout=5.0)
-                logger.info("Started continuous local mic capture")
-            except asyncio.TimeoutError:
-                logger.warning("Local mic read timed out during start — will retry in audio loop")
-            except Exception as e:
-                logger.warning(f"Local mic pre-open failed: {e} — will retry in audio loop")
+            # Start background reader thread to prevent buffer overflow
+            self._chunk_queue = asyncio.Queue(maxsize=200)
+            self._loop = asyncio.get_running_loop()
+            import threading
+            self._reader_thread = threading.Thread(
+                target=self._bg_reader_loop, args=(1024,), daemon=True
+            )
+            self._reader_thread.start()
+            logger.info("Started continuous local mic capture (background reader)")
 
     async def read_chunk(self, frames: int = 1024) -> np.ndarray | None:
-        """Read one audio chunk. Non-blocking (uses asyncio.to_thread)."""
+        """Read one audio chunk. Non-blocking."""
         if not self._running:
             return None
 
-        if self._device_id is not None:
-            return await self._read_local_mic(frames)
-        elif self._has_reachy_audio:
+        # Background reader mode: consume from queue
+        if self._chunk_queue is not None:
+            try:
+                return self._chunk_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                # Yield briefly and retry
+                await asyncio.sleep(0.01)
+                try:
+                    return self._chunk_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return None
+
+        if self._has_reachy_audio:
             chunk = await asyncio.to_thread(self.reachy.media.get_audio_sample)
             if chunk is not None and not isinstance(chunk, np.ndarray):
                 chunk = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
@@ -122,6 +135,10 @@ class AudioCapture:
     async def stop(self) -> None:
         """Stop audio capture."""
         self._running = False
+        if self._reader_thread is not None:
+            self._reader_thread.join(timeout=2.0)
+            self._reader_thread = None
+            self._chunk_queue = None
         if getattr(self, '_continuous', False) and self._has_reachy_audio:
             try:
                 self.reachy.media.stop_recording()
@@ -235,6 +252,56 @@ class AudioCapture:
         # Fallback: simple energy threshold
         energy = float(np.abs(chunk).mean())
         return energy > self.config.silence_threshold
+
+    def _bg_reader_loop(self, frames: int) -> None:
+        """Background thread: continuously read mic into asyncio queue."""
+        import sounddevice as sd
+
+        try:
+            stream = sd.InputStream(
+                samplerate=self.config.sample_rate,
+                channels=1,
+                dtype=np.float32,
+                device=self._device_id,
+                blocksize=frames,
+            )
+            stream.start()
+            logger.debug(f"BG reader: started on device {self._device_id}")
+        except Exception as e:
+            logger.error(f"BG reader: failed to open mic: {e}")
+            return
+
+        try:
+            while self._running:
+                data, overflowed = stream.read(frames)
+                if overflowed:
+                    logger.debug("Audio buffer overflow in bg reader")
+                chunk = data.flatten()
+                try:
+                    self._loop.call_soon_threadsafe(
+                        self._chunk_queue.put_nowait, chunk
+                    )
+                except asyncio.QueueFull:
+                    # Drop oldest, put new — keep audio fresh
+                    try:
+                        self._loop.call_soon_threadsafe(
+                            self._chunk_queue.get_nowait
+                        )
+                        self._loop.call_soon_threadsafe(
+                            self._chunk_queue.put_nowait, chunk
+                        )
+                    except Exception:
+                        pass
+        except Exception as e:
+            if self._running:
+                logger.error(f"BG reader error: {e}")
+        finally:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
+            logger.debug("BG reader stopped")
 
     async def _read_local_mic(self, frames: int) -> np.ndarray | None:
         """Read from local microphone using sounddevice."""
