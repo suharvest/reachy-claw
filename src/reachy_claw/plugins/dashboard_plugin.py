@@ -339,7 +339,7 @@ class DashboardPlugin(Plugin):
         )
         await response.prepare(request)
 
-        no_timeout = ClientTimeout(total=None, connect=10, sock_read=None)
+        no_timeout = ClientTimeout(total=None, connect=10, sock_read=10)
         try:
             async with ClientSession(timeout=no_timeout) as session:
                 async with session.get(stream_url) as upstream:

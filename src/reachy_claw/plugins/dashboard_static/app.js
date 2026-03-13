@@ -604,44 +604,80 @@ function hexToRgba(hex, alpha) {
 function setupVideo() {
     // Use same-origin proxy to avoid CORS/cross-port issues
     const streamUrl = `/stream`;
+    const STALL_TIMEOUT = 5000; // ms — restart if no data for this long
+
+    let abortCtrl = null;
 
     async function readStream() {
+        // Abort any previous stream
+        if (abortCtrl) { try { abortCtrl.abort(); } catch(_) {} }
+        abortCtrl = new AbortController();
+
         try {
-            const res = await fetch(streamUrl);
+            const res = await fetch(streamUrl, { signal: abortCtrl.signal });
             const reader = res.body.getReader();
             let buf = new Uint8Array(0);
+            let stallTimer = setTimeout(onStall, STALL_TIMEOUT);
+
+            function onStall() {
+                console.warn('MJPEG stream stalled, reconnecting...');
+                reader.cancel();
+            }
 
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
 
+                // Reset stall timer on every chunk
+                clearTimeout(stallTimer);
+                stallTimer = setTimeout(onStall, STALL_TIMEOUT);
+
                 const tmp = new Uint8Array(buf.length + value.length);
                 tmp.set(buf); tmp.set(value, buf.length);
                 buf = tmp;
 
+                // Extract ALL complete JPEG frames in buffer, keep only the last one
+                let lastJpeg = null;
+                let lastEnd = -1;
                 let start = -1;
                 for (let i = 0; i < buf.length - 1; i++) {
                     if (buf[i] === 0xFF && buf[i+1] === 0xD8) start = i;
                     if (buf[i] === 0xFF && buf[i+1] === 0xD9 && start >= 0) {
-                        const jpeg = buf.slice(start, i + 2);
-                        const blob = new Blob([jpeg], { type: 'image/jpeg' });
-                        const url = URL.createObjectURL(blob);
-                        const prev = videoEl.src;
-                        videoEl.src = url;
-                        videoEl.style.display = 'block';
-                        noVideoEl.style.display = 'none';
-                        if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev);
-                        buf = buf.slice(i + 2);
-                        break;
+                        lastJpeg = buf.slice(start, i + 2);
+                        lastEnd = i + 2;
+                        start = -1;
                     }
                 }
+
+                if (lastJpeg) {
+                    // Display only the most recent frame (skip stale ones)
+                    const blob = new Blob([lastJpeg], { type: 'image/jpeg' });
+                    const url = URL.createObjectURL(blob);
+                    const prev = videoEl.src;
+                    videoEl.src = url;
+                    videoEl.style.display = 'block';
+                    noVideoEl.style.display = 'none';
+                    if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev);
+                    // Keep only unprocessed bytes after last complete frame
+                    buf = buf.slice(lastEnd);
+                }
+
+                // Safety: cap buffer at 512KB to prevent memory leak
+                if (buf.length > 512 * 1024) {
+                    buf = new Uint8Array(0);
+                }
             }
+
+            clearTimeout(stallTimer);
         } catch (e) {
-            console.warn('MJPEG stream error:', e);
-            videoEl.style.display = 'none';
-            noVideoEl.style.display = 'flex';
-            setTimeout(readStream, 3000);
+            if (e.name !== 'AbortError') {
+                console.warn('MJPEG stream error:', e);
+            }
         }
+
+        videoEl.style.display = 'none';
+        noVideoEl.style.display = 'flex';
+        setTimeout(readStream, 2000);
     }
 
     readStream();
