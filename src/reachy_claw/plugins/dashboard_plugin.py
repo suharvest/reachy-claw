@@ -41,6 +41,7 @@ class DashboardPlugin(Plugin):
         from aiohttp import web
 
         app = web.Application()
+        app.router.add_get("/health", self._handle_health)
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/ws", self._handle_ws)
         app.router.add_get("/stream", self._handle_stream_proxy)
@@ -112,6 +113,20 @@ class DashboardPlugin(Plugin):
             logger.warning("Failed to save config overrides: %s", e)
 
     # ── HTTP handlers ─────────────────────────────────────────────────
+
+    async def _handle_health(self, request):
+        """Health endpoint on dashboard port for container orchestration."""
+        from aiohttp import web
+        import json
+
+        if self.app.healthy:
+            body = {"status": "ok", "robot_connected": self.app.reachy is not None}
+            return web.Response(text=json.dumps(body), content_type="application/json")
+        return web.Response(
+            text=json.dumps({"status": "starting"}),
+            content_type="application/json",
+            status=503,
+        )
 
     async def _handle_index(self, request):
         from aiohttp import web
