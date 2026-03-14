@@ -471,9 +471,11 @@ class ParaformerStreamingSTT(STTBackend):
         return result
 
     def cancel_stream(self) -> None:
-        # Just reset state, connection will auto-reconnect if needed
+        # Close the WebSocket so start_stream() opens a fresh connection.
+        # This prevents stale partial results from polluting the next utterance.
         self._partial_text = ""
         self._final_text = ""
+        self._close_ws()
 
     def _close_ws(self) -> None:
         if self._ws is not None:
