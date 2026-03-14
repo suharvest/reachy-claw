@@ -565,10 +565,9 @@ async def health():
 @app.get("/api/stats")
 async def stats():
     inf_shape = None
-    if service.capture:
-        frame = service.capture.get_inference_frame()
-        if frame is not None:
-            inf_shape = list(frame.shape)  # [H, W, C]
+    frame = getattr(service, "_last_frame", None)
+    if frame is not None:
+        inf_shape = list(frame.shape)  # [H, W, C]
     return {
         "fps": round(service._fps, 1),
         "inference_ms": round(service._inference_ms, 1),
@@ -648,7 +647,7 @@ async def enroll_face(name: str = Query(...)):
     if not service.capture:
         return JSONResponse({"error": "Camera not available"}, status_code=503)
 
-    frame = service.capture.get_inference_frame()
+    frame = getattr(service, "_last_frame", None)
     if frame is None:
         return JSONResponse({"error": "No frame available"}, status_code=400)
 
