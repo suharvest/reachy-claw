@@ -57,7 +57,7 @@ class DashboardPlugin(Plugin):
 
         # Restore persisted volume or default to 80%
         startup_vol = getattr(self.app.config, "dashboard_volume", 80)
-        if not isinstance(startup_vol, int) or startup_vol <= 0:
+        if not isinstance(startup_vol, int) or startup_vol < 0:
             startup_vol = 80
         await self._set_volume(startup_vol)
 
