@@ -87,6 +87,10 @@ class ConversationPlugin(Plugin):
         self._speaking_since: float = 0.0
         self._pending_tasks: set[asyncio.Task] = set()
 
+        # Serialise _process_and_send so two concurrent utterances
+        # don't fire overlapping LLM streams.
+        self._send_lock = asyncio.Lock()
+
         # Monologue mode state
         self._monologue_mode = False
         self._last_speech_time: float = 0.0  # for monologue auto-trigger
@@ -145,10 +149,8 @@ class ConversationPlugin(Plugin):
 
                 if self._monologue_mode:
                     system_prompt = config.ollama_monologue_prompt or MONOLOGUE_SYSTEM_PROMPT
-                    skip_emotion = False
                 else:
                     system_prompt = config.ollama_system_prompt or DEFAULT_SYSTEM_PROMPT
-                    skip_emotion = False
 
                 # Monologue needs history to avoid repeating itself
                 history = config.ollama_max_history
@@ -163,7 +165,6 @@ class ConversationPlugin(Plugin):
                     system_prompt=system_prompt,
                     temperature=temperature,
                     max_history=history,
-                    skip_emotion_extraction=skip_emotion,
                 )
                 self._client = OllamaClient(ollama_cfg)
                 await self._client.connect()
@@ -991,7 +992,15 @@ class ConversationPlugin(Plugin):
         await self._process_and_send(text)
 
     async def _process_and_send(self, text: str) -> None:
-        """Process transcribed text (wake word check etc.) and send to AI."""
+        """Process transcribed text (wake word check etc.) and send to AI.
+
+        Serialised via _send_lock so two rapid utterances don't fire
+        overlapping LLM streams.
+        """
+        async with self._send_lock:
+            await self._process_and_send_inner(text)
+
+    async def _process_and_send_inner(self, text: str) -> None:
         if not text or not text.strip():
             logger.info("(no speech detected)")
             self.app.events.emit("asr_final", {"text": ""})
@@ -1702,35 +1711,6 @@ class ConversationPlugin(Plugin):
             logger.warning("No local audio player available")
             return False
 
-    # ── Single-shot speak (for task_completed notifications) ──────────
-
-    async def _speak_single(self, text: str) -> None:
-        """Speak a single utterance without the pipeline (for notifications)."""
-        if not text.strip():
-            return
-
-        clean_text = _strip_for_tts(text)
-        temp_audio_path: str | None = None
-
-        try:
-            temp_audio_path = await self._tts.synthesize(clean_text)
-
-            if self.app.reachy and getattr(getattr(self.app.reachy, "media", None), "audio", None) is not None:
-                try:
-                    await self._play_on_reachy_interruptible(temp_audio_path)
-                except Exception as e:
-                    logger.error(f"Reachy playback failed: {e}")
-                    await self._play_local_interruptible(temp_audio_path)
-            else:
-                await self._play_local_interruptible(temp_audio_path)
-        except Exception as e:
-            logger.error(f"TTS failed: {e}")
-        finally:
-            if temp_audio_path:
-                try:
-                    os.unlink(temp_audio_path)
-                except FileNotFoundError:
-                    pass
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
