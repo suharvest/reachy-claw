@@ -166,7 +166,6 @@ The robot mumbles to itself about what it sees — no user interaction needed. G
 conversation:
   mode: monologue
   monologue_interval: 5.0   # seconds between utterances
-  monologue_volume: 0.3     # quieter than conversation mode
 ```
 
 In monologue mode, only the vision pipeline (camera emotions) drives motor expressions — LLM emotion tags are ignored to prevent motor jitter.

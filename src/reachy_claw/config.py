@@ -125,7 +125,6 @@ class Config:
     # Conversation mode
     conversation_mode: str = "conversation"  # "conversation" | "monologue"
     monologue_interval: float = 5.0  # seconds between auto-triggered monologues
-    monologue_volume: float = 0.3  # volume multiplier for monologue TTS
 
     # Dashboard (exhibition UI)
     dashboard_enabled: bool = False
@@ -232,8 +231,7 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("vision", "identity_threshold"): "vision_identity_threshold",
     ("conversation", "mode"): "conversation_mode",
     ("conversation", "monologue_interval"): "monologue_interval",
-    ("conversation", "monologue_volume"): "monologue_volume",
-    ("dashboard", "enabled"): "dashboard_enabled",
+("dashboard", "enabled"): "dashboard_enabled",
     ("dashboard", "port"): "dashboard_port",
     ("plugins", "face_tracker"): "enable_face_tracker",
     ("plugins", "motion"): "enable_motion",

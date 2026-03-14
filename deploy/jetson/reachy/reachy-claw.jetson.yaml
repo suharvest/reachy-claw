@@ -58,7 +58,6 @@ vision:
 conversation:
   mode: monologue
   monologue_interval: 5.0
-  monologue_volume: 0.3
 
 dashboard:
   enabled: true
