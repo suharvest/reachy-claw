@@ -27,6 +27,7 @@ class DashboardPlugin(Plugin):
         self._ws_clients: set = set()
         self._last_llm_emotion: str | None = None
         self._capture_count: int = 0
+        self._audio_card: str | None = None
 
     def setup(self) -> bool:
         try:
@@ -296,11 +297,37 @@ class DashboardPlugin(Plugin):
             "count": count,
         })
 
-    async def _get_volume(self) -> int:
-        """Read current ALSA volume for Reachy Mini Audio (card 2), return as UI 0-100."""
+    async def _find_audio_card(self) -> str | None:
+        """Find ALSA card number for Reachy Mini Audio by scanning /proc/asound/cards."""
+        if self._audio_card is not None:
+            return self._audio_card
         try:
             proc = await asyncio.create_subprocess_exec(
-                "amixer", "-c", "2", "get", "PCM",
+                "cat", "/proc/asound/cards",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+            import re
+            for line in stdout.decode().splitlines():
+                if "Reachy Mini Audio" in line:
+                    m = re.match(r"\s*(\d+)\s+\[", line)
+                    if m:
+                        self._audio_card = m.group(1)
+                        logger.info("Found Reachy Mini Audio on card %s", self._audio_card)
+                        return self._audio_card
+        except Exception:
+            pass
+        return None
+
+    async def _get_volume(self) -> int:
+        """Read current ALSA volume for Reachy Mini Audio, return as UI 0-100."""
+        card = await self._find_audio_card()
+        if card is None:
+            return 80
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "amixer", "-c", card, "get", "PCM",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -336,17 +363,21 @@ class DashboardPlugin(Plugin):
         return max(1, min(100, int((alsa_percent - 60) / 40.0 * 100)))
 
     async def _set_volume(self, ui_percent: int) -> None:
-        """Set ALSA volume for Reachy Mini Audio (card 2)."""
+        """Set ALSA volume for Reachy Mini Audio."""
+        card = await self._find_audio_card()
+        if card is None:
+            logger.warning("Cannot set volume: Reachy Mini Audio card not found")
+            return
         alsa_vol = self._ui_to_alsa(ui_percent)
         try:
             await asyncio.create_subprocess_exec(
-                "amixer", "-c", "2", "set", "PCM", f"{alsa_vol}%",
+                "amixer", "-c", card, "set", "PCM", f"{alsa_vol}%",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
             # Also set PCM,1 (mono channel)
             await asyncio.create_subprocess_exec(
-                "amixer", "-c", "2", "set", "PCM,1", f"{alsa_vol}%",
+                "amixer", "-c", card, "set", "PCM,1", f"{alsa_vol}%",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
