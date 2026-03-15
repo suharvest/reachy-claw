@@ -46,13 +46,13 @@ Everything runs locally on edge hardware — no cloud APIs required. Here's the 
 | Domain | Component | Model | Accelerator | Notes |
 |--------|-----------|-------|-------------|-------|
 | **Voice AI** | Voice Activity Detection | [Silero VAD](https://github.com/snakers4/silero-vad) | CPU (ONNX) | ~10ms latency |
-| | Speech-to-Text (streaming) | [Paraformer](https://github.com/k2-fsa/sherpa-onnx) | CUDA | Bilingual zh+en, ~50ms TTFT |
-| | Text-to-Speech | [Kokoro TTS](https://github.com/k2-fsa/sherpa-onnx) / [Matcha-TTS](https://github.com/k2-fsa/sherpa-onnx) + Vocos | CUDA | ~60ms TTFT, streaming |
+| | Speech-to-Text (streaming) | [Paraformer](https://github.com/k2-fsa/sherpa-onnx) / [Zipformer](https://github.com/k2-fsa/sherpa-onnx) | CUDA | Paraformer: zh+en ~50ms TTFT; Zipformer: en ~50ms TTFT |
+| | Text-to-Speech | [Matcha-TTS](https://github.com/k2-fsa/sherpa-onnx) + Vocos / [Kokoro](https://github.com/k2-fsa/sherpa-onnx) | CUDA | Matcha: zh+en ~60ms TTFT; Kokoro: en ~130ms TTFT |
 | **LLM** | Conversational AI | [Qwen 3.5 2B](https://huggingface.co/Qwen) | CUDA (Ollama) | On-device; swappable to any Ollama/OpenClaw model |
 | **Vision AI** | Face Detection | [SCRFD-2.5D](https://github.com/deepinsight/insightface) | TensorRT | Real-time multi-face detection |
 | | Face Embedding | [ArcFace MBF (W600K)](https://github.com/deepinsight/insightface) | TensorRT | Face recognition & re-identification |
 | | Emotion Detection | [EfficientNet-B0](https://github.com/google/automl) | TensorRT | 7-class facial emotion classification |
-| | Face Tracking (client) | [MediaPipe Face Detection](https://ai.google.dev/edge/mediapipe/solutions/guide) | CPU | Gaze following on the robot side（fallback） |
+| | Face Tracking (client) | [MediaPipe Face Detection](https://ai.google.dev/edge/mediapipe/solutions/guide) | CPU | Gaze following on the robot side（as fallback） |
 
 The STT/TTS pipeline is powered by **[Jetson Voice](https://github.com/suharvest/jetson-local-voice)** — a standalone Docker service built on [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) that handles ASR and TTS inference with CUDA acceleration. VAD runs locally on the client side (reachy-claw) via ONNX Runtime — no network round-trip needed for speech detection. See [Edge Speech Service](#edge-speech-service) for setup.
 
