@@ -947,8 +947,8 @@ class ConversationPlugin(Plugin):
                     barge_in_count = 0
                     if self._vad:
                         self._vad.reset()
-                    # Reset STT and eagerly reconnect so next speech isn't lost
-                    await asyncio.to_thread(self._restart_stt_stream)
+                    # Cancel STT stream (feed_chunk auto-reconnects on next call)
+                    self._stt.cancel_stream()
                     self._spawn_task(
                         self._process_and_send(text),
                         name="conversation.process_and_send",
@@ -969,8 +969,8 @@ class ConversationPlugin(Plugin):
                     barge_in_count = 0
                     if self._vad:
                         self._vad.reset()
-                    # Reset STT and eagerly reconnect so next speech isn't lost
-                    await asyncio.to_thread(self._restart_stt_stream)
+                    # Cancel STT stream (feed_chunk auto-reconnects on next call)
+                    self._stt.cancel_stream()
                     self._spawn_task(
                         self._process_and_send(text),
                         name="conversation.process_and_send",
@@ -982,12 +982,8 @@ class ConversationPlugin(Plugin):
                     self._set_state(ConvState.TRANSCRIBING)
 
                     if streaming_stt:
-                        # Get final text and eagerly reconnect STT
-                        def _finish_and_restart():
-                            text = self._stt.finish_stream()
-                            self._stt.start_stream(self.app.config.sample_rate)
-                            return text
-                        text = await asyncio.to_thread(_finish_and_restart)
+                        # Get final text; feed_chunk auto-reconnects later
+                        text = await asyncio.to_thread(self._stt.finish_stream)
                         speech_frames = []
                         silence_count = 0
                         barge_in_count = 0
@@ -1011,15 +1007,6 @@ class ConversationPlugin(Plugin):
                             self._transcribe_and_send(audio_data),
                             name="conversation.transcribe_and_send",
                         )
-
-    def _restart_stt_stream(self) -> None:
-        """Cancel current STT stream and open a fresh connection immediately.
-
-        Called from worker thread. Eagerly reconnects so that the next
-        feed_chunk doesn't pay WS connection latency.
-        """
-        self._stt.cancel_stream()
-        self._stt.start_stream(self.app.config.sample_rate)
 
     async def _bg_listen(self, chunk: np.ndarray, streaming_stt: bool) -> None:
         """Background listening during SPEAKING/THINKING in monologue mode.
@@ -1333,10 +1320,9 @@ class ConversationPlugin(Plugin):
                     logger.warning(f"TTS worker synthesis failed: {e}")
                     chunks = None
 
-                # Don't check interrupt_event here — let the output_pipeline
-                # handle draining.  Checking here causes ALL new sentences to
-                # be silently dropped when the event hasn't been cleared yet
-                # (fast responses after barge-in).
+                # Drop synthesized audio if interrupt fired during synthesis
+                if self._interrupt_event.is_set():
+                    continue
 
                 logger.debug(
                     f"TTS ready: \"{clean[:20]}...\" "
@@ -1368,6 +1354,15 @@ class ConversationPlugin(Plugin):
                 continue
 
             item, prefetched_chunks = entry
+
+            # Check if interrupt fired while we were waiting for audio —
+            # TTS worker may have enqueued after _fire_interrupt drained.
+            if self._interrupt_event.is_set():
+                _drain_queue(self._audio_queue)
+                _drain_queue(self._sentence_queue)
+                self._interrupt_event.clear()
+                await self._finish_speaking()
+                continue
 
             if item.is_last and not item.text:
                 await self._finish_speaking()

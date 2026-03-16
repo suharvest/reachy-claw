@@ -32,11 +32,11 @@ vad:
   backend: silero
 
 barge_in:
-  enabled: false  # monologue mode: no barge-in
-  confirm_frames: 10
-  energy_threshold: 0.03
-  silero_threshold: 0.6
-  cooldown_ms: 800
+  enabled: true
+  confirm_frames: 2
+  energy_threshold: 0.02
+  silero_threshold: 0.5
+  cooldown_ms: 300
 
 audio:
   device: "Reachy Mini Audio"
