@@ -47,16 +47,16 @@ _DESCRIBE_SCENE_TOOL = {
     "type": "function",
     "function": {
         "name": "describe_scene",
-        "description": "Look through the camera to see what is in front of you. You MUST call this tool whenever the user asks what you see, what is around you, or anything about the visual scene. You cannot see without this tool.",
+        "description": "Use your camera to look at the scene. Only call when the user asks you to LOOK or SEE something, or asks what is in front of you.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
 }
 
 _VLM_SYSTEM_PROMPT = """\
-IMPORTANT: You have a camera tool called describe_scene. You MUST call it when asked about what you see. You cannot see without it. Never make up visual descriptions.
 You are Reachy, a cute robot at an exhibition. 1 short sentence, max 15 words, no emoji.
+You have a camera (describe_scene). Only use it when asked to look or see. Don't guess what you see.
 You MUST end with one of: [happy] [sad] [thinking] [surprised] [curious]
-Example: "Wow, a person sitting with a laptop, nice setup! [curious]""""
+Example: "Wow, a person sitting with a laptop, nice setup! [curious]\""""
 
 
 @dataclass
