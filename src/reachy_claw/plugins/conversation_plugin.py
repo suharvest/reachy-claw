@@ -9,6 +9,7 @@ Three concurrent tasks connected by queues and an interrupt event:
 from __future__ import annotations
 
 import asyncio
+import collections
 import enum
 import logging
 import os
@@ -79,6 +80,7 @@ class ConversationPlugin(Plugin):
         self._audio_queue: asyncio.Queue[tuple[SentenceItem, list | None] | None] = asyncio.Queue(maxsize=3)
         self._interrupt_event = asyncio.Event()
         self._gst_playing = False  # GStreamer playback pipeline state
+        self._gst_drain_s: float = 0.0  # estimated ALSA buffer tail (seconds)
 
         self._current_run_id: str | None = None
         self._event_loop: asyncio.AbstractEventLoop | None = None
@@ -846,6 +848,10 @@ class ConversationPlugin(Plugin):
         silence_count = 0
         barge_in_count = 0
         barge_in_chunks: list[np.ndarray] = []  # audio from barge-in detection
+        # Pre-roll: ring buffer of recent audio during SPEAKING/THINKING.
+        # ~500ms at 1024/16kHz = 8 frames.  On barge-in, these are replayed
+        # to STT so the start of the user's utterance isn't lost.
+        pre_roll: collections.deque[np.ndarray] = collections.deque(maxlen=8)
         max_silence = int(self.app.config.silence_duration * self.app.config.sample_rate / 1024)
         max_frames = int(self.app.config.max_recording_duration * self.app.config.sample_rate / 1024)
         confirm_frames = self.app.config.barge_in_confirm_frames
@@ -904,6 +910,9 @@ class ConversationPlugin(Plugin):
                 if time.monotonic() - self._speaking_since < cooldown_s:
                     continue
 
+                # Buffer all post-cooldown audio for pre-roll replay
+                pre_roll.append(chunk)
+
                 # Layer 2: Energy gate — skip low-energy noise
                 energy = float(np.abs(chunk).mean())
                 if energy < self.app.config.barge_in_energy_threshold:
@@ -929,14 +938,17 @@ class ConversationPlugin(Plugin):
                 barge_in_count += 1
                 barge_in_chunks.append(chunk)
                 if barge_in_count >= confirm_frames:
-                    logger.info(f"Barge-in confirmed ({barge_in_count} frames)")
+                    logger.info(
+                        f"Barge-in confirmed ({barge_in_count} frames, "
+                        f"{len(pre_roll)} pre-roll)"
+                    )
                     speech_frames = list(barge_in_chunks)
                     await self._fire_interrupt()
                     self._set_state(ConvState.LISTENING)
                     if streaming_stt:
-                        # Restart STT and replay all speech chunks that
-                        # triggered the barge-in so they're not lost.
-                        replay = list(barge_in_chunks)
+                        # Restart STT and replay pre-roll buffer (~500ms)
+                        # so the start of the user's utterance isn't lost.
+                        replay = list(pre_roll)
                         def _restart_stt():
                             self._stt.cancel_stream()
                             self._stt.start_stream(self.app.config.sample_rate)
@@ -946,6 +958,7 @@ class ConversationPlugin(Plugin):
                     silence_count = 0
                     barge_in_count = 0
                     barge_in_chunks.clear()
+                    pre_roll.clear()
                 continue
 
             # ── TRANSCRIBING / THINKING states ──
@@ -981,6 +994,7 @@ class ConversationPlugin(Plugin):
                     speech_frames = []
                     silence_count = 0
                     barge_in_count = 0
+
                     if self._vad:
                         self._vad.reset()
                     # Reset STT and eagerly reconnect so next speech isn't lost
@@ -1003,6 +1017,7 @@ class ConversationPlugin(Plugin):
                     speech_frames = []
                     silence_count = 0
                     barge_in_count = 0
+
                     if self._vad:
                         self._vad.reset()
                     # Reset STT and eagerly reconnect so next speech isn't lost
@@ -1027,6 +1042,7 @@ class ConversationPlugin(Plugin):
                         speech_frames = []
                         silence_count = 0
                         barge_in_count = 0
+    
                         if self._vad:
                             self._vad.reset()
                         self._spawn_task(
@@ -1039,6 +1055,7 @@ class ConversationPlugin(Plugin):
                         speech_frames = []
                         silence_count = 0
                         barge_in_count = 0
+    
                         if self._vad:
                             self._vad.reset()
                         duration = len(audio_data) / self.app.config.sample_rate
@@ -1187,7 +1204,7 @@ class ConversationPlugin(Plugin):
             # Inject face recognition context into conversation
             ctx = self._get_vision_context()
             if ctx:
-                text = f"[Context: {ctx}]\n{text}"
+                text = f"[You see: {ctx}]\n{text}"
         logger.info("Sending to AI...")
         self._set_state(ConvState.THINKING)
         self._t_send = time.perf_counter()
@@ -1456,10 +1473,15 @@ class ConversationPlugin(Plugin):
                 await self._finish_speaking()
 
     async def _stop_gst_playback(self) -> None:
-        """Stop GStreamer playback pipeline with drain wait."""
+        """Stop GStreamer playback pipeline after audio has drained."""
         if self._gst_playing and self.app.reachy:
             try:
-                await asyncio.sleep(0.6)  # let ALSA buffer drain
+                # Push several silence frames to flush ALSA pipeline and
+                # avoid the pop/click noise when stopping abruptly.
+                silence = np.zeros(1600, dtype=np.float32)
+                for _ in range(5):
+                    self.app.reachy.media.push_audio_sample(silence)
+                await asyncio.sleep(0.4)
                 self.app.reachy.media.stop_playing()
             except Exception:
                 pass
@@ -1594,6 +1616,8 @@ class ConversationPlugin(Plugin):
                 interrupted = False
                 chunk_size = 1600  # 100ms chunks at 16kHz
                 prebuf = 4  # push first N chunks without sleeping to fill pipeline buffer
+                audio_duration = len(audio) / sample_rate
+                t_push_start = time.monotonic()
                 try:
                     for idx, i in enumerate(range(0, len(audio), chunk_size)):
                         if self._interrupt_event.is_set():
@@ -1609,6 +1633,30 @@ class ConversationPlugin(Plugin):
                     if self._wobbler:
                         self._wobbler.reset()
                     reachy.set_target_antenna_joint_positions([0.0, 0.0])
+
+                # Push a fade-out tail to avoid pop/click between sentences
+                # or when pipeline stops.  Ramps from last sample to zero.
+                if not interrupted and len(audio) > 0:
+                    fade_len = 800  # 50ms at 16kHz
+                    last_val = float(audio[-1])
+                    fade = np.linspace(last_val, 0.0, fade_len, dtype=np.float32)
+                    reachy.media.push_audio_sample(fade)
+
+                # Wait for ALSA buffer to finish playing before returning.
+                # Push runs faster than realtime (0.9x + prebuf), so there's
+                # audio still in the buffer.  Wait interruptibly so barge-in
+                # can still cut in.
+                if not interrupted:
+                    remaining = audio_duration - (time.monotonic() - t_push_start)
+                    if remaining > 0:
+                        try:
+                            await asyncio.wait_for(
+                                self._interrupt_event.wait(), timeout=remaining
+                            )
+                            interrupted = True
+                        except asyncio.TimeoutError:
+                            pass  # audio finished naturally
+
                 # Don't stop pipeline here — it stays open for next sentence
                 return interrupted
             else:
