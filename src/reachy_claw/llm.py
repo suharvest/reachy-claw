@@ -51,7 +51,10 @@ _DESCRIBE_SCENE_TOOL = {
     },
 }
 
-_VLM_SYSTEM_SUFFIX = "\nYou cannot see without calling describe_scene. Never make up visual descriptions."
+_VLM_SYSTEM_PREFIX = """\
+IMPORTANT: You have a camera tool called describe_scene. You MUST call it when asked about what you see. You cannot see without it. Never make up visual descriptions."""
+
+_VLM_REDUCED_TAGS = "[happy] [sad] [thinking] [surprised] [curious]"
 
 
 @dataclass
@@ -164,9 +167,20 @@ class OllamaClient:
         # Build messages — inject current time into system prompt
         from datetime import datetime
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        system = f"Current time: {now}\n{self._config.system_prompt}"
-        if self._config.enable_vlm and self.capture_frame:
-            system += _VLM_SYSTEM_SUFFIX
+        vlm_active = self._config.enable_vlm and self.capture_frame
+        if vlm_active:
+            # Tool instruction FIRST + reduced emotion tags for small models
+            base_prompt = self._config.system_prompt
+            # Replace full tag list with reduced set for better tool-call reliability
+            base_prompt = re.sub(
+                r"End with one tag:.*$",
+                f"End with one tag: {_VLM_REDUCED_TAGS}",
+                base_prompt,
+                flags=re.MULTILINE,
+            )
+            system = f"{_VLM_SYSTEM_PREFIX}\nCurrent time: {now}\n{base_prompt}"
+        else:
+            system = f"Current time: {now}\n{self._config.system_prompt}"
         messages = [{"role": "system", "content": system}]
         if self._config.max_history > 0:
             messages.extend(self._history[-(self._config.max_history * 2):])
