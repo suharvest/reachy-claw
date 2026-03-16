@@ -342,7 +342,23 @@ function updateEmotionDisplay() {
 }
 
 // ── Thought bubbles (right column) ──────────────────────────────────
+function showThinkingCard() {
+    // Don't add if already streaming or thinking
+    if (thoughtList.querySelector('.thought-card.streaming')) return;
+    if (thoughtList.querySelector('.thought-card.thinking')) return;
+    const card = document.createElement('div');
+    card.className = 'thought-card thinking';
+    card.innerHTML = '<div class="thinking-dots"><span>.</span><span>.</span><span>.</span></div>';
+    thoughtList.prepend(card);
+}
+
+function removeThinkingCard() {
+    const card = thoughtList.querySelector('.thought-card.thinking');
+    if (card) card.remove();
+}
+
 function addStreamingCard() {
+    removeThinkingCard();
     // Remove existing streaming card if any
     const existing = thoughtList.querySelector('.thought-card.streaming');
     if (existing) existing.remove();
@@ -445,8 +461,10 @@ function updateState(state) {
         el.textContent = state;
         el.dataset.state = state;
     }
+    if (state === 'thinking') showThinkingCard();
     // When backend returns to idle/listening, reset ASR display immediately
     if (state === 'idle' || state === 'listening') {
+        removeThinkingCard();
         if (asrIdleTimer) clearTimeout(asrIdleTimer);
         asrTextEl.innerHTML = '<i>Listening...</i>';
         asrTextEl.className = 'asr-text idle';
@@ -961,6 +979,8 @@ function syncModeUI() {
     document.getElementById('mode-status').textContent = 'Current: ' + currentMode;
     const toggles = document.getElementById('mode-toggles');
     if (toggles) toggles.style.display = currentMode === 'conversation' ? '' : 'none';
+    const mindLabel = document.getElementById('mind-label');
+    if (mindLabel) mindLabel.textContent = currentMode === 'conversation' ? 'Says' : 'Mind';
 }
 
 function setMode(mode) {
