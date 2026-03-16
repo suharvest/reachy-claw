@@ -30,8 +30,8 @@ _KNOWN_EMOTIONS = frozenset({
 })
 
 DEFAULT_SYSTEM_PROMPT = """\
-You are Reachy, a playful robot at an exhibition. Be witty, curious, and never boring.
-1-3 sentences. Vary your style. End with one tag: [happy] [sad] [thinking] [surprised] [curious] [excited] [neutral] [confused] [angry] [laugh]"""
+You are Reachy, a cute robot at an exhibition. Reply in 1 SHORT sentence (max 20 words). Be casual and fun.
+End with one tag: [happy] [sad] [thinking] [surprised] [curious] [excited] [neutral] [confused] [angry] [laugh]"""
 
 MONOLOGUE_SYSTEM_PROMPT = """\
 You are a shy cute robot at an exhibition, mumbling to yourself about what you see and hear. Keep it short, casual, and playful.
@@ -51,10 +51,10 @@ _DESCRIBE_SCENE_TOOL = {
     },
 }
 
-_VLM_SYSTEM_PREFIX = """\
-IMPORTANT: You have a camera tool called describe_scene. You MUST call it when asked about what you see. You cannot see without it. Never make up visual descriptions."""
-
-_VLM_REDUCED_TAGS = "[happy] [sad] [thinking] [surprised] [curious]"
+_VLM_SYSTEM_PROMPT = """\
+IMPORTANT: You have a camera tool called describe_scene. You MUST call it when asked about what you see. You cannot see without it. Never make up visual descriptions.
+You are Reachy, a cute robot at an exhibition. 1 short sentence. Be casual and fun.
+End with one tag: [happy] [sad] [thinking] [surprised] [curious]"""
 
 
 @dataclass
@@ -169,16 +169,8 @@ class OllamaClient:
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         vlm_active = self._config.enable_vlm and self.capture_frame
         if vlm_active:
-            # Tool instruction FIRST + reduced emotion tags for small models
-            base_prompt = self._config.system_prompt
-            # Replace full tag list with reduced set for better tool-call reliability
-            base_prompt = re.sub(
-                r"End with one tag:.*$",
-                f"End with one tag: {_VLM_REDUCED_TAGS}",
-                base_prompt,
-                flags=re.MULTILINE,
-            )
-            system = f"{_VLM_SYSTEM_PREFIX}\nCurrent time: {now}\n{base_prompt}"
+            # Dedicated VLM prompt: tool rule first, reduced tags for reliability
+            system = f"Current time: {now}\n{_VLM_SYSTEM_PROMPT}"
         else:
             system = f"Current time: {now}\n{self._config.system_prompt}"
         messages = [{"role": "system", "content": system}]
@@ -277,10 +269,13 @@ class OllamaClient:
             "think": False,
             "options": {
                 "temperature": self._config.temperature,
-                "num_predict": 100 if self._config.skip_emotion_extraction else 200,
+                "num_predict": 100 if self._config.skip_emotion_extraction else 80,
             },
         }
-        if include_tools and self._config.enable_vlm and self.capture_frame:
+        use_tools = include_tools and self._config.enable_vlm and self.capture_frame
+        if use_tools:
+            # Tool call responses need more tokens for the tool JSON + preamble
+            payload["options"]["num_predict"] = 200
             payload["tools"] = [_DESCRIBE_SCENE_TOOL]
 
         full_text = ""
