@@ -30,7 +30,8 @@ _KNOWN_EMOTIONS = frozenset({
 })
 
 DEFAULT_SYSTEM_PROMPT = """\
-You are Reachy, a cute robot at an exhibition. Always reply in English. 1 short sentence, max 15 words, no emoji.
+Your name is Reachy. You are a cute robot at an exhibition. Always reply in English. Keep replies concise but natural. No emoji.
+Names in [You see: ...] are people you see, not your name.
 You MUST end with one of: [happy] [sad] [thinking] [surprised] [curious]
 Example: "Hey there, welcome to the exhibition! [happy]\""""
 
@@ -53,10 +54,26 @@ _DESCRIBE_SCENE_TOOL = {
 }
 
 _VLM_SYSTEM_PROMPT = """\
-You are Reachy, a cute robot at an exhibition. Always reply in English. 1 short sentence, max 15 words, no emoji.
-You have a camera (describe_scene). Only use it when asked to look or see. Don't guess what you see.
+Your name is Reachy. You are a cute robot at an exhibition. Always reply in English. Keep replies concise but natural. No emoji.
+You have a camera. Names in [You see: ...] are people you see, not your name.
 You MUST end with one of: [happy] [sad] [thinking] [surprised] [curious]
 Example: "Wow, a person sitting with a laptop, nice setup! [curious]\""""
+
+# Keywords that indicate the user wants the robot to use its camera.
+# Checked case-insensitively against the user's message.
+_VISION_KEYWORDS = re.compile(
+    # Chinese
+    r"看到|看见|看一[看下]|看看|你看|眼前|面前|前面有|周围"
+    r"|你能看|帮我看|瞧瞧|望望"
+    # English — broad patterns for ASR output
+    r"|what do you see|what.?s in front|what.?s around"
+    r"|look at|can you see|do you see|you see"
+    r"|describe.*(scene|around|room|here)|show me"
+    r"|in front of you|around you|looking at"
+    r"|what is this|what are these|what.?s that"
+    r"|see any|see some|take a look",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -170,6 +187,10 @@ class OllamaClient:
         from datetime import datetime
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         vlm_active = self._config.enable_vlm and self.capture_frame
+        logger.debug(
+            "VLM check: enable_vlm=%s capture_frame=%s → active=%s",
+            self._config.enable_vlm, self.capture_frame is not None, vlm_active,
+        )
         if vlm_active:
             # Dedicated VLM prompt: tool rule first, reduced tags for reliability
             system = f"Current time: {now}\n{_VLM_SYSTEM_PROMPT}"
@@ -185,49 +206,83 @@ class OllamaClient:
             await _maybe_await(self.callbacks.on_stream_start(run_id))
 
         try:
-            # First LLM call
-            full_text, tool_calls = await self._stream_response(messages, run_id)
+            # Keyword-based forced VLM: skip first LLM call entirely,
+            # go straight to frame capture → VLM → single LLM call with result.
+            force_vision = (
+                vlm_active and bool(_VISION_KEYWORDS.search(user_text))
+            )
 
-            # Tool-call loop (single round)
-            if tool_calls and self._config.enable_vlm:
-                # End first stream so TTS plays the preamble (e.g. "让我看看")
-                if full_text.strip() and self.callbacks.on_stream_end:
-                    await _maybe_await(
-                        self.callbacks.on_stream_end(
-                            _EMOTION_RE.sub("", full_text).strip(), run_id
-                        )
-                    )
-
-                # Execute tools and append results
-                assistant_msg = {"role": "assistant", "content": full_text}
-                if tool_calls:
-                    assistant_msg["tool_calls"] = tool_calls
-                messages.append(assistant_msg)
-
+            if force_vision:
+                logger.info("Vision keyword detected, forcing VLM pipeline")
                 import time as _time
-                for tc in tool_calls:
-                    t0 = _time.monotonic()
-                    result = await self._execute_tool(tc)
-                    elapsed = _time.monotonic() - t0
-                    logger.info(
-                        "Tool %s executed in %.1fs (%d chars)",
-                        tc.get("function", {}).get("name", "?"),
-                        elapsed,
-                        len(result),
-                    )
-                    messages.append({
-                        "role": "tool",
-                        "content": result,
-                    })
-
-                # Second LLM call (no tools, to produce final response)
-                self._run_counter += 1
-                run_id = f"ollama-{self._run_counter}"
-                if self.callbacks.on_stream_start:
-                    await _maybe_await(self.callbacks.on_stream_start(run_id))
+                t0 = _time.monotonic()
+                tc = {"function": {"name": "describe_scene", "arguments": {}}}
+                result = await self._execute_tool(tc)
+                elapsed = _time.monotonic() - t0
+                logger.info(
+                    "Forced VLM executed in %.1fs (%d chars)", elapsed, len(result),
+                )
+                # Replace the original user message with one that includes
+                # the scene description. Small models don't handle tool
+                # message format, so we fold it into the user turn.
+                messages[-1] = {
+                    "role": "user",
+                    "content": (
+                        f"{user_text}\n\n"
+                        f"[You looked with your camera and saw: {result}]"
+                    ),
+                }
                 full_text, _ = await self._stream_response(
                     messages, run_id, include_tools=False
                 )
+            else:
+                # Normal path: LLM decides whether to call tools
+                full_text, tool_calls = await self._stream_response(
+                    messages, run_id
+                )
+
+                # Tool-call loop (single round)
+                if tool_calls and self._config.enable_vlm:
+                    # End first stream so TTS plays the preamble
+                    if full_text.strip() and self.callbacks.on_stream_end:
+                        await _maybe_await(
+                            self.callbacks.on_stream_end(
+                                _EMOTION_RE.sub("", full_text).strip(), run_id
+                            )
+                        )
+
+                    # Execute tools and append results
+                    assistant_msg = {"role": "assistant", "content": full_text}
+                    if tool_calls:
+                        assistant_msg["tool_calls"] = tool_calls
+                    messages.append(assistant_msg)
+
+                    import time as _time
+                    for tc in tool_calls:
+                        t0 = _time.monotonic()
+                        result = await self._execute_tool(tc)
+                        elapsed = _time.monotonic() - t0
+                        logger.info(
+                            "Tool %s executed in %.1fs (%d chars)",
+                            tc.get("function", {}).get("name", "?"),
+                            elapsed,
+                            len(result),
+                        )
+                        messages.append({
+                            "role": "tool",
+                            "content": result,
+                        })
+
+                    # Second LLM call (no tools, to produce final response)
+                    self._run_counter += 1
+                    run_id = f"ollama-{self._run_counter}"
+                    if self.callbacks.on_stream_start:
+                        await _maybe_await(
+                            self.callbacks.on_stream_start(run_id)
+                        )
+                    full_text, _ = await self._stream_response(
+                        messages, run_id, include_tools=False
+                    )
 
         except asyncio.CancelledError:
             if self.callbacks.on_stream_abort:
@@ -280,7 +335,7 @@ class OllamaClient:
             "think": False,
             "options": {
                 "temperature": self._config.temperature,
-                "num_predict": 100 if self._config.skip_emotion_extraction else 80,
+                "num_predict": 100 if self._config.skip_emotion_extraction else 150,
             },
         }
         use_tools = include_tools and self._config.enable_vlm and self.capture_frame
