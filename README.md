@@ -1,34 +1,100 @@
 # Reachy Claw
 
-**Sub-200ms voice assistant for [Reachy Mini](https://www.pollen-robotics.com/reachy-mini/) — fully local pipeline powered by [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). Two AI modes: zero-setup [Ollama](#ollama-mode-zero-setup) or full-featured [OpenClaw](#openclaw-mode-full-featured).**
+**Talk to your [Reachy Mini](https://www.pollen-robotics.com/reachy-mini/) — sub-1s voice-to-voice, fully local with [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) + [Ollama](https://ollama.com/).**
 
 [![CI](https://github.com/suharvest/reachy-claw/actions/workflows/ci.yml/badge.svg)](https://github.com/suharvest/reachy-claw/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Reachy Mini](https://img.shields.io/badge/robot-Reachy%20Mini-orange.svg)](https://www.pollen-robotics.com/reachy-mini/)
 [![sherpa-onnx](https://img.shields.io/badge/speech-sherpa--onnx-green.svg)](https://github.com/k2-fsa/sherpa-onnx)
-[![OpenClaw](https://img.shields.io/badge/AI-OpenClaw-purple.svg)](https://github.com/ArturSkowronski/openclaw)
+[![Ollama](https://img.shields.io/badge/LLM-Ollama-blue.svg)](https://ollama.com/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
 <p align="center">
-  <img src="media/hero.png" alt="Reachy Claw — talk to your robot" width="640" />
+  <img src="media/logo.png" alt="Reachy Claw" width="200" />
 </p>
 
-Talk to your robot, and it talks back — with emotions, head movements, and face tracking. No cloud, no subscription, everything runs on your own hardware.
+<!-- TODO: Add a demo GIF below the logo showing the robot reacting to speech -->
 
-Reachy Claw gives a [Reachy Mini](https://www.pollen-robotics.com/reachy-mini/) desktop robot the ability to have real conversations. You speak, it listens, thinks, and responds — all in under 200ms. Two AI backends to choose from:
+You speak, it listens, thinks, and responds — with emotions, head movements, and face tracking. No cloud, no subscription, everything runs on your own hardware.
 
-| | Ollama Mode | OpenClaw Mode |
-|---|---|---|
-| **Setup** | `ollama pull` + go | Requires [OpenClaw](https://github.com/ArturSkowronski/openclaw) gateway |
-| **LLM** | Any Ollama model (Qwen, Llama, Gemma...) | Any LLM via OpenClaw (Claude, GPT, Qwen...) |
-| **Tools** | Conversation only | LLM tool use — robot commands, camera, dances |
-| **Emotions** | Basic (rule-based) | Rich (LLM-driven `[emotion:*]` tags) |
-| **Multi-turn** | Configurable history depth | Full session via OpenClaw |
-| **Best for** | Quick demos, offline use, edge devices | Production, tool use, multi-agent setups |
+## Quickstart
 
-Both modes share the same speech pipeline (sherpa-onnx STT/TTS), motion system, face tracking, and barge-in. Switch with one config line.
+```bash
+git clone https://github.com/suharvest/reachy-claw.git && cd reachy-claw
+uv sync --extra dev --extra audio
+ollama pull qwen3.5:2b
+uv run reachy-claw
+```
 
-### Latency breakdown (Jetson Orin NX, CUDA)
+That's it — the robot talks using a local LLM via [Ollama](https://ollama.com/). Open `http://localhost:8640` for the dashboard.
+
+For tool use and multi-agent capabilities, you can also use [OpenClaw](https://github.com/ArturSkowronski/openclaw) as the AI backend. See [Configuration](#configuration) for details.
+
+## Dashboard
+
+The built-in web dashboard at `:8640` is the control center — switch modes, tune parameters, and monitor everything in real time.
+
+<!-- TODO: Add dashboard screenshot here -->
+
+### Two Modes
+
+**Conversation mode** — The robot listens, responds, and reacts. Face tracking follows whoever is speaking. Barge-in lets you interrupt mid-sentence. With VLM enabled, the robot can see — ask "what's in front of you?" and it uses its camera to describe the scene.
+
+**Monologue mode** — The robot mumbles to itself about what it sees — no user interaction needed. Great for exhibitions and demos. Vision-driven emotions only, no motor jitter.
+
+Switch between modes with one click in the dashboard.
+
+### What you can configure (all live, no restart needed)
+
+| Category | Settings |
+|----------|----------|
+| **Mode** | Conversation / Monologue toggle |
+| **Voice** | Speaker voice, pitch, speed, volume |
+| **Prompts** | System prompts for both modes — fully editable |
+| **Motor** | Enable/disable, preset (sensitive / moderate / smart) |
+| **Audio** | VAD threshold, energy threshold — tune for your environment |
+| **Vision** | VLM (camera vision) on/off, barge-in on/off |
+| **Memory** | Conversation history depth (0 = stateless) |
+| **Faces** | Register/delete faces, import/export face DB, live camera enroll |
+
+All settings persist across restarts via `runtime-overrides.yaml`.
+
+## Key Features
+
+- **Fully local pipeline** — Paraformer ASR + Matcha TTS via [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), runs on Jetson / RK3588 / any CUDA device, no cloud required
+- Two AI modes — [Ollama](https://ollama.com/) for zero-setup local LLM, or [OpenClaw](https://github.com/ArturSkowronski/openclaw) for tool use and multi-agent; switch with one click
+- **Emotion-driven motion** — 14 distinct emotions mapped to head movements and antenna expressions
+- **Face tracking** — MediaPipe-powered gaze following so the robot looks at whoever is speaking
+- **Streaming TTS** — sentence-level streaming for low-latency responses
+- **Vision (VLM tool calling)** — Ask "what do you see?" and the robot uses Ollama's native tool calling to grab a camera frame, run a vision model (e.g. Qwen 3.5 2B), and describe the scene — all on-device
+- **Robust barge-in** — 3-layer noise filtering (energy gate + VAD threshold + cooldown) for reliable interrupts even in noisy environments; toggle on/off live from the dashboard
+- **Web dashboard** — live video, ASR transcript, face management, and all settings in one place
+- **Pluggable backends** — swap STT/TTS/VAD/LLM without changing code (Paraformer, Matcha, Whisper, ElevenLabs, Ollama, OpenClaw, and more)
+- **Plugin architecture** — Motion, Conversation, FaceTracker, Dashboard, and VisionClient as independent plugins
+- **Flexible deployment** — Docker Compose on Jetson, standalone, simulator, or via Reachy Mini daemon
+
+## Table of Contents
+
+- [Quickstart](#quickstart)
+- [Dashboard](#dashboard)
+- [Key Features](#key-features)
+- [Latency](#latency)
+- [AI Stack](#ai-stack)
+- [Architecture](#architecture)
+- [Edge Speech Service](#edge-speech-service)
+- [Running as a Reachy Mini App](#running-as-a-reachy-mini-app)
+- [Configuration](#configuration)
+- [Speech Backends](#speech-backends)
+- [Installation](#installation)
+- [Scripts](#scripts)
+- [OpenClaw Skill](#openclaw-skill-action-skill)
+- [Development](#development)
+- [Key Files](#key-files)
+- [Acknowledgements](#acknowledgements)
+
+## Latency
+
+Measured on Jetson Orin NX with CUDA acceleration:
 
 | Stage | Engine | Latency |
 |-------|--------|---------|
@@ -37,7 +103,7 @@ Both modes share the same speech pipeline (sherpa-onnx STT/TTS), motion system, 
 | Text-to-speech | Matcha-TTS + Vocos (sherpa-onnx) | ~60ms TTFT |
 | **ASR + TTS combined** | | **~110ms** |
 
-Full voice-to-voice latency depends on LLM inference time (not included above).
+Full voice-to-voice latency (including LLM inference) is typically under 1 second with a 2B parameter model.
 
 ## AI Stack
 
@@ -51,154 +117,12 @@ Everything runs locally on edge hardware — no cloud APIs required. Here's the 
 | **LLM** | Conversational AI | [Qwen 3.5 2B](https://huggingface.co/Qwen) | CUDA (Ollama) | On-device; swappable to any Ollama/OpenClaw model |
 | **Vision AI** | Face Detection | [SCRFD-2.5D](https://github.com/deepinsight/insightface) | TensorRT | Real-time multi-face detection |
 | | Face Embedding | [ArcFace MBF (W600K)](https://github.com/deepinsight/insightface) | TensorRT | Face recognition & re-identification |
-| | Emotion Detection | [EfficientNet-B0](https://github.com/google/automl) | TensorRT | 7-class facial emotion classification |
-| | Face Tracking (client) | [MediaPipe Face Detection](https://ai.google.dev/edge/mediapipe/solutions/guide) | CPU | Gaze following on the robot side（as fallback） |
+| | Emotion Detection | [EfficientNet-B0 (AFEW)](https://github.com/HSE-asavchenko/face-emotion-recognition) | TensorRT | 8-class facial emotion classification |
+| | Face Tracking (client) | [MediaPipe Face Detection](https://ai.google.dev/edge/mediapipe/solutions/guide) | CPU | Gaze following on the robot side (as fallback) |
 
 The STT/TTS pipeline is powered by **[Jetson Voice](https://github.com/suharvest/jetson-local-voice)** — a standalone Docker service built on [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) that handles ASR and TTS inference with CUDA acceleration. VAD runs locally on the client side (reachy-claw) via ONNX Runtime — no network round-trip needed for speech detection. See [Edge Speech Service](#edge-speech-service) for setup.
 
 The vision pipeline runs in the **vision-trt** container using TensorRT-optimized models for face detection, embedding, and emotion recognition.
-
-## Key Features
-
-- **Two AI modes** — [Ollama](#ollama-mode-zero-setup) for zero-setup local LLM, or [OpenClaw](#openclaw-mode-full-featured) for tool use and multi-agent; switch with one config line
-- **Fully local pipeline** — Paraformer ASR + Matcha TTS via sherpa-onnx, runs on Jetson / RK3588 / any CUDA device, no cloud required
-- **Emotion-driven motion** — 14 distinct emotions mapped to head movements and antenna expressions
-- **Face tracking** — MediaPipe-powered gaze following so the robot looks at whoever is speaking
-- **Streaming TTS** — sentence-level streaming for low-latency responses
-- **Robust barge-in** — 3-layer noise filtering (energy gate + VAD threshold + cooldown) for reliable interrupts even in noisy environments
-- **Monologue mode** — robot mumbles to itself about what it sees; vision-only motor control, no LLM emotion jitter
-- **Runtime config persistence** — dashboard settings (mode, prompts, volume, motor) survive container restarts via `runtime-overrides.yaml`
-- **Pluggable backends** — swap STT/TTS/VAD/LLM without changing code (Paraformer, Matcha, Whisper, ElevenLabs, Ollama, OpenClaw, and more)
-- **Plugin architecture** — Motion, Conversation, FaceTracker, Dashboard, and VisionClient as independent plugins
-- **Flexible deployment** — standalone mode, simulator, direct connection, or via Reachy Mini daemon
-
-## Table of Contents
-
-- [AI Stack](#ai-stack)
-- [Quickstart](#quickstart)
-  - [Ollama Mode (zero setup)](#ollama-mode-zero-setup)
-  - [OpenClaw Mode (full featured)](#openclaw-mode-full-featured)
-- [Architecture](#architecture)
-- [Edge Speech Service](#edge-speech-service)
-- [Running as a Reachy Mini App](#running-as-a-reachy-mini-app)
-- [Configuration](#configuration)
-- [Speech Backends](#speech-backends)
-- [Installation](#installation)
-- [Scripts](#scripts)
-- [OpenClaw Skill](#openclaw-skill-action-skill)
-- [Development](#development)
-- [Key Files](#key-files)
-- [Acknowledgements](#acknowledgements)
-
-## Quickstart
-
-```bash
-git clone https://github.com/suharvest/reachy-claw.git
-cd reachy-claw
-uv sync --extra dev --extra audio
-```
-
-### Ollama Mode (zero setup)
-
-No gateway needed. Just install [Ollama](https://ollama.com/), pull a model, and go:
-
-```bash
-ollama pull qwen3.5:2b        # or any model you like
-```
-
-```yaml
-# reachy-claw.yaml
-llm:
-  backend: ollama
-  model: qwen3.5:2b
-```
-
-```bash
-uv run reachy-claw
-```
-
-That's it — the robot talks using a local LLM. No cloud, no gateway, no extra services.
-
-Want a bigger model? Just change the model name:
-
-```yaml
-llm:
-  model: llama3.2:3b       # English-focused
-  model: qwen3.5:8b        # bigger, smarter, bilingual
-  model: gemma3:4b          # Google's compact model
-```
-
-Ollama mode supports configurable conversation history and custom system prompts:
-
-```yaml
-llm:
-  backend: ollama
-  model: qwen3.5:2b
-  max_history: 5             # remember last 5 turns (0 = stateless)
-  system_prompt: "You are a friendly robot assistant. Keep answers short."
-  temperature: 0.7
-```
-
-### OpenClaw Mode (full featured)
-
-For tool use, LLM-driven emotions, and multi-agent capabilities, use [OpenClaw](https://github.com/ArturSkowronski/openclaw) as the AI backend:
-
-```yaml
-# reachy-claw.yaml
-llm:
-  backend: gateway           # this is the default
-
-gateway:
-  host: 127.0.0.1
-  port: 18790
-```
-
-```bash
-# Start OpenClaw gateway first (separate terminal)
-cd /path/to/openclaw && node scripts/run-node.mjs gateway
-
-# Then start reachy-claw
-uv run reachy-claw
-```
-
-OpenClaw unlocks features that Ollama mode can't do:
-- **Robot tool use** — the LLM can command head movements, dances, camera capture
-- **Rich emotions** — `[emotion:happy]` tags in LLM output drive head+antenna expressions
-- **Multi-turn sessions** — full conversation context managed by OpenClaw
-- **Multi-agent** — connect multiple robots or services to the same gateway
-
-### With Edge Speech Service (Jetson)
-
-Both modes work with the [Jetson Voice](https://github.com/suharvest/jetson-local-voice) speech service for low-latency STT/TTS:
-
-```bash
-uv run reachy-claw \
-  --stt paraformer-streaming \
-  --tts matcha \
-  --speech-url http://<jetson-ip>:8621
-```
-
-### Monologue Mode (exhibition)
-
-The robot mumbles to itself about what it sees — no user interaction needed. Great for exhibition demos:
-
-```yaml
-conversation:
-  mode: monologue
-  monologue_interval: 5.0   # seconds between utterances
-```
-
-In monologue mode, only the vision pipeline (camera emotions) drives motor expressions — LLM emotion tags are ignored to prevent motor jitter.
-
-### Other modes
-
-```bash
-# Standalone mode (no LLM, echoes what it heard — for testing audio pipeline)
-uv run reachy-claw --standalone
-
-# Robot demo mode (movement demo, no conversation)
-uv run reachy-claw --demo
-```
 
 ## Architecture
 
@@ -404,11 +328,13 @@ In daemon mode, the Reachy Mini connection is managed by the daemon and passed t
 
 ## Configuration
 
+Most settings can be changed live through the [Dashboard](#dashboard) — no restart needed. For initial setup or headless deployment, use the YAML config file.
+
 Configuration is layered (highest priority wins):
 
-**CLI args > Environment variables > Runtime overrides > YAML config file > Defaults**
+**CLI args > Environment variables > Dashboard overrides > YAML config file > Defaults**
 
-Runtime overrides (`runtime-overrides.yaml`) are saved automatically when you change settings via the dashboard UI. They persist across container restarts when `DATA_DIR` is mounted as a Docker volume.
+Dashboard changes are saved to `runtime-overrides.yaml` automatically and persist across restarts.
 
 ### YAML config file
 

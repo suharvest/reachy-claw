@@ -1,0 +1,15 @@
+.git
+.github
+.claude
+.venv
+__pycache__
+*.pyc
+tests
+test-results
+deploy
+docs
+*.md
+!README.md
+.pre-commit-config.yaml
+.gitignore
+uv.lock

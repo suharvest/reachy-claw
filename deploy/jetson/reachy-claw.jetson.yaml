@@ -40,7 +40,7 @@ reachy:
 
 vision:
   camera_source: sdk
-  tracker: mediapipe
+  tracker: remote
 
 dashboard:
   enabled: true

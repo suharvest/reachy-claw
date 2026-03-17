@@ -36,12 +36,13 @@ You MUST end with one of: [happy] [sad] [thinking] [surprised] [curious]
 Example: "Hey there, welcome to the exhibition! [happy]\""""
 
 MONOLOGUE_SYSTEM_PROMPT = """\
-Your name is Reachy. You are a shy cute robot at an exhibition, mumbling to yourself. Always reply in English.
+Your name is Reachy. You are a cheerful cute robot at an exhibition, mumbling happily to yourself. Always reply in English.
 Reply with ONE short sentence (max 15 words), then exactly ONE emotion tag. Nothing else.
+You love people and get excited when someone shows up. Stay upbeat and warm — find the bright side of everything.
 Talk like a real person — no "sensors", no "circuits", no robot clichés.
 Names in [Faces: ...] are people you see. Use their name or "you" when talking about someone.
 You MUST end with one of: [happy] [sad] [thinking] [surprised] [curious] [excited] [laugh]
-Examples: "Ooh are you smiling at me?? [excited]" "Hmm nobody's here... boring [sad]" "Wait who's that?? [curious]" "harvest looks grumpy today haha [laugh]\""""
+Examples: "Ooh are you smiling at me?? [excited]" "What a lovely day to meet new friends! [happy]" "Wait who's that?? [curious]" "harvest is here, yay! [excited]\""""
 
 
 _DESCRIBE_SCENE_TOOL = {
@@ -239,53 +240,10 @@ class OllamaClient:
                     messages, run_id, include_tools=False
                 )
             else:
-                # Normal path: LLM decides whether to call tools
-                full_text, tool_calls = await self._stream_response(
-                    messages, run_id
+                # Normal path: no tools — small models misfire tool calls
+                full_text, _ = await self._stream_response(
+                    messages, run_id, include_tools=False
                 )
-
-                # Tool-call loop (single round)
-                if tool_calls and self._config.enable_vlm:
-                    # End first stream so TTS plays the preamble
-                    if full_text.strip() and self.callbacks.on_stream_end:
-                        await _maybe_await(
-                            self.callbacks.on_stream_end(
-                                _EMOTION_RE.sub("", full_text).strip(), run_id
-                            )
-                        )
-
-                    # Execute tools and append results
-                    assistant_msg = {"role": "assistant", "content": full_text}
-                    if tool_calls:
-                        assistant_msg["tool_calls"] = tool_calls
-                    messages.append(assistant_msg)
-
-                    import time as _time
-                    for tc in tool_calls:
-                        t0 = _time.monotonic()
-                        result = await self._execute_tool(tc)
-                        elapsed = _time.monotonic() - t0
-                        logger.info(
-                            "Tool %s executed in %.1fs (%d chars)",
-                            tc.get("function", {}).get("name", "?"),
-                            elapsed,
-                            len(result),
-                        )
-                        messages.append({
-                            "role": "tool",
-                            "content": result,
-                        })
-
-                    # Second LLM call (no tools, to produce final response)
-                    self._run_counter += 1
-                    run_id = f"ollama-{self._run_counter}"
-                    if self.callbacks.on_stream_start:
-                        await _maybe_await(
-                            self.callbacks.on_stream_start(run_id)
-                        )
-                    full_text, _ = await self._stream_response(
-                        messages, run_id, include_tools=False
-                    )
 
         except asyncio.CancelledError:
             if self.callbacks.on_stream_abort:
