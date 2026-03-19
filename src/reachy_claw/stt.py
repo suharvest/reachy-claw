@@ -468,6 +468,11 @@ class ParaformerStreamingSTT(STTBackend):
 
         self._partial_text = ""
         self._final_text = ""
+        # Always close WS after finalize — the server's stream is done and
+        # won't read further data.  Leaving it open causes start_stream()
+        # to reuse a dead connection, losing the first word of the next
+        # utterance.
+        self._close_ws()
         return result
 
     def cancel_stream(self) -> None:

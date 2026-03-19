@@ -851,9 +851,11 @@ class ConversationPlugin(Plugin):
         barge_in_count = 0
         barge_in_chunks: list[np.ndarray] = []  # audio from barge-in detection
         # Pre-roll: ring buffer of recent audio during SPEAKING/THINKING.
-        # ~500ms at 1024/16kHz = 8 frames.  On barge-in, these are replayed
-        # to STT so the start of the user's utterance isn't lost.
-        pre_roll: collections.deque[np.ndarray] = collections.deque(maxlen=8)
+        # ~640ms at 1024/16kHz = 10 frames.  On barge-in, pre_roll +
+        # barge_in_chunks are replayed to STT so the start of the user's
+        # utterance isn't lost.  10 frames ensures Paraformer's 61-frame
+        # first-decode threshold (~610ms) is met even without barge_in_chunks.
+        pre_roll: collections.deque[np.ndarray] = collections.deque(maxlen=10)
         max_silence = int(self.app.config.silence_duration * self.app.config.sample_rate / 1024)
         max_frames = int(self.app.config.max_recording_duration * self.app.config.sample_rate / 1024)
         confirm_frames = self.app.config.barge_in_confirm_frames
@@ -948,9 +950,10 @@ class ConversationPlugin(Plugin):
                     await self._fire_interrupt()
                     self._set_state(ConvState.LISTENING)
                     if streaming_stt:
-                        # Restart STT and replay pre-roll buffer (~500ms)
-                        # so the start of the user's utterance isn't lost.
-                        replay = list(pre_roll)
+                        # Restart STT and replay pre-roll (~640ms) + confirmed
+                        # barge-in speech (~128ms) so the utterance start and
+                        # the VAD-verified speech aren't lost.
+                        replay = list(pre_roll) + list(barge_in_chunks)
                         def _restart_stt():
                             self._stt.cancel_stream()
                             self._stt.start_stream(self.app.config.sample_rate)
@@ -989,22 +992,31 @@ class ConversationPlugin(Plugin):
                 speech_frames.append(chunk)
                 silence_count = 0
 
-                # If ASR sent is_final, skip silence wait and process immediately
+                # If ASR sent is_final, skip silence wait and process immediately.
+                # The server already reset its stream after endpoint — no WS
+                # restart needed.  Restarting would add 50-200ms latency during
+                # which audio is lost, causing first-word drops.
                 if streaming_stt and partial and partial.is_final:
                     text = partial.text
-                    logger.info(f"ASR is_final received: \"{text}\"")
-                    speech_frames = []
-                    silence_count = 0
-                    barge_in_count = 0
-
-                    if self._vad:
-                        self._vad.reset()
-                    # Reset STT and eagerly reconnect so next speech isn't lost
-                    await asyncio.to_thread(self._restart_stt_stream)
-                    self._spawn_task(
-                        self._process_and_send(text),
-                        name="conversation.process_and_send",
-                    )
+                    self._stt._partial_text = ""
+                    self._stt._final_text = ""
+                    if text.strip():
+                        # Real result — reset all state and process.
+                        speech_frames = []
+                        silence_count = 0
+                        barge_in_count = 0
+                        if self._vad:
+                            self._vad.reset()
+                        logger.info(f"ASR is_final received: \"{text}\"")
+                        self._spawn_task(
+                            self._process_and_send(text),
+                            name="conversation.process_and_send",
+                        )
+                    else:
+                        # Empty endpoint from stale server silence — ignore.
+                        # Do NOT reset speech_frames/silence_count; real speech
+                        # is still in progress and would be lost.
+                        logger.debug("ASR empty endpoint — continuing")
                     continue
 
             elif self._state == ConvState.LISTENING:
@@ -1012,22 +1024,26 @@ class ConversationPlugin(Plugin):
                 speech_frames.append(chunk)
                 # Audio already fed to STT at top of this block
 
-                # Check if STT sent is_final during silence
+                # Check if STT sent is_final during silence.
+                # No WS restart — server already reset its stream.
                 if streaming_stt and partial and partial.is_final:
                     text = partial.text
-                    logger.info(f"ASR is_final during silence: \"{text}\"")
-                    speech_frames = []
-                    silence_count = 0
-                    barge_in_count = 0
-
-                    if self._vad:
-                        self._vad.reset()
-                    # Reset STT and eagerly reconnect so next speech isn't lost
-                    await asyncio.to_thread(self._restart_stt_stream)
-                    self._spawn_task(
-                        self._process_and_send(text),
-                        name="conversation.process_and_send",
-                    )
+                    self._stt._partial_text = ""
+                    self._stt._final_text = ""
+                    if text.strip():
+                        speech_frames = []
+                        silence_count = 0
+                        barge_in_count = 0
+                        if self._vad:
+                            self._vad.reset()
+                        logger.info(f"ASR is_final during silence: \"{text}\"")
+                        self._spawn_task(
+                            self._process_and_send(text),
+                            name="conversation.process_and_send",
+                        )
+                    else:
+                        # Empty endpoint — don't reset counters.
+                        logger.debug("ASR empty endpoint during silence — continuing")
                     continue
 
                 if silence_count >= max_silence or len(speech_frames) >= max_frames:
