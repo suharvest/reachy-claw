@@ -160,8 +160,9 @@ class GstCameraCapture:
 
         # Retry loop — camera device may not be ready immediately after boot
         import time
-        max_retries = 10
-        for attempt in range(1, max_retries + 1):
+        attempt = 0
+        while True:
+            attempt += 1
             # Try HW pipeline first (nvvidconv + nvjpegenc)
             if self._try_hw_pipeline():
                 self._hw_pipeline = True
@@ -174,14 +175,10 @@ class GstCameraCapture:
                 logger.info("Camera capture started (CPU fallback: videoconvert)")
                 return True
 
-            if attempt < max_retries:
-                wait = min(attempt * 3, 15)  # 3,6,9,12,15,15,...  ~90s total
-                logger.warning(f"Camera start failed (attempt {attempt}/{max_retries}), retrying in {wait}s")
-                time.sleep(wait)
-                self._set_camera_format()  # re-set format before retry
-
-        logger.error("Failed to start camera capture after all retries")
-        return False
+            wait = min(attempt * 3, 30)  # 3,6,9,...,30,30,30,...
+            logger.warning(f"Camera start failed (attempt {attempt}), retrying in {wait}s")
+            time.sleep(wait)
+            self._set_camera_format()  # re-set format before retry
 
     def _try_hw_pipeline(self) -> bool:
         """HW pipeline: libnvv4l2 MJPEG decode → nvvidconv resize/colorspace.
