@@ -78,7 +78,14 @@ class DashboardPlugin(Plugin):
 
         # State polling loop (5Hz)
         while self._running:
-            await self._broadcast_robot_state()
+            try:
+                await asyncio.wait_for(
+                    self._broadcast_robot_state(), timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("broadcast_robot_state timed out, skipping")
+            except Exception as e:
+                logger.warning("broadcast_robot_state error: %s", e)
             await asyncio.sleep(0.2)
 
     async def stop(self) -> None:
@@ -514,14 +521,14 @@ class DashboardPlugin(Plugin):
         closed = []
         for ws in self._ws_clients:
             try:
-                await ws.send_str(payload)
+                await asyncio.wait_for(ws.send_str(payload), timeout=2.0)
             except Exception:
                 closed.append(ws)
         for ws in closed:
             self._ws_clients.discard(ws)
 
     async def _broadcast_robot_state(self) -> None:
-        target = self.app.head_targets.get_fused_target()
+        target = await asyncio.to_thread(self.app.head_targets.get_fused_target)
         emotion = self.app.emotions._last_emotion
 
         # Get emotion mapping info
@@ -543,12 +550,19 @@ class DashboardPlugin(Plugin):
                 "description": expr.description,
             }
 
-        # Get current antenna positions from robot if available
+        # Get current antenna positions from robot if available.
+        # Run in thread with timeout — this is a synchronous gRPC call that
+        # can block the event loop if reachy-daemon is unresponsive.
         antenna = {"left": 0.0, "right": 0.0}
         if self.app.reachy:
             try:
                 import numpy as np
-                positions = self.app.reachy.get_present_antenna_joint_positions()
+                positions = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self.app.reachy.get_present_antenna_joint_positions
+                    ),
+                    timeout=1.0,
+                )
                 # SDK returns [right, left] in radians
                 antenna = {
                     "left": float(np.degrees(positions[1])),

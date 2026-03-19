@@ -278,8 +278,6 @@ function handleDashboardMsg(msg) {
             motorPreset = msg.preset || 'moderate';
             document.getElementById('motor-toggle').classList.toggle('active', motorEnabled);
             document.getElementById('motor-presets').classList.toggle('disabled', !motorEnabled);
-            document.querySelector('.motor-sleep-label').textContent =
-                motorEnabled ? 'Motor Enabled' : 'Motor Disabled (Sleep)';
             syncMotorPresetUI();
             updateMotorStatus();
             break;
@@ -1291,8 +1289,6 @@ function initMotor() {
         motorEnabled = !motorEnabled;
         toggle.classList.toggle('active', motorEnabled);
         presets.classList.toggle('disabled', !motorEnabled);
-        document.querySelector('.motor-sleep-label').textContent =
-            motorEnabled ? 'Motor Enabled' : 'Motor Disabled (Sleep)';
         updateMotorStatus();
         sendMotorState();
     };
