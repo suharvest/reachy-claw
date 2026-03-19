@@ -41,7 +41,7 @@ services:
         max-file: "3"
 
   reachy-claw:
-    image: sensecraft-missionpack.seeed.cn/solution/reachy-claw:v1.14
+    image: sensecraft-missionpack.seeed.cn/solution/reachy-claw:v1.15
     container_name: reachy-claw
     restart: unless-stopped
     network_mode: host
