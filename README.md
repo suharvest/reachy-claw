@@ -1,6 +1,6 @@
 # Reachy Claw
 
-**Talk to your [Reachy Mini](https://www.pollen-robotics.com/reachy-mini/) — sub-1s voice-to-voice, fully local with [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) + [Ollama](https://ollama.com/).**
+**Reachy Claw turns [Reachy Mini](https://www.pollen-robotics.com/reachy-mini/) into a fully local desktop AI robot that can listen, think, speak, emote, and react in real time.**
 
 [![CI](https://github.com/suharvest/reachy-claw/actions/workflows/ci.yml/badge.svg)](https://github.com/suharvest/reachy-claw/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
@@ -15,7 +15,7 @@
 
 <!-- TODO: Add a demo GIF below the logo showing the robot reacting to speech -->
 
-You speak, it listens, thinks, and responds — with emotions, head movements, and face tracking. No cloud, no subscription, everything runs on your own hardware.
+Powered by local voice infrastructure and compatible with both [Ollama](https://ollama.com/) and OpenClaw, it brings AI interaction out of the screen and into a physical robot experience.
 
 ## Quickstart
 
