@@ -250,6 +250,16 @@ class DesktopRobotClient:
                 future.set_exception(RuntimeError(reason))
         self._run_futures.clear()
 
+    async def _notify_disconnect(self) -> None:
+        """Fire a synthetic stream_abort so the plugin resets state on disconnect."""
+        if self.callbacks.on_stream_abort:
+            try:
+                await _maybe_await(
+                    self.callbacks.on_stream_abort("websocket_disconnected", "")
+                )
+            except Exception:
+                pass
+
     async def _listen(self) -> None:
         if not self._ws:
             return
@@ -269,6 +279,8 @@ class DesktopRobotClient:
         finally:
             self._fail_pending_runs("desktop-robot listener stopped")
             self._run_buffers.clear()
+            # Notify plugin so it can reset from THINKING/SPEAKING → IDLE
+            await self._notify_disconnect()
 
         # Auto-reconnect loop
         backoff = 1.0

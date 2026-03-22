@@ -73,9 +73,9 @@ class ConversationPlugin(Plugin):
         self._wake_detector: WakeWordDetector | None = None
         self._wobbler: HeadWobbler | None = None
 
-        # Queues connecting the four pipeline stages
-        self._stream_text_queue: asyncio.Queue[str | object | None] = asyncio.Queue()
-        self._sentence_queue: asyncio.Queue[SentenceItem | None] = asyncio.Queue()
+        # Queues connecting the four pipeline stages (bounded to prevent OOM)
+        self._stream_text_queue: asyncio.Queue[str | object | None] = asyncio.Queue(maxsize=200)
+        self._sentence_queue: asyncio.Queue[SentenceItem | None] = asyncio.Queue(maxsize=50)
         # Audio queue: (SentenceItem, list_of_chunks | None) — TTS worker feeds this
         self._audio_queue: asyncio.Queue[tuple[SentenceItem, list | None] | None] = asyncio.Queue(maxsize=3)
         self._interrupt_event = asyncio.Event()
@@ -93,6 +93,15 @@ class ConversationPlugin(Plugin):
         # Serialise _process_and_send so two concurrent utterances
         # don't fire overlapping LLM streams.
         self._send_lock = asyncio.Lock()
+
+        # Deferred task-completion announcements: task_completed may arrive
+        # while we're SPEAKING/LISTENING/THINKING.  We queue them and drain
+        # when we transition back to IDLE.
+        self._pending_announcements: list[str] = []
+
+        # Client-side watchdog: if we stay in THINKING for too long without
+        # receiving any delta, recover to IDLE.
+        self._thinking_watchdog_s: float = 30.0
 
         # Monologue mode state
         self._monologue_mode = False
@@ -325,6 +334,17 @@ class ConversationPlugin(Plugin):
             # a full monologue_interval gap for ASR to process user speech
             if old_state == ConvState.SPEAKING and new_state == ConvState.IDLE:
                 self._last_speech_time = time.monotonic()
+            # Drain deferred task-completion announcements when we go IDLE
+            if new_state == ConvState.IDLE and self._pending_announcements:
+                self._spawn_task(
+                    self._drain_pending_announcements(),
+                    name="drain-announcements",
+                )
+            # Client-side watchdog for THINKING state
+            if new_state == ConvState.THINKING:
+                self._spawn_task(
+                    self._thinking_watchdog(), name="thinking-watchdog"
+                )
             # Drive antenna animation from state changes (conversation mode only)
             if not self._monologue_mode:
                 emotion = self._STATE_EMOTION_MAP.get(new_state)
@@ -379,12 +399,17 @@ class ConversationPlugin(Plugin):
             logger.debug(f"Ignoring stale delta (run {run_id[:8]})")
             return
         if self._state == ConvState.THINKING:
-            # First delta = TTFT measurement point
+            # First delta = TTFT measurement point.
+            # Don't transition to SPEAKING yet — that happens when audio
+            # actually starts (_output_pipeline), to avoid premature barge-in
+            # cooldown before the robot is audible.
             if hasattr(self, "_t_send") and self._t_send:
                 ttft = (time.perf_counter() - self._t_send) * 1000
                 logger.info(f"TTFT: {ttft:.0f}ms (send → first delta)")
-            self._set_state(ConvState.SPEAKING)
-        await self._stream_text_queue.put(text)
+        try:
+            self._stream_text_queue.put_nowait(text)
+        except asyncio.QueueFull:
+            logger.warning("stream_text_queue full, dropping delta")
         self.app.events.emit("llm_delta", {"text": text, "run_id": run_id})
 
     async def _on_stream_end(self, full_text: str, run_id: str) -> None:
@@ -401,14 +426,17 @@ class ConversationPlugin(Plugin):
         self.app.events.emit("llm_end", {"full_text": full_text, "run_id": run_id})
 
     async def _on_stream_abort(self, reason: str, run_id: str) -> None:
-        if run_id != self._current_run_id:
+        # Empty run_id = synthetic abort from disconnect; always accept.
+        if run_id and run_id != self._current_run_id:
             logger.debug(f"Ignoring stale stream_abort (run {run_id[:8]})")
             return
         logger.info(f"Stream aborted: {reason}")
+        self._current_run_id = None
         await self._stream_text_queue.put(None)
-        # Emit llm_end so the frontend can finalize the streaming thought card
-        # (otherwise it stays with a blinking cursor until the next response).
         self.app.events.emit("llm_end", {"full_text": "", "run_id": run_id})
+        # Ensure we recover to IDLE so deferred announcements can proceed
+        if self._state in (ConvState.THINKING, ConvState.SPEAKING):
+            self._set_state(ConvState.IDLE)
 
     async def _on_tool_start(self, tool_name: str, run_id: str) -> None:
         logger.info(f"Tool started: {tool_name}")
@@ -421,10 +449,59 @@ class ConversationPlugin(Plugin):
 
     async def _on_task_completed(self, summary: str, task_run_id: str) -> None:
         logger.info(f"Background task completed: {summary[:100]}")
-        short = summary[:200] if len(summary) > 200 else summary
-        # Route notifications through the normal output queue to avoid
-        # blocking gateway listener callbacks on TTS playback.
-        await self._sentence_queue.put(SentenceItem(text=short, is_last=True))
+        prompt = (
+            "[system: 后台任务已完成。请用1-2句话简要播报任务结果，"
+            "让用户知道任务做了什么、结果如何。语气自然，像是在汇报工作。]"
+        )
+        if self._client and self._state == ConvState.IDLE:
+            # IDLE — announce immediately (serialised via _send_lock)
+            self._spawn_task(
+                self._announce_task_result(prompt),
+                name="announce-task",
+            )
+        else:
+            # Busy — queue for later when we transition back to IDLE
+            logger.info("Deferring task announcement (state=%s)", self._state.value)
+            self._pending_announcements.append(prompt)
+
+    async def _announce_task_result(self, prompt: str) -> None:
+        """Send a task-result announcement through the LLM, serialised."""
+        async with self._send_lock:
+            if not self._client:
+                return
+            logger.info("Announcing task result via LLM")
+            self._set_state(ConvState.THINKING)
+            self._t_send = time.perf_counter()
+            try:
+                await self._client.send_message_streaming(prompt)
+            except Exception as e:
+                logger.error(f"Failed to request task summary: {e}")
+                await self._sentence_queue.put(
+                    SentenceItem(text="后台任务已完成。", is_last=True)
+                )
+                self._set_state(ConvState.IDLE)
+
+    async def _thinking_watchdog(self) -> None:
+        """Recover from stuck THINKING state if no stream events arrive."""
+        await asyncio.sleep(self._thinking_watchdog_s)
+        if self._state == ConvState.THINKING:
+            logger.warning(
+                "THINKING watchdog fired after %.0fs — forcing IDLE",
+                self._thinking_watchdog_s,
+            )
+            self._current_run_id = None
+            self._set_state(ConvState.IDLE)
+
+    async def _drain_pending_announcements(self) -> None:
+        """Process queued task-completion announcements one by one."""
+        while self._pending_announcements:
+            prompt = self._pending_announcements.pop(0)
+            await self._announce_task_result(prompt)
+            # Wait for the LLM response + TTS to finish before next one.
+            # _announce_task_result sets state to THINKING; the streaming
+            # callbacks will move it through SPEAKING → IDLE, which will
+            # trigger another drain via _set_state.  So we just do one here.
+            break
 
     # ── Passive emotion channel ──────────────────────────────────────
 
@@ -1564,6 +1641,8 @@ class ConversationPlugin(Plugin):
         """
         logger.info("Firing interrupt")
         self._interrupt_event.set()
+        # Invalidate current run so stale deltas arriving after drain are rejected
+        self._current_run_id = None
 
         # Stop playback and drain queues immediately (no awaits)
         self._stop_gst_playback_sync()
