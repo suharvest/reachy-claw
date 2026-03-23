@@ -1066,14 +1066,14 @@ class ConversationPlugin(Plugin):
                 chunk = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
 
             # ── SPEAKING state ──
-            if self._state == ConvState.SPEAKING:
+            if self._state == ConvState.SPEAKING and not self._interpreter_mode:
                 # Monologue mode: always listen in background (no barge-in)
                 if self._monologue_mode:
                     await self._bg_listen(chunk, streaming_stt)
                     continue
 
                 # Conversation mode: detect barge-in (3-layer defense)
-                if not self.app.config.barge_in_enabled:
+                elif not self.app.config.barge_in_enabled:
                     continue
 
                 # Layer 1: Cooldown — ignore early frames after TTS starts
@@ -1134,13 +1134,32 @@ class ConversationPlugin(Plugin):
                 continue
 
             # ── TRANSCRIBING / THINKING states ──
-            if self._state in (ConvState.TRANSCRIBING, ConvState.THINKING):
+            if self._state in (ConvState.TRANSCRIBING, ConvState.THINKING) and not self._interpreter_mode:
                 if self._monologue_mode:
                     await self._bg_listen(chunk, streaming_stt)
-                elif streaming_stt:
-                    # Keep feeding audio so STT has context when user speaks
-                    # next — prevents first-syllable loss after silence gap.
-                    await asyncio.to_thread(self._stt.feed_chunk, chunk)
+                    continue
+                else:
+                    if streaming_stt:
+                        # Keep feeding audio so STT has context when user speaks
+                        # next — prevents first-syllable loss after silence gap.
+                        await asyncio.to_thread(self._stt.feed_chunk, chunk)
+                    continue
+
+            # ── Interpreter continuous mode: feed ASR regardless of state ──
+            if self._interpreter_mode and streaming_stt:
+                partial = await asyncio.to_thread(self._stt.feed_chunk, chunk)
+                if partial and partial.text:
+                    logger.debug(f"Partial: \"{partial.text}\" (final={partial.is_final}, stable={partial.is_stable})")
+                    self.app.events.emit("asr_partial", {"text": partial.text})
+                    if partial.is_final and partial.text.strip():
+                        text = partial.text
+                        self._stt._partial_text = ""
+                        self._stt._final_text = ""
+                        logger.info(f"Interpreter is_final: \"{text}\"")
+                        self._spawn_task(
+                            self._process_and_send(text),
+                            name="interpreter.translate",
+                        )
                 continue
 
             # ── IDLE / LISTENING states: accumulate speech ──
@@ -1337,16 +1356,21 @@ class ConversationPlugin(Plugin):
         """Process transcribed text (wake word check etc.) and send to AI.
 
         Serialised via _send_lock so two rapid utterances don't fire
-        overlapping LLM streams.
+        overlapping LLM streams.  Interpreter mode skips the lock to
+        allow concurrent translations.
         """
-        async with self._send_lock:
+        if self._interpreter_mode:
             await self._process_and_send_inner(text)
+        else:
+            async with self._send_lock:
+                await self._process_and_send_inner(text)
 
     async def _process_and_send_inner(self, text: str) -> None:
         if not text or not text.strip():
             logger.info("(no speech detected)")
             self.app.events.emit("asr_final", {"text": ""})
-            self._set_state(ConvState.IDLE)
+            if not self._interpreter_mode:
+                self._set_state(ConvState.IDLE)
             return
 
         # Filter out background noise transcriptions.
@@ -1362,7 +1386,8 @@ class ConversationPlugin(Plugin):
             if len(words) >= 3 and len(unique_words) <= 2:
                 logger.info(f'Ignoring repetitive noise: "{stripped}"')
                 self.app.events.emit("asr_final", {"text": ""})
-                self._set_state(ConvState.IDLE)
+                if not self._interpreter_mode:
+                    self._set_state(ConvState.IDLE)
                 return
 
         logger.info(f'You said: "{text}"')
@@ -1409,14 +1434,15 @@ class ConversationPlugin(Plugin):
             if ctx:
                 text = f"[Faces: {ctx}]\n{text}"
         logger.info("Sending to AI...")
-        self._set_state(ConvState.THINKING)
+        if not self._interpreter_mode:
+            self._set_state(ConvState.THINKING)
         self._t_send = time.perf_counter()
         self._last_speech_time = time.monotonic()
 
         if self.app.config.play_emotions and not self._monologue_mode and not self._interpreter_mode:
             self.app.emotions.queue_emotion("thinking")
 
-        if self._client:
+        if self._client and not self._interpreter_mode:
             await self._client.send_state_change("thinking")
 
         try:
@@ -1426,7 +1452,8 @@ class ConversationPlugin(Plugin):
             self.app.events.emit("asr_final", {"text": ""})
             if self.app.config.play_emotions and not self._monologue_mode:
                 self.app.emotions.queue_emotion("sad")
-            self._set_state(ConvState.IDLE)
+            if not self._interpreter_mode:
+                self._set_state(ConvState.IDLE)
 
     async def _process_and_send_raw(self, text: str) -> None:
         """Send pre-composed text directly to LLM (used by monologue timer)."""
