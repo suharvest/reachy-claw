@@ -400,7 +400,8 @@ class ConversationPlugin(Plugin):
     async def _on_stream_start(self, run_id: str) -> None:
         logger.debug(f"Stream started: {run_id}")
         self._current_run_id = run_id
-        self._set_state(ConvState.THINKING)
+        if not self._interpreter_mode:
+            self._set_state(ConvState.THINKING)
         _drain_queue(self._stream_text_queue)
         # In-band reset: accumulator will discard stale buffer when it sees this
         await self._stream_text_queue.put(_RESET_BUFFER)
@@ -446,7 +447,7 @@ class ConversationPlugin(Plugin):
         await self._stream_text_queue.put(None)
         self.app.events.emit("llm_end", {"full_text": "", "run_id": run_id})
         # Ensure we recover to IDLE so deferred announcements can proceed
-        if self._state in (ConvState.THINKING, ConvState.SPEAKING):
+        if self._state in (ConvState.THINKING, ConvState.SPEAKING) and not self._interpreter_mode:
             self._set_state(ConvState.IDLE)
 
     async def _on_tool_start(self, tool_name: str, run_id: str) -> None:
@@ -686,6 +687,10 @@ class ConversationPlugin(Plugin):
                 )
                 self._client._config.skip_emotion_extraction = False
                 self._client._config.monologue_mode = False
+                # Restore settings that interpreter may have overridden
+                self._client._config.max_history = self.app.config.ollama_max_history
+                self._client._config.temperature = self.app.config.ollama_temperature
+                self._client._config.enable_vlm = self.app.config.enable_vlm
             # Reset history on mode switch
             self._client._history.clear()
 
@@ -700,6 +705,9 @@ class ConversationPlugin(Plugin):
             task = getattr(self, '_monologue_timer_task', None)
             if task and not task.done():
                 task.cancel()
+
+        if self._interpreter_mode and not isinstance(self._client, OllamaClient):
+            logger.warning("Interpreter mode requires Ollama backend; gateway does not support custom system prompts")
 
         logger.info(f"Conversation mode switched to: {mode}")
 
@@ -1027,6 +1035,9 @@ class ConversationPlugin(Plugin):
         max_frames = int(self.app.config.max_recording_duration * self.app.config.sample_rate / 1024)
         confirm_frames = self.app.config.barge_in_confirm_frames
         streaming_stt = self._stt.supports_streaming
+        # Interpreter mode: track stable text for timeout fallback
+        interp_last_stable = ""
+        interp_stable_since = 0.0
         # Streaming STT: connect once at start, feed continuously
         if streaming_stt:
             await asyncio.to_thread(
@@ -1151,11 +1162,29 @@ class ConversationPlugin(Plugin):
                 if partial and partial.text:
                     logger.debug(f"Partial: \"{partial.text}\" (final={partial.is_final}, stable={partial.is_stable})")
                     self.app.events.emit("asr_partial", {"text": partial.text})
+
+                    should_translate = False
                     if partial.is_final and partial.text.strip():
+                        should_translate = True
+                    elif partial.is_stable and partial.text.strip():
+                        # Timeout fallback: if stable text unchanged for 3s,
+                        # treat as final (handles ASR backends that rarely
+                        # emit is_final).
+                        if partial.text != interp_last_stable:
+                            interp_last_stable = partial.text
+                            interp_stable_since = time.monotonic()
+                        elif time.monotonic() - interp_stable_since > 3.0:
+                            should_translate = True
+                            logger.info("Interpreter stable timeout fallback")
+                    else:
+                        interp_last_stable = ""
+
+                    if should_translate:
                         text = partial.text
                         self._stt._partial_text = ""
                         self._stt._final_text = ""
-                        logger.info(f"Interpreter is_final: \"{text}\"")
+                        interp_last_stable = ""
+                        logger.info(f"Interpreter translate: \"{text}\"")
                         self._spawn_task(
                             self._process_and_send(text),
                             name="interpreter.translate",
@@ -1356,14 +1385,11 @@ class ConversationPlugin(Plugin):
         """Process transcribed text (wake word check etc.) and send to AI.
 
         Serialised via _send_lock so two rapid utterances don't fire
-        overlapping LLM streams.  Interpreter mode skips the lock to
-        allow concurrent translations.
+        overlapping LLM streams.  In interpreter mode, ASR keeps running
+        but translations are still serialised to avoid pipeline conflicts.
         """
-        if self._interpreter_mode:
+        async with self._send_lock:
             await self._process_and_send_inner(text)
-        else:
-            async with self._send_lock:
-                await self._process_and_send_inner(text)
 
     async def _process_and_send_inner(self, text: str) -> None:
         if not text or not text.strip():
@@ -1393,8 +1419,8 @@ class ConversationPlugin(Plugin):
         logger.info(f'You said: "{text}"')
         self.app.events.emit("asr_final", {"text": text})
 
-        # Check wake word
-        if self._wake_detector and not self._conversation_active:
+        # Check wake word (skip in interpreter mode — always translate)
+        if self._wake_detector and not self._conversation_active and not self._interpreter_mode:
             if not self._wake_detector.detect(text):
                 logger.info(f'Waiting for wake word "{self.app.config.wake_word}"...')
                 self._set_state(ConvState.IDLE)
@@ -1416,8 +1442,8 @@ class ConversationPlugin(Plugin):
             self._set_state(ConvState.IDLE)
             return
 
-        # Standalone mode
-        if self.app.config.standalone_mode:
+        # Standalone mode (skip in interpreter mode)
+        if self.app.config.standalone_mode and not self._interpreter_mode:
             response = f"I heard you say: {text}"
             await self._sentence_queue.put(SentenceItem(text=response, is_last=True))
             self._set_state(ConvState.SPEAKING)
@@ -1737,9 +1763,10 @@ class ConversationPlugin(Plugin):
             self._wobbler.reset()
         # Skip IDLE transition if barge-in already moved us to LISTENING —
         # otherwise the dashboard briefly flickers LISTENING → IDLE → LISTENING.
-        if self._state != ConvState.LISTENING:
+        # Interpreter mode: audio loop manages its own flow, don't touch state.
+        if not self._interpreter_mode and self._state != ConvState.LISTENING:
             self._set_state(ConvState.IDLE)
-        if self._client:
+        if self._client and not self._interpreter_mode:
             try:
                 state = "stopped" if self._conversation_stopped else "listening"
                 await self._client.send_state_change(state)
