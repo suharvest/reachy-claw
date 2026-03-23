@@ -171,7 +171,7 @@ class DashboardPlugin(Plugin):
         msg_type = data.get("type")
         if msg_type == "set_mode":
             mode = data.get("mode", "conversation")
-            if mode not in ("conversation", "monologue"):
+            if mode not in ("conversation", "monologue", "interpreter"):
                 return
             conv = self.app.get_plugin("conversation")
             if conv and hasattr(conv, "switch_mode"):
@@ -179,18 +179,39 @@ class DashboardPlugin(Plugin):
             self._save_overrides(["conversation_mode"])
             await self._broadcast({"type": "mode_changed", "mode": mode})
 
+        elif msg_type == "set_interpreter_langs":
+            source = data.get("source", "Chinese")
+            target = data.get("target", "English")
+            self.app.config.interpreter_source_lang = source
+            self.app.config.interpreter_target_lang = target
+            # If currently in interpreter mode, re-apply with new languages
+            conv = self.app.get_plugin("conversation")
+            if conv and getattr(conv, "_interpreter_mode", False):
+                conv.switch_mode("interpreter")
+            self._save_overrides(["interpreter_source_lang", "interpreter_target_lang"])
+            await self._broadcast({
+                "type": "interpreter_langs_changed",
+                "source": source,
+                "target": target,
+            })
+
         elif msg_type == "get_prompts":
-            from ..llm import DEFAULT_SYSTEM_PROMPT, MONOLOGUE_SYSTEM_PROMPT
+            from ..llm import DEFAULT_SYSTEM_PROMPT, MONOLOGUE_SYSTEM_PROMPT, INTERPRETER_SYSTEM_PROMPT
 
             cfg = self.app.config
+            interp_default = INTERPRETER_SYSTEM_PROMPT.format(
+                source_lang=cfg.interpreter_source_lang,
+                target_lang=cfg.interpreter_target_lang,
+            )
             await self._broadcast({
                 "type": "prompts",
                 "conversation": cfg.ollama_system_prompt or DEFAULT_SYSTEM_PROMPT,
                 "monologue": cfg.ollama_monologue_prompt or MONOLOGUE_SYSTEM_PROMPT,
+                "interpreter": cfg.interpreter_prompt or interp_default,
             })
 
         elif msg_type == "set_prompt":
-            from ..llm import DEFAULT_SYSTEM_PROMPT, MONOLOGUE_SYSTEM_PROMPT, OllamaClient
+            from ..llm import DEFAULT_SYSTEM_PROMPT, MONOLOGUE_SYSTEM_PROMPT, INTERPRETER_SYSTEM_PROMPT, OllamaClient
 
             mode = data.get("mode")
             prompt = data.get("prompt", "").strip()
@@ -198,6 +219,8 @@ class DashboardPlugin(Plugin):
                 self.app.config.ollama_system_prompt = prompt
             elif mode == "monologue":
                 self.app.config.ollama_monologue_prompt = prompt
+            elif mode == "interpreter":
+                self.app.config.interpreter_prompt = prompt
             else:
                 return
 
@@ -205,13 +228,24 @@ class DashboardPlugin(Plugin):
             conv = self.app.get_plugin("conversation")
             if conv and hasattr(conv, "_client") and isinstance(conv._client, OllamaClient):
                 is_monologue = getattr(conv, "_monologue_mode", False)
-                if (mode == "monologue" and is_monologue) or (mode == "conversation" and not is_monologue):
+                is_interpreter = getattr(conv, "_interpreter_mode", False)
+                if mode == "interpreter" and is_interpreter:
+                    interp_default = INTERPRETER_SYSTEM_PROMPT.format(
+                        source_lang=self.app.config.interpreter_source_lang,
+                        target_lang=self.app.config.interpreter_target_lang,
+                    )
+                    conv._client._config.system_prompt = prompt or interp_default
+                elif (mode == "monologue" and is_monologue) or (mode == "conversation" and not is_monologue and not is_interpreter):
                     conv._client._config.system_prompt = prompt or (
                         MONOLOGUE_SYSTEM_PROMPT if is_monologue else DEFAULT_SYSTEM_PROMPT
                     )
 
-            field = "ollama_system_prompt" if mode == "conversation" else "ollama_monologue_prompt"
-            self._save_overrides([field])
+            field_map = {
+                "conversation": "ollama_system_prompt",
+                "monologue": "ollama_monologue_prompt",
+                "interpreter": "interpreter_prompt",
+            }
+            self._save_overrides([field_map[mode]])
             await self._broadcast({"type": "prompt_saved", "mode": mode})
 
         elif msg_type == "clear_captures":
@@ -304,6 +338,36 @@ class DashboardPlugin(Plugin):
                 f"{backend}_speed",
             ])
             await self._broadcast(self._get_voice_settings())
+
+        elif msg_type == "get_llm":
+            cfg = self.app.config
+            await self._broadcast({
+                "type": "llm_settings",
+                "backend": cfg.llm_backend,
+                "model": cfg.ollama_model,
+            })
+
+        elif msg_type == "set_llm":
+            backend = data.get("backend", self.app.config.llm_backend)
+            model = data.get("model")
+            conv = self.app.get_plugin("conversation")
+            if conv and hasattr(conv, "switch_backend"):
+                try:
+                    await conv.switch_backend(backend, model)
+                except Exception as e:
+                    logger.error("Backend switch failed: %s", e)
+                    await self._broadcast({"type": "toast", "text": f"Switch failed: {e}", "error": True})
+                    return
+            fields = ["llm_backend"]
+            if model:
+                self.app.config.ollama_model = model
+                fields.append("ollama_model")
+            self._save_overrides(fields)
+            await self._broadcast({
+                "type": "llm_settings",
+                "backend": self.app.config.llm_backend,
+                "model": self.app.config.ollama_model,
+            })
 
         elif msg_type == "set_vlm":
             enabled = bool(data.get("enabled", False))
@@ -593,6 +657,8 @@ class DashboardPlugin(Plugin):
             "capture_count": self._capture_count,
             "silero_threshold": self.app.config.silero_threshold,
             "barge_in_energy_threshold": self.app.config.barge_in_energy_threshold,
+            "llm_backend": self.app.config.llm_backend,
+            "ollama_model": self.app.config.ollama_model,
         })
 
     # ── EventBus callbacks ────────────────────────────────────────────

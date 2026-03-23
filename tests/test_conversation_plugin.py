@@ -792,6 +792,45 @@ class TestSwitchMode:
         assert plugin._monologue_mode is True
 
 
+    def test_interpreter_mode_disables_barge_in(self, standalone_app):
+        plugin = ConversationPlugin(standalone_app)
+        standalone_app.config.barge_in_enabled = True
+
+        plugin.switch_mode("interpreter")
+
+        assert standalone_app.config.barge_in_enabled is False
+        assert plugin._interpreter_mode is True
+        assert plugin._monologue_mode is False
+
+    def test_interpreter_to_conversation_restores_barge_in(self, standalone_app):
+        plugin = ConversationPlugin(standalone_app)
+
+        plugin.switch_mode("interpreter")
+        assert plugin._interpreter_mode is True
+
+        plugin.switch_mode("conversation")
+        assert plugin._interpreter_mode is False
+        assert standalone_app.config.barge_in_enabled is True
+
+    def test_interpreter_mode_ollama_config(self, standalone_app):
+        """Interpreter mode sets correct OllamaClient config."""
+        from reachy_claw.llm import OllamaClient, OllamaConfig
+
+        plugin = ConversationPlugin(standalone_app)
+        plugin._client = OllamaClient(OllamaConfig())
+        standalone_app.config.interpreter_source_lang = "Chinese"
+        standalone_app.config.interpreter_target_lang = "English"
+
+        plugin.switch_mode("interpreter")
+
+        assert plugin._client._config.skip_emotion_extraction is True
+        assert plugin._client._config.max_history == 0
+        assert plugin._client._config.temperature == 0.3
+        assert plugin._client._config.monologue_mode is False
+        assert "Chinese" in plugin._client._config.system_prompt
+        assert "English" in plugin._client._config.system_prompt
+
+
 # ── Sentence accumulator: RESET_BUFFER clears buffer ────────────────
 
 

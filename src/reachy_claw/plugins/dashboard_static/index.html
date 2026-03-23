@@ -114,8 +114,42 @@
                             <p>Inner monologue mode. Robot observes and narrates thoughts.</p>
                         </div>
                     </label>
+                    <label class="mode-option" data-mode="interpreter">
+                        <input type="radio" name="mode" value="interpreter">
+                        <div class="mode-radio"></div>
+                        <div class="mode-info">
+                            <h3>Interpreter</h3>
+                            <p>Simultaneous interpretation. Translates speech in real time.</p>
+                        </div>
+                    </label>
                 </div>
                 <div class="mode-status" id="mode-status">Current: conversation</div>
+                <div class="interpreter-settings" id="interpreter-settings" style="display:none">
+                    <div class="toggle-row">
+                        <span class="toggle-label">Source Language</span>
+                        <select id="interpreter-source" class="lang-select">
+                            <option value="Chinese" selected>Chinese</option>
+                            <option value="English">English</option>
+                            <option value="Japanese">Japanese</option>
+                            <option value="Korean">Korean</option>
+                            <option value="French">French</option>
+                            <option value="German">German</option>
+                            <option value="Spanish">Spanish</option>
+                        </select>
+                    </div>
+                    <div class="toggle-row">
+                        <span class="toggle-label">Target Language</span>
+                        <select id="interpreter-target" class="lang-select">
+                            <option value="Chinese">Chinese</option>
+                            <option value="English" selected>English</option>
+                            <option value="Japanese">Japanese</option>
+                            <option value="Korean">Korean</option>
+                            <option value="French">French</option>
+                            <option value="German">German</option>
+                            <option value="Spanish">Spanish</option>
+                        </select>
+                    </div>
+                </div>
                 <div class="mode-toggles" id="mode-toggles">
                     <div class="toggle-row">
                         <span class="toggle-label">Camera Vision (VLM)</span>
@@ -206,6 +240,24 @@
             </div>
             <div class="tab-pane" id="tab-detail">
                 <div class="detail-section">
+                    <h3>LLM</h3>
+                    <div class="toggle-row">
+                        <span class="toggle-label">Backend</span>
+                        <select id="llm-backend" class="lang-select">
+                            <option value="ollama">Ollama</option>
+                            <option value="gateway">OpenClaw</option>
+                        </select>
+                    </div>
+                    <div class="toggle-row" id="ollama-model-row">
+                        <span class="toggle-label">Model</span>
+                        <select id="ollama-model" class="lang-select">
+                            <option value="qwen3.5:0.8b">qwen3.5:0.8b</option>
+                            <option value="qwen3.5:2b-q4_K_M">qwen3.5:2b-q4_K_M</option>
+                            <option value="qwen3.5:4b">qwen3.5:4b</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="detail-section">
                     <h3>Voice</h3>
                     <div class="volume-row">
                         <span class="voice-label">Speaker ID</span>
@@ -286,6 +338,14 @@
                     <div class="prompt-actions">
                         <button class="action-btn" id="prompt-mono-reset">Reset Default</button>
                         <button class="enroll-btn" id="prompt-mono-save">Save</button>
+                    </div>
+                </div>
+                <div class="detail-section">
+                    <h3>Interpreter Prompt</h3>
+                    <textarea id="prompt-interpreter" rows="4" class="prompt-textarea"></textarea>
+                    <div class="prompt-actions">
+                        <button class="action-btn" id="prompt-interp-reset">Reset Default</button>
+                        <button class="enroll-btn" id="prompt-interp-save">Save</button>
                     </div>
                 </div>
             </div>

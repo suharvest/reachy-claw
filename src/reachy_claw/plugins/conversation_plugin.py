@@ -103,8 +103,9 @@ class ConversationPlugin(Plugin):
         # receiving any delta, recover to IDLE.
         self._thinking_watchdog_s: float = 30.0
 
-        # Monologue mode state
+        # Mode state
         self._monologue_mode = False
+        self._interpreter_mode = False
         self._last_speech_time: float = 0.0  # for monologue auto-trigger
         self._pending_speech: str | None = None  # speech heard while speaking (monologue)
         self._bg_speech_frames: list[np.ndarray] = []  # frames for bg listening
@@ -154,23 +155,28 @@ class ConversationPlugin(Plugin):
                 logger.info("Running in standalone mode - no server connection")
                 return
 
-            # Monologue mode setup
+            # Mode setup
             self._monologue_mode = config.conversation_mode == "monologue"
+            self._interpreter_mode = config.conversation_mode == "interpreter"
 
             if config.llm_backend == "ollama":
-                from ..llm import DEFAULT_SYSTEM_PROMPT
+                from ..llm import DEFAULT_SYSTEM_PROMPT, INTERPRETER_SYSTEM_PROMPT
 
-                if self._monologue_mode:
+                if self._interpreter_mode:
+                    system_prompt = config.interpreter_prompt or INTERPRETER_SYSTEM_PROMPT.format(
+                        source_lang=config.interpreter_source_lang,
+                        target_lang=config.interpreter_target_lang,
+                    )
+                    history = 0
+                    temperature = 0.3
+                elif self._monologue_mode:
                     system_prompt = config.ollama_monologue_prompt or MONOLOGUE_SYSTEM_PROMPT
+                    history = max(config.ollama_max_history, 5)
+                    temperature = max(config.ollama_temperature, 0.9)
                 else:
                     system_prompt = config.ollama_system_prompt or DEFAULT_SYSTEM_PROMPT
-
-                # Monologue needs history to avoid repeating itself
-                history = config.ollama_max_history
-                temperature = config.ollama_temperature
-                if self._monologue_mode:
-                    history = max(history, 5)
-                    temperature = max(temperature, 0.9)
+                    history = config.ollama_max_history
+                    temperature = config.ollama_temperature
 
                 ollama_cfg = OllamaConfig(
                     base_url=config.ollama_base_url,
@@ -178,7 +184,8 @@ class ConversationPlugin(Plugin):
                     system_prompt=system_prompt,
                     temperature=temperature,
                     max_history=history,
-                    enable_vlm=config.enable_vlm,
+                    skip_emotion_extraction=self._interpreter_mode,
+                    enable_vlm=config.enable_vlm and not self._interpreter_mode,
                     vlm_model=config.vlm_model,
                     vlm_prompt=config.vlm_prompt,
                 )
@@ -188,7 +195,11 @@ class ConversationPlugin(Plugin):
                 self._setup_callbacks()
                 if config.gateway_warmup:
                     await self._client.warmup_session()
-                mode_label = " (monologue)" if self._monologue_mode else ""
+                mode_label = (
+                    " (interpreter)" if self._interpreter_mode
+                    else " (monologue)" if self._monologue_mode
+                    else ""
+                )
                 logger.info(f"Using Ollama LLM: {config.ollama_model}{mode_label}")
             else:
                 self._client = DesktopRobotClient(config)
@@ -637,17 +648,31 @@ class ConversationPlugin(Plugin):
         return None
 
     def switch_mode(self, mode: str) -> None:
-        """Hot-switch between conversation and monologue modes."""
-        from ..llm import DEFAULT_SYSTEM_PROMPT
+        """Hot-switch between conversation, monologue, and interpreter modes."""
+        from ..llm import DEFAULT_SYSTEM_PROMPT, INTERPRETER_SYSTEM_PROMPT
 
         self._monologue_mode = mode == "monologue"
+        self._interpreter_mode = mode == "interpreter"
         self.app.config.conversation_mode = mode
-        # Conversation mode requires barge-in; monologue doesn't need it
-        if not self._monologue_mode:
+
+        # Conversation mode requires barge-in; interpreter/monologue don't
+        if mode == "conversation":
             self.app.config.barge_in_enabled = True
+        elif mode == "interpreter":
+            self.app.config.barge_in_enabled = False
 
         if isinstance(self._client, OllamaClient):
-            if self._monologue_mode:
+            if self._interpreter_mode:
+                self._client._config.system_prompt = self.app.config.interpreter_prompt or INTERPRETER_SYSTEM_PROMPT.format(
+                    source_lang=self.app.config.interpreter_source_lang,
+                    target_lang=self.app.config.interpreter_target_lang,
+                )
+                self._client._config.skip_emotion_extraction = True
+                self._client._config.monologue_mode = False
+                self._client._config.max_history = 0
+                self._client._config.temperature = 0.3
+                self._client._config.enable_vlm = False  # VLM overrides system prompt
+            elif self._monologue_mode:
                 self._client._config.system_prompt = (
                     self.app.config.ollama_monologue_prompt or MONOLOGUE_SYSTEM_PROMPT
                 )
@@ -677,6 +702,71 @@ class ConversationPlugin(Plugin):
                 task.cancel()
 
         logger.info(f"Conversation mode switched to: {mode}")
+
+    async def switch_backend(self, backend: str, model: str | None = None) -> None:
+        """Hot-switch LLM backend (ollama/gateway) or change Ollama model."""
+        config = self.app.config
+
+        if backend == config.llm_backend and model is None:
+            return  # no change
+
+        # Update model if specified (works live for Ollama without reconnect)
+        if model and backend == "ollama" and config.llm_backend == "ollama":
+            config.ollama_model = model
+            if isinstance(self._client, OllamaClient):
+                self._client._config.model = model
+                self._client._history.clear()
+                logger.info(f"Ollama model switched to: {model}")
+            return
+
+        # Full backend switch: disconnect old, connect new
+        if self._client:
+            await self._client.disconnect()
+            self._client = None
+
+        config.llm_backend = backend
+        if model:
+            config.ollama_model = model
+
+        if backend == "ollama":
+            from ..llm import DEFAULT_SYSTEM_PROMPT, INTERPRETER_SYSTEM_PROMPT
+
+            if self._interpreter_mode:
+                system_prompt = config.interpreter_prompt or INTERPRETER_SYSTEM_PROMPT.format(
+                    source_lang=config.interpreter_source_lang,
+                    target_lang=config.interpreter_target_lang,
+                )
+                history, temperature = 0, 0.3
+            elif self._monologue_mode:
+                system_prompt = config.ollama_monologue_prompt or MONOLOGUE_SYSTEM_PROMPT
+                history = max(config.ollama_max_history, 5)
+                temperature = max(config.ollama_temperature, 0.9)
+            else:
+                system_prompt = config.ollama_system_prompt or DEFAULT_SYSTEM_PROMPT
+                history = config.ollama_max_history
+                temperature = config.ollama_temperature
+
+            ollama_cfg = OllamaConfig(
+                base_url=config.ollama_base_url,
+                model=config.ollama_model,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_history=history,
+                skip_emotion_extraction=self._interpreter_mode,
+                enable_vlm=config.enable_vlm and not self._interpreter_mode,
+                vlm_model=config.vlm_model,
+                vlm_prompt=config.vlm_prompt,
+            )
+            self._client = OllamaClient(ollama_cfg)
+            self._client.capture_frame = self._capture_frame_b64
+            await self._client.connect()
+            self._setup_callbacks()
+            logger.info(f"Switched to Ollama: {config.ollama_model}")
+        else:
+            self._client = DesktopRobotClient(config)
+            await self._client.connect()
+            self._setup_callbacks()
+            logger.info("Switched to OpenClaw gateway")
 
     # ── Active robot commands (LLM tool calls) ────────────────────────
 
@@ -1309,7 +1399,9 @@ class ConversationPlugin(Plugin):
             return
 
         # Send to AI
-        if self._monologue_mode:
+        if self._interpreter_mode:
+            pass  # raw ASR text goes directly to translation LLM
+        elif self._monologue_mode:
             text = self._compose_monologue_prompt(text)
         else:
             # Inject face recognition context into conversation
@@ -1321,7 +1413,7 @@ class ConversationPlugin(Plugin):
         self._t_send = time.perf_counter()
         self._last_speech_time = time.monotonic()
 
-        if self.app.config.play_emotions and not self._monologue_mode:
+        if self.app.config.play_emotions and not self._monologue_mode and not self._interpreter_mode:
             self.app.emotions.queue_emotion("thinking")
 
         if self._client:

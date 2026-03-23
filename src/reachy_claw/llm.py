@@ -45,6 +45,11 @@ You MUST end with one of: [happy] [sad] [thinking] [surprised] [curious] [excite
 Examples: "Ooh are you smiling at me?? [excited]" "What a lovely day to meet new friends! [happy]" "Wait who's that?? [curious]" "harvest is here, yay! [excited]\""""
 
 
+INTERPRETER_SYSTEM_PROMPT = """\
+You are a simultaneous interpreter. Translate the following speech from {source_lang} to {target_lang}.
+Output ONLY the translated text. No explanation, no commentary, no emotion tags, no brackets."""
+
+
 _DESCRIBE_SCENE_TOOL = {
     "type": "function",
     "function": {

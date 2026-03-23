@@ -130,8 +130,11 @@ class Config:
     vision_identity_threshold: float = 0.4
 
     # Conversation mode
-    conversation_mode: str = "conversation"  # "conversation" | "monologue"
+    conversation_mode: str = "conversation"  # "conversation" | "monologue" | "interpreter"
     monologue_interval: float = 5.0  # seconds between auto-triggered monologues
+    interpreter_source_lang: str = "Chinese"  # source language for interpreter mode
+    interpreter_target_lang: str = "English"  # target language for interpreter mode
+    interpreter_prompt: str = ""  # empty = use default INTERPRETER_SYSTEM_PROMPT
 
     # Dashboard (exhibition UI)
     dashboard_enabled: bool = False

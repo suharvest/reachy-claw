@@ -240,13 +240,23 @@ function handleDashboardMsg(msg) {
             showToast('Mode: ' + msg.mode);
             break;
 
+        case 'interpreter_langs_changed':
+            document.getElementById('interpreter-source').value = msg.source;
+            document.getElementById('interpreter-target').value = msg.target;
+            break;
+
         case 'prompts':
             document.getElementById('prompt-conversation').value = msg.conversation || '';
             document.getElementById('prompt-monologue').value = msg.monologue || '';
+            document.getElementById('prompt-interpreter').value = msg.interpreter || '';
             break;
 
         case 'prompt_saved':
             showToast('Prompt saved: ' + msg.mode);
+            break;
+
+        case 'llm_settings':
+            syncLlmUI(msg.backend, msg.model);
             break;
 
         case 'volume':
@@ -502,6 +512,9 @@ function updateRobotState(msg) {
         if (el) { el.value = msg.barge_in_energy_threshold; }
         const lbl = document.getElementById('energy-threshold-value');
         if (lbl) { lbl.textContent = msg.barge_in_energy_threshold.toFixed(3); }
+    }
+    if (msg.llm_backend !== undefined) {
+        syncLlmUI(msg.llm_backend, msg.ollama_model);
     }
     document.getElementById('dot-robot').className = 'dot live';
 }
@@ -833,6 +846,44 @@ function initSettings() {
         };
     });
 
+    // Interpreter language selectors
+    const interpSrc = document.getElementById('interpreter-source');
+    const interpTgt = document.getElementById('interpreter-target');
+    if (interpSrc && interpTgt) {
+        const sendLangs = () => {
+            if (dashboardWs && dashboardWs.readyState === 1) {
+                dashboardWs.send(JSON.stringify({
+                    type: 'set_interpreter_langs',
+                    source: interpSrc.value,
+                    target: interpTgt.value,
+                }));
+            }
+        };
+        interpSrc.onchange = sendLangs;
+        interpTgt.onchange = sendLangs;
+    }
+
+    // LLM backend/model selection
+    const llmBackend = document.getElementById('llm-backend');
+    const ollamaModel = document.getElementById('ollama-model');
+    if (llmBackend) {
+        llmBackend.onchange = () => {
+            const backend = llmBackend.value;
+            const model = backend === 'ollama' ? ollamaModel.value : undefined;
+            if (dashboardWs && dashboardWs.readyState === 1) {
+                dashboardWs.send(JSON.stringify({ type: 'set_llm', backend, model }));
+            }
+            syncLlmUI(backend, model);
+        };
+    }
+    if (ollamaModel) {
+        ollamaModel.onchange = () => {
+            if (dashboardWs && dashboardWs.readyState === 1) {
+                dashboardWs.send(JSON.stringify({ type: 'set_llm', backend: 'ollama', model: ollamaModel.value }));
+            }
+        };
+    }
+
     // Live enroll
     document.getElementById('enroll-live-btn').onclick = enrollLive;
 
@@ -864,6 +915,11 @@ function initSettings() {
     document.getElementById('prompt-conv-reset').onclick = () => {
         document.getElementById('prompt-conversation').value = '';
         savePrompt('conversation', '');
+    };
+    document.getElementById('prompt-interp-save').onclick = () => savePrompt('interpreter');
+    document.getElementById('prompt-interp-reset').onclick = () => {
+        document.getElementById('prompt-interpreter').value = '';
+        savePrompt('interpreter', '');
     };
     document.getElementById('prompt-mono-reset').onclick = () => {
         document.getElementById('prompt-monologue').value = '';
@@ -1000,8 +1056,22 @@ function syncModeUI() {
     document.getElementById('mode-status').textContent = 'Current: ' + currentMode;
     const toggles = document.getElementById('mode-toggles');
     if (toggles) toggles.style.display = currentMode === 'conversation' ? '' : 'none';
+    const interpSettings = document.getElementById('interpreter-settings');
+    if (interpSettings) interpSettings.style.display = currentMode === 'interpreter' ? '' : 'none';
     const mindLabel = document.getElementById('mind-label');
-    if (mindLabel) mindLabel.textContent = currentMode === 'conversation' ? 'Says' : 'Mind';
+    if (mindLabel) {
+        mindLabel.textContent = currentMode === 'conversation' ? 'Says'
+            : currentMode === 'interpreter' ? 'Translation' : 'Mind';
+    }
+}
+
+function syncLlmUI(backend, model) {
+    const backendEl = document.getElementById('llm-backend');
+    const modelEl = document.getElementById('ollama-model');
+    const modelRow = document.getElementById('ollama-model-row');
+    if (backendEl) backendEl.value = backend;
+    if (modelRow) modelRow.style.display = backend === 'ollama' ? '' : 'none';
+    if (modelEl && model) modelEl.value = model;
 }
 
 function setMode(mode) {
@@ -1346,8 +1416,8 @@ function savePrompt(mode, text) {
         return;
     }
     if (text === undefined) {
-        const id = mode === 'conversation' ? 'prompt-conversation' : 'prompt-monologue';
-        text = document.getElementById(id).value;
+        const idMap = { conversation: 'prompt-conversation', monologue: 'prompt-monologue', interpreter: 'prompt-interpreter' };
+        text = document.getElementById(idMap[mode]).value;
     }
     dashboardWs.send(JSON.stringify({ type: 'set_prompt', mode, prompt: text }));
 }
