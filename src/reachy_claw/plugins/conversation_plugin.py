@@ -115,7 +115,7 @@ class _InterpreterSequencer:
             "model": self._config.ollama_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text},
+                {"role": "user", "content": f"Translate: \"{text}\""},
             ],
             "stream": False,
             "think": False,

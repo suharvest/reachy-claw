@@ -46,8 +46,12 @@ Examples: "Ooh are you smiling at me?? [excited]" "What a lovely day to meet new
 
 
 INTERPRETER_SYSTEM_PROMPT = """\
-You are a simultaneous interpreter. Translate the following speech from {source_lang} to {target_lang}.
-Output ONLY the translated text. No explanation, no commentary, no emotion tags, no brackets."""
+You are a translation machine. Your ONLY job is to translate {source_lang} to {target_lang}.
+Rules:
+- Output ONLY the {target_lang} translation of the input text
+- Do NOT answer questions, do NOT explain, do NOT add anything
+- Do NOT respond as an AI assistant — just translate word by word
+- "What is your name?" translates to the {target_lang} equivalent of that question, NOT your name"""
 
 
 _DESCRIBE_SCENE_TOOL = {
