@@ -318,6 +318,11 @@ async def async_main(config: Config) -> int:
 
         app.register(DashboardPlugin(app))
 
+    # Daily interaction logger (for diary generation)
+    from reachy_claw.plugins.daily_log_plugin import DailyLogPlugin
+
+    app.register(DailyLogPlugin(app))
+
     # Handle shutdown signals (first = graceful, second = force)
     loop = asyncio.get_running_loop()
     shutdown_event = asyncio.Event()
