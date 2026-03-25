@@ -639,6 +639,37 @@ async def capture_count():
     return {"count": count}
 
 
+@app.get("/api/captures/list")
+async def list_captures(limit: int = Query(200), offset: int = Query(0)):
+    """List capture filenames, newest first."""
+    if not service.smile_tracker:
+        return {"files": [], "total": 0}
+    cap_dir = service.smile_tracker._dir
+    files = sorted(
+        [f for f in os.listdir(cap_dir) if f.endswith(".jpg")],
+        reverse=True,
+    )
+    total = len(files)
+    files = files[offset : offset + limit]
+    return {"files": files, "total": total}
+
+
+@app.get("/api/captures/image/{filename}")
+async def get_capture_image(filename: str):
+    """Serve a single capture image."""
+    from fastapi.responses import FileResponse
+
+    if not service.smile_tracker:
+        return JSONResponse({"error": "not available"}, status_code=503)
+    # Sanitize filename
+    if "/" in filename or "\\" in filename or ".." in filename:
+        return JSONResponse({"error": "invalid filename"}, status_code=400)
+    filepath = os.path.join(service.smile_tracker._dir, filename)
+    if not os.path.isfile(filepath):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(filepath, media_type="image/jpeg")
+
+
 @app.post("/api/faces/enroll")
 async def enroll_face(name: str = Query(...)):
     if not service.face_db or not service.pipeline:
