@@ -21,6 +21,11 @@ from typing import Any, Coroutine
 
 import numpy as np
 
+try:
+    import httpx
+except ImportError:
+    httpx = None  # type: ignore[assignment]
+
 from ..audio import AudioCapture, WakeWordDetector
 from ..gateway import DesktopRobotClient
 from ..llm import OllamaClient, OllamaConfig, MONOLOGUE_SYSTEM_PROMPT
@@ -77,6 +82,8 @@ class _InterpreterSequencer:
         self._running = False
 
     async def start(self):
+        if httpx is None:
+            raise RuntimeError("httpx is required for interpreter mode — pip install httpx")
         self._http = httpx.AsyncClient(
             base_url=self._config.ollama_base_url,
             timeout=httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0),
