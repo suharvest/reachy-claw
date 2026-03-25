@@ -453,14 +453,21 @@ class DashboardPlugin(Plugin):
 
         elif msg_type == "diary_narrate_start":
             date = data.get("date", "")
+            # Enter narration mode — suppress conversation/monologue/interpreter
+            conv = self.app.get_plugin("conversation")
+            if conv and hasattr(conv, "enter_narration_mode"):
+                conv.enter_narration_mode()
             asyncio.create_task(self._narrate_diary(date))
 
         elif msg_type == "diary_narrate_stop":
             self._narration_active = False
-            # Interrupt TTS playback immediately
+            # Interrupt TTS and exit narration mode
             conv = self.app.get_plugin("conversation")
-            if conv and hasattr(conv, "stop_speaking"):
-                asyncio.create_task(conv.stop_speaking())
+            if conv:
+                if hasattr(conv, "stop_speaking"):
+                    asyncio.create_task(conv.stop_speaking())
+                if hasattr(conv, "exit_narration_mode"):
+                    conv.exit_narration_mode()
             # Notify frontend to close overlay
             await self._broadcast({"type": "diary_narrate_end"})
 
@@ -533,6 +540,10 @@ class DashboardPlugin(Plugin):
             await asyncio.sleep(2.0)
 
         self._narration_active = False
+        # Restore normal conversation mode
+        conv = self.app.get_plugin("conversation")
+        if conv and hasattr(conv, "exit_narration_mode"):
+            conv.exit_narration_mode()
         await self._broadcast({"type": "diary_narrate_end"})
 
     def _get_voice_settings(self) -> dict:

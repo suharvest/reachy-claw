@@ -207,6 +207,7 @@ class ConversationPlugin(Plugin):
         # Mode state
         self._monologue_mode = False
         self._interpreter_mode = False
+        self._narration_mode = False  # True during diary narration — suppresses conversation
         self._interp_sequencer: _InterpreterSequencer | None = None
         self._last_speech_time: float = 0.0  # for monologue auto-trigger
         self._pending_speech: str | None = None  # speech heard while speaking (monologue)
@@ -1536,6 +1537,14 @@ class ConversationPlugin(Plugin):
             self._set_state(ConvState.IDLE)
             return
 
+        # During diary narration, suppress conversation/monologue/interpreter responses.
+        # ASR still fires events (for daily logging) but we don't send to LLM.
+        if self._narration_mode:
+            logger.debug("Narration active — skipping LLM for: %s", text[:40])
+            self.app.events.emit("asr_final", {"text": text})
+            self._set_state(ConvState.IDLE)
+            return
+
         # Filter out background noise transcriptions.
         # STT often produces short repetitive fragments from ambient sound
         # (e.g. "SHE SAYS SHE", "THE THE", "HMM HMM HMM").
@@ -1642,8 +1651,8 @@ class ConversationPlugin(Plugin):
         while self._running:
             await asyncio.sleep(1.0)  # check every second
 
-            if not self._monologue_mode:
-                continue  # mode switched — stay alive but do nothing
+            if not self._monologue_mode or self._narration_mode:
+                continue  # mode switched or narration active — stay alive but do nothing
 
             if (
                 self._state != ConvState.IDLE
@@ -1943,6 +1952,26 @@ class ConversationPlugin(Plugin):
                 await asyncio.sleep(0.3)  # Small grace period
                 if not self.app.is_speaking:
                     break
+
+    def enter_narration_mode(self) -> None:
+        """Enter narration mode — suppress conversation, monologue, interpreter."""
+        if self._narration_mode:
+            return
+        self._narration_mode = True
+        logger.info("Entering narration mode — conversation suppressed")
+        # Interrupt any in-progress speech
+        self._interrupt_event.set()
+        self._stop_gst_playback_sync()
+        self.app.is_speaking = False
+        _drain_queue(self._sentence_queue)
+        _drain_queue(self._audio_queue)
+
+    def exit_narration_mode(self) -> None:
+        """Exit narration mode — resume normal conversation."""
+        if not self._narration_mode:
+            return
+        self._narration_mode = False
+        logger.info("Exiting narration mode — conversation resumed")
 
     async def stop_speaking(self) -> None:
         """Interrupt any ongoing TTS playback immediately."""
