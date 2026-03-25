@@ -46,6 +46,12 @@ class DashboardPlugin(Plugin):
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/ws", self._handle_ws)
         app.router.add_get("/stream", self._handle_stream_proxy)
+        # Diary API
+        app.router.add_get("/api/diaries", self._handle_diary_list)
+        app.router.add_get("/api/diary/{date}", self._handle_diary_get)
+        # Capture gallery proxy (same-origin for vision-trt)
+        app.router.add_get("/api/captures/list", self._proxy_captures_list)
+        app.router.add_get("/api/captures/image/{filename}", self._proxy_captures_image)
         app.router.add_static("/static", STATIC_DIR, show_index=False)
 
         self._runner = web.AppRunner(app)
@@ -143,6 +149,44 @@ class DashboardPlugin(Plugin):
         if not index_path.exists():
             return web.Response(text="Dashboard HTML not found", status=404)
         return web.FileResponse(index_path)
+
+    async def _handle_diary_list(self, request):
+        """Return list of available diary dates, sorted descending."""
+        from aiohttp import web
+
+        diary_dir = self._diary_dir()
+        if not diary_dir.exists():
+            return web.json_response({"dates": []})
+
+        dates = sorted(
+            [f.stem for f in diary_dir.glob("*.json") if f.stem[:4].isdigit()],
+            reverse=True,
+        )
+        return web.json_response({"dates": dates})
+
+    async def _handle_diary_get(self, request):
+        """Return diary JSON for a specific date."""
+        from aiohttp import web
+
+        date = request.match_info["date"]
+        diary_dir = self._diary_dir()
+
+        if date == "latest":
+            files = sorted(diary_dir.glob("*.json"), reverse=True) if diary_dir.exists() else []
+            if not files:
+                return web.json_response({"error": "No diaries found"}, status=404)
+            filepath = files[0]
+        else:
+            filepath = diary_dir / f"{date}.json"
+
+        if not filepath.exists():
+            return web.json_response({"error": f"No diary for {date}"}, status=404)
+
+        try:
+            data = json.loads(filepath.read_text(encoding="utf-8"))
+            return web.json_response(data)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
 
     async def _handle_ws(self, request):
         from aiohttp import web
@@ -407,6 +451,90 @@ class DashboardPlugin(Plugin):
         elif msg_type == "get_capture_info":
             await self._send_capture_info()
 
+        elif msg_type == "diary_narrate_start":
+            date = data.get("date", "")
+            asyncio.create_task(self._narrate_diary(date))
+
+        elif msg_type == "diary_narrate_stop":
+            self._narration_active = False
+            # Interrupt TTS playback immediately
+            conv = self.app.get_plugin("conversation")
+            if conv and hasattr(conv, "stop_speaking"):
+                asyncio.create_task(conv.stop_speaking())
+            # Notify frontend to close overlay
+            await self._broadcast({"type": "diary_narrate_end"})
+
+    # ── Diary Narration ─────────────────────────────────────────────
+
+    @staticmethod
+    def _diary_dir() -> Path:
+        """Return diary storage directory (DATA_DIR in Docker, ~/.reachy-claw/ locally)."""
+        import os
+
+        data_dir = os.environ.get("DATA_DIR")
+        if data_dir:
+            return Path(data_dir) / "diaries"
+        return Path.home() / ".reachy-claw" / "diaries"
+
+    _narration_active: bool = False
+
+    async def _narrate_diary(self, date: str) -> None:
+        """Read a diary aloud section by section via TTS."""
+        diary_dir = self._diary_dir()
+        filepath = diary_dir / f"{date}.json"
+        if not filepath.exists():
+            logger.warning("Narrate: no diary for %s", date)
+            return
+
+        try:
+            diary = json.loads(filepath.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning("Narrate: failed to read diary %s: %s", date, e)
+            return
+
+        self._narration_active = True
+        sections = diary.get("sections", [])
+
+        conv = self.app.get_plugin("conversation")
+
+        for section in sections:
+            if not self._narration_active:
+                break
+
+            section_id = section.get("id", "")
+            content = section.get("content", "")
+            if not content:
+                continue
+
+            # Notify frontend to highlight this section
+            await self._broadcast({
+                "type": "diary_narrate_focus",
+                "section_id": section_id,
+                "state": "speaking",
+            })
+
+            # Speak via TTS
+            if conv and hasattr(conv, "speak_text"):
+                try:
+                    await conv.speak_text(content)
+                except Exception as e:
+                    logger.warning("Narrate TTS error: %s", e)
+
+            if not self._narration_active:
+                break
+
+            await self._broadcast({
+                "type": "diary_narrate_focus",
+                "section_id": section_id,
+                "state": "done",
+            })
+
+            # Pause between sections for rhythm
+            await asyncio.sleep(2.0)
+
+        self._narration_active = False
+        await self._broadcast({"type": "diary_narrate_end"})
+
     def _get_voice_settings(self) -> dict:
         """Return current voice settings for the active TTS backend."""
         backend = self.app.config.tts_backend
@@ -549,6 +677,45 @@ class DashboardPlugin(Plugin):
                             logger.info("Restored capture count: %d", self._capture_count)
         except Exception as e:
             logger.debug("Could not restore capture count: %s", e)
+
+    def _vision_http_base(self) -> str:
+        """Return vision-trt HTTP base URL."""
+        vision_url = self.app.config.vision_service_url  # tcp://127.0.0.1:8631
+        host = vision_url.replace("tcp://", "").split(":")[0]
+        return f"http://{host}:8630"
+
+    async def _proxy_captures_list(self, request):
+        """Proxy capture list from vision-trt."""
+        from aiohttp import web, ClientSession, ClientTimeout
+
+        url = f"{self._vision_http_base()}/api/captures/list"
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=5)) as session:
+                async with session.get(url) as resp:
+                    data = await resp.json()
+                    return web.json_response(data)
+        except Exception as e:
+            return web.json_response({"files": [], "total": 0, "error": str(e)})
+
+    async def _proxy_captures_image(self, request):
+        """Proxy a single capture image from vision-trt."""
+        from aiohttp import web, ClientSession, ClientTimeout
+
+        filename = request.match_info["filename"]
+        url = f"{self._vision_http_base()}/api/captures/image/{filename}"
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=10)) as session:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        return web.Response(status=resp.status)
+                    body = await resp.read()
+                    return web.Response(
+                        body=body,
+                        content_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"},
+                    )
+        except Exception as e:
+            return web.Response(text=str(e), status=502)
 
     async def _handle_stream_proxy(self, request):
         """Proxy MJPEG stream from vision-trt (same-origin for browser)."""

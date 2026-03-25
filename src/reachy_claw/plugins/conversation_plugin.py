@@ -1908,6 +1908,46 @@ class ConversationPlugin(Plugin):
         else:
             logger.info("Ready for next turn")
 
+    # ── Public speak API (for diary narration etc.) ──────────────────
+
+    async def speak_text(self, text: str) -> None:
+        """Speak arbitrary text via TTS and wait for completion.
+
+        Used by diary narration and other features that need to speak
+        without going through the LLM pipeline.
+        """
+        if not text.strip():
+            return
+
+        # Clear interrupt event so TTS pipeline processes the text
+        self._interrupt_event.clear()
+
+        # Queue sentences
+        await self._sentence_queue.put(SentenceItem(text=text, is_last=True))
+
+        # Wait for speaking to finish.
+        # Need to wait for is_speaking to go True first (pipeline picks it up),
+        # then wait for it to go False again (done speaking).
+        # Allow up to 90s for long diary sections.
+        started = False
+        for _ in range(900):
+            await asyncio.sleep(0.1)
+            if self._interrupt_event.is_set():
+                break  # Interrupted externally (stop narration)
+            if self.app.is_speaking:
+                started = True
+            elif started and not self.app.is_speaking:
+                break  # Was speaking, now done
+            # Also break if queue drained and never started speaking (TTS disabled)
+            if not started and self._sentence_queue.empty() and self._audio_queue.empty():
+                await asyncio.sleep(0.3)  # Small grace period
+                if not self.app.is_speaking:
+                    break
+
+    async def stop_speaking(self) -> None:
+        """Interrupt any ongoing TTS playback immediately."""
+        await self._fire_interrupt()
+
     # ── Interrupt ─────────────────────────────────────────────────────
 
     async def _fire_interrupt(self) -> None:

@@ -4,10 +4,19 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>EMOTION MIRROR</title>
-<link rel="stylesheet" href="/static/style.css?v=13">
+<link rel="stylesheet" href="/static/style.css?v=14">
+<link rel="stylesheet" href="/static/diary.css?v=1">
 </head>
 <body>
 
+<!-- Page tabs -->
+<nav class="page-tabs">
+    <button class="page-tab active" data-page="live">LIVE</button>
+    <button class="page-tab" data-page="diary">DIARY</button>
+</nav>
+
+<!-- Page: Live Dashboard -->
+<div id="page-live">
 <div class="dashboard">
     <!-- 3-column × 2-row grid: shared row boundary keeps top/bottom aligned -->
     <div class="grid-container">
@@ -76,6 +85,24 @@
 <span id="dot-vision" class="dot-hidden"></span>
 <span id="dot-live" class="dot-hidden"></span>
 <span id="robot-state" class="dot-hidden" data-state="idle"></span>
+
+</div><!-- /page-live -->
+
+<!-- Page: Daily Diary -->
+<div id="page-diary" style="display:none">
+    <div class="diary-page">
+        <div class="diary-date-nav">
+            <button class="diary-date-btn" id="diary-prev" title="Older">&#x25C0;</button>
+            <span class="diary-date-label" id="diary-date-label">Loading...</span>
+            <button class="diary-date-btn" id="diary-next" title="Newer">&#x25B6;</button>
+            <button class="narrate-btn" id="narrate-btn">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
+                Narrate
+            </button>
+        </div>
+        <div id="diary-content"></div>
+    </div>
+</div>
 
 <!-- Settings button (floating) -->
 <button class="settings-btn" id="settings-open">
@@ -356,5 +383,6 @@
 <div class="toast" id="toast"></div>
 
 <script src="/static/app.js"></script>
+<script src="/static/diary.js?v=1"></script>
 </body>
 </html>

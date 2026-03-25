@@ -303,6 +303,15 @@ function handleDashboardMsg(msg) {
             if (bargeinToggle) bargeinToggle.classList.toggle('active', !!msg.enabled);
             break;
         }
+
+        // Diary narration messages
+        case 'diary_narrate_focus':
+        case 'diary_narrate_navigate':
+        case 'diary_narrate_end':
+            if (typeof handleNarrationMessage === 'function') {
+                handleNarrationMessage(msg);
+            }
+            break;
     }
 }
 
@@ -1462,12 +1471,286 @@ function handleRestartStatus(msg) {
     }
 }
 
+// ── Page Tab Switching ──────────────────────────────────────────────
+
+let currentPage = 'live';
+let diaryInitialized = false;
+
+function switchPage(page) {
+    if (page === currentPage) return;
+    currentPage = page;
+
+    document.getElementById('page-live').style.display = page === 'live' ? '' : 'none';
+    document.getElementById('page-diary').style.display = page === 'diary' ? '' : 'none';
+
+    document.querySelectorAll('.page-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.page === page);
+    });
+
+    // Lazy-init diary on first visit
+    if (page === 'diary' && !diaryInitialized && typeof initDiary === 'function') {
+        diaryInitialized = true;
+        initDiary();
+    }
+
+    // No need to pause/resume video — fetch-based MJPEG handles reconnection
+}
+
+// Expose for diary.js narration navigation
+window.switchPage = switchPage;
+
+function initPageTabs() {
+    document.querySelectorAll('.page-tab').forEach(tab => {
+        tab.addEventListener('click', () => switchPage(tab.dataset.page));
+    });
+}
+
+// ── Send WS message helper ─────────────────────────────────────────
+
+function sendDashboardWs(data) {
+    if (dashboardWs && dashboardWs.readyState === WebSocket.OPEN) {
+        dashboardWs.send(JSON.stringify(data));
+    }
+}
+
+window.sendDashboardWs = sendDashboardWs;
+
+// ── Smile Gallery Overlay ───────────────────────────────────────────
+
+const GALLERY_COLORS = [
+    '#f0883e', '#58a6ff', '#00d68f', '#bc8cff',
+    '#f85149', '#f7dc6f', '#a8e6cf', '#ff8a80',
+];
+
+let smileGalleryEl = null;
+let smileLightboxEl = null;
+
+function createSmileGallery() {
+    if (smileGalleryEl) return;
+
+    // Overlay
+    const el = document.createElement('div');
+    el.className = 'smile-gallery-overlay';
+    el.id = 'smile-gallery';
+    el.innerHTML = `
+        <div class="smile-gallery-inner">
+            <div class="smile-gallery-header">
+                <div class="smile-gallery-title">
+                    <span class="smile-gallery-count" id="gallery-count">0</span>
+                    <span class="smile-gallery-label">smiles collected</span>
+                </div>
+                <button class="smile-gallery-close" id="gallery-close">\u2715 Close</button>
+            </div>
+            <div class="smile-gallery-scatter" id="gallery-grid"></div>
+            <div class="smile-gallery-timeline" id="gallery-timeline" style="display:none">
+                <span class="smile-timeline-label" id="timeline-start"></span>
+                <input type="range" class="smile-timeline-slider" id="timeline-slider" min="0" max="100" value="100">
+                <span class="smile-timeline-label right" id="timeline-end"></span>
+                <span class="smile-timeline-count" id="timeline-count"></span>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(el);
+    smileGalleryEl = el;
+
+    document.getElementById('gallery-close').addEventListener('click', closeSmileGallery);
+    el.addEventListener('click', (e) => {
+        if (e.target === el) closeSmileGallery();
+    });
+
+    // Lightbox
+    const lb = document.createElement('div');
+    lb.className = 'smile-lightbox';
+    lb.id = 'smile-lightbox';
+    lb.innerHTML = `
+        <img src="" alt="smile">
+        <div class="smile-lightbox-info">
+            <div class="smile-lightbox-filename" id="lightbox-filename"></div>
+        </div>
+    `;
+    lb.addEventListener('click', () => {
+        lb.classList.remove('active');
+    });
+    document.body.appendChild(lb);
+    smileLightboxEl = lb;
+}
+
+// All loaded capture items with metadata
+let galleryItems = []; // { file, ts, el }
+
+async function openSmileGallery() {
+    createSmileGallery();
+    smileGalleryEl.classList.add('active');
+
+    const grid = document.getElementById('gallery-grid');
+    const countEl = document.getElementById('gallery-count');
+    const timeline = document.getElementById('gallery-timeline');
+    grid.innerHTML = '<div class="smile-gallery-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">Loading smiles...</div>';
+    timeline.style.display = 'none';
+
+    try {
+        const res = await fetch('/api/captures/list?limit=500');
+        const data = await res.json();
+        const files = (data.files || []).filter(f => f.endsWith('.jpg'));
+
+        countEl.textContent = data.total || files.length;
+
+        if (files.length === 0) {
+            grid.innerHTML = '<div class="smile-gallery-empty" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">No smiles captured yet</div>';
+            return;
+        }
+
+        grid.innerHTML = '';
+        galleryItems = [];
+
+        // Use full viewport for scatter
+        const areaW = window.innerWidth;
+        const areaH = window.innerHeight;
+        const padTop = 80;    // header
+        const padBot = 80;    // timeline
+        const padSide = 24;
+
+        files.forEach((file, i) => {
+            const color = GALLERY_COLORS[i % GALLERY_COLORS.length];
+            const item = document.createElement('div');
+            item.className = 'smile-gallery-item';
+
+            // Random size (70–180px, varied)
+            const size = 70 + Math.random() * 110;
+            item.style.width = size + 'px';
+            item.style.height = size + 'px';
+
+            // Random position across full screen
+            const x = padSide + Math.random() * (areaW - size - padSide * 2);
+            const y = padTop + Math.random() * (areaH - size - padTop - padBot);
+            const rot = (Math.random() - 0.5) * 30;
+            const baseTransform = `translate(${x}px, ${y}px)`;
+
+            item.style.transform = `${baseTransform} rotate(${rot}deg)`;
+            item.style.setProperty('--base-transform', baseTransform);
+            item.style.setProperty('--item-color-solid', color);
+            item.style.zIndex = i;
+
+            // Parse timestamp from filename
+            let ts = 0;
+            const match = file.match(/smile_(\d+)_/);
+            if (match) ts = parseInt(match[1]);
+            const timeStr = ts ? new Date(ts * 1000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }) : '';
+
+            item.innerHTML = `
+                <img src="/api/captures/image/${file}" alt="smile" loading="lazy">
+                ${timeStr ? `<div class="smile-gallery-time">${timeStr}</div>` : ''}
+            `;
+
+            item.addEventListener('click', (e) => {
+                e.stopPropagation();
+                openLightbox(file);
+            });
+
+            grid.appendChild(item);
+            galleryItems.push({ file, ts, el: item });
+
+            // Staggered drop-in
+            setTimeout(() => item.classList.add('revealed'), i * 15 + 80);
+        });
+
+        // Setup timeline slider
+        setupTimelineSlider(galleryItems);
+
+    } catch (e) {
+        console.warn('Failed to load captures:', e);
+        grid.innerHTML = '<div class="smile-gallery-empty" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">Could not load smiles</div>';
+    }
+}
+
+function setupTimelineSlider(items) {
+    const timeline = document.getElementById('gallery-timeline');
+    const slider = document.getElementById('timeline-slider');
+    const startLabel = document.getElementById('timeline-start');
+    const endLabel = document.getElementById('timeline-end');
+    const countLabel = document.getElementById('timeline-count');
+
+    // Get time range
+    const timestamps = items.filter(it => it.ts > 0).map(it => it.ts);
+    if (timestamps.length < 2) {
+        timeline.style.display = 'none';
+        return;
+    }
+
+    const minTs = Math.min(...timestamps);
+    const maxTs = Math.max(...timestamps);
+
+    function formatDate(ts) {
+        const d = new Date(ts * 1000);
+        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' ' +
+               d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+    }
+
+    startLabel.textContent = formatDate(minTs);
+    endLabel.textContent = formatDate(maxTs);
+    slider.value = 100;
+    countLabel.textContent = items.length;
+    timeline.style.display = 'flex';
+
+    slider.oninput = () => {
+        const pct = parseInt(slider.value);
+        const cutoffTs = minTs + (maxTs - minTs) * (pct / 100);
+        let visible = 0;
+
+        for (const it of items) {
+            const show = it.ts === 0 || it.ts <= cutoffTs;
+            it.el.style.opacity = show ? '' : '0';
+            it.el.style.pointerEvents = show ? '' : 'none';
+            if (show) visible++;
+        }
+
+        countLabel.textContent = visible;
+        endLabel.textContent = formatDate(Math.round(cutoffTs));
+    };
+}
+
+function closeSmileGallery() {
+    if (smileGalleryEl) smileGalleryEl.classList.remove('active');
+    if (smileLightboxEl) smileLightboxEl.classList.remove('active');
+}
+
+function openLightbox(filename) {
+    if (!smileLightboxEl) return;
+    const img = smileLightboxEl.querySelector('img');
+    const info = document.getElementById('lightbox-filename');
+    img.src = `/api/captures/image/${filename}`;
+    if (info) info.textContent = filename;
+    smileLightboxEl.classList.add('active');
+}
+
+function initSmileGallery() {
+    // Click on capture counter → open gallery
+    const counter = document.getElementById('capture-counter');
+    if (counter) {
+        counter.style.cursor = 'pointer';
+        counter.addEventListener('click', openSmileGallery);
+    }
+
+    // ESC to close
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            if (smileLightboxEl?.classList.contains('active')) {
+                smileLightboxEl.classList.remove('active');
+            } else if (smileGalleryEl?.classList.contains('active')) {
+                closeSmileGallery();
+            }
+        }
+    });
+}
+
 // ── Init ────────────────────────────────────────────────────────────
 function init() {
+    initPageTabs();
     setupVideo();
     connectVision();
     connectDashboard();
     initSettings();
+    initSmileGallery();
     requestAnimationFrame(drawOverlay);
     requestAnimationFrame(drawFaceCrop);
 }
