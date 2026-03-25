@@ -158,6 +158,10 @@ class _InterpreterSequencer:
 
             if translated:
                 logger.info(f"Interpreter emit seq={seq}: \"{translated[:40]}\"")
+                # Emit to EventBus so dashboard displays the translation
+                run_id = f"interp-{seq}"
+                self._events.emit("llm_delta", {"text": translated, "run_id": run_id})
+                self._events.emit("llm_end", {"full_text": translated, "run_id": run_id, "emotion": ""})
                 await self._sentence_queue.put(
                     SentenceItem(text=translated, is_last=True)
                 )
