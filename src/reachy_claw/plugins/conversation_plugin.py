@@ -862,15 +862,32 @@ class ConversationPlugin(Plugin):
 
         logger.info(f"Conversation mode switched to: {mode}")
 
-    async def switch_backend(self, backend: str, model: str | None = None) -> None:
-        """Hot-switch LLM backend (ollama/gateway) or change Ollama model."""
+    async def switch_backend(
+        self,
+        backend: str,
+        model: str | None = None,
+        ollama_url: str | None = None,
+        gateway_host: str | None = None,
+        gateway_port: int | None = None,
+    ) -> None:
+        """Hot-switch LLM backend (ollama/gateway) or change Ollama model/base_url."""
         config = self.app.config
 
-        if backend == config.llm_backend and model is None:
+        # Update URL configs if provided
+        if ollama_url:
+            config.ollama_base_url = ollama_url
+        if gateway_host:
+            config.gateway_host = gateway_host
+        if gateway_port:
+            config.gateway_port = gateway_port
+
+        # Check if only URL/model changed (no backend switch)
+        url_changed = ollama_url or gateway_host or gateway_port
+        if backend == config.llm_backend and model is None and not url_changed:
             return  # no change
 
         # Update model if specified (works live for Ollama without reconnect)
-        if model and backend == "ollama" and config.llm_backend == "ollama":
+        if model and backend == "ollama" and config.llm_backend == "ollama" and not url_changed:
             config.ollama_model = model
             if isinstance(self._client, OllamaClient):
                 self._client._config.model = model
@@ -878,7 +895,21 @@ class ConversationPlugin(Plugin):
                 logger.info(f"Ollama model switched to: {model}")
             return
 
-        # Full backend switch: disconnect old, connect new
+        # Update base_url for Ollama without full reconnect
+        if backend == "ollama" and config.llm_backend == "ollama" and ollama_url:
+            config.ollama_base_url = ollama_url
+            if isinstance(self._client, OllamaClient):
+                self._client._config.base_url = ollama_url
+                self._client._http_client = httpx.AsyncClient(base_url=ollama_url)
+                self._client._history.clear()
+                logger.info(f"Ollama base_url switched to: {ollama_url}")
+            if model:
+                config.ollama_model = model
+                if isinstance(self._client, OllamaClient):
+                    self._client._config.model = model
+            return
+
+        # Full backend switch or gateway URL change: disconnect old, connect new
         if self._client:
             await self._client.disconnect()
             self._client = None

@@ -431,28 +431,61 @@ class DashboardPlugin(Plugin):
                 "type": "llm_settings",
                 "backend": cfg.llm_backend,
                 "model": cfg.ollama_model,
+                "ollama_url": cfg.ollama_base_url,
+                "gateway_host": cfg.gateway_host,
+                "gateway_port": cfg.gateway_port,
             })
 
         elif msg_type == "set_llm":
             backend = data.get("backend", self.app.config.llm_backend)
             model = data.get("model")
+            ollama_url = data.get("ollama_url")
+            gateway_host = data.get("gateway_host")
+            gateway_port = data.get("gateway_port")
+
+            # Update URL config first (before backend switch)
+            if ollama_url:
+                self.app.config.ollama_base_url = ollama_url
+            if gateway_host:
+                self.app.config.gateway_host = gateway_host
+            if gateway_port:
+                self.app.config.gateway_port = gateway_port
+
             conv = self.app.get_plugin("conversation")
             if conv and hasattr(conv, "switch_backend"):
                 try:
-                    await conv.switch_backend(backend, model)
+                    # Pass URL changes to switch_backend for live reconnection
+                    await conv.switch_backend(
+                        backend,
+                        model,
+                        ollama_url=ollama_url,
+                        gateway_host=gateway_host,
+                        gateway_port=gateway_port,
+                    )
                 except Exception as e:
                     logger.error("Backend switch failed: %s", e)
                     await self._broadcast({"type": "toast", "text": f"Switch failed: {e}", "error": True})
                     return
+
             fields = ["llm_backend"]
             if model:
                 self.app.config.ollama_model = model
                 fields.append("ollama_model")
+            if ollama_url:
+                fields.append("ollama_base_url")
+            if gateway_host:
+                fields.append("gateway_host")
+            if gateway_port:
+                fields.append("gateway_port")
+
             self._save_overrides(fields)
             await self._broadcast({
                 "type": "llm_settings",
                 "backend": self.app.config.llm_backend,
                 "model": self.app.config.ollama_model,
+                "ollama_url": self.app.config.ollama_base_url,
+                "gateway_host": self.app.config.gateway_host,
+                "gateway_port": self.app.config.gateway_port,
             })
 
         elif msg_type == "set_vlm":

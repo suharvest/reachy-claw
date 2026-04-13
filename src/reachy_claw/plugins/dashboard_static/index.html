@@ -283,6 +283,19 @@
                             <option value="qwen3.5:4b">qwen3.5:4b</option>
                         </select>
                     </div>
+                    <div class="toggle-row" id="ollama-url-row">
+                        <span class="toggle-label">Ollama URL</span>
+                        <input type="text" class="url-input" id="ollama-url" value="http://localhost:11434" placeholder="http://IP:11434">
+                    </div>
+                    <div class="toggle-row" id="gateway-host-row">
+                        <span class="toggle-label">Gateway Host</span>
+                        <input type="text" class="url-input" id="gateway-host" value="127.0.0.1" placeholder="IP address">
+                    </div>
+                    <div class="toggle-row" id="gateway-port-row">
+                        <span class="toggle-label">Gateway Port</span>
+                        <input type="number" class="port-input" id="gateway-port" value="18790" min="1" max="65535">
+                    </div>
+                    <button class="apply-btn" id="apply-llm-btn">Apply Changes</button>
                 </div>
                 <div class="detail-section">
                     <h3>Voice</h3>

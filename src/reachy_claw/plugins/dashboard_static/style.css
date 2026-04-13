@@ -748,6 +748,23 @@ body {
     padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border);
     background: var(--bg); color: var(--text); font-size: 13px;
 }
+
+.url-input, .port-input {
+    flex: 1; background: #0a0a0a; border: 1px solid var(--border);
+    color: var(--text-bright); padding: 4px 8px; border-radius: 4px;
+    font-family: inherit; font-size: 13px; outline: none; min-width: 120px;
+}
+.url-input:focus, .port-input:focus { border-color: var(--green-dim); }
+.port-input { width: 80px; min-width: 80px; }
+
+.apply-btn {
+    background: rgba(118, 185, 0, 0.1); border: 1px solid var(--green-dim);
+    color: var(--green); cursor: pointer; padding: 6px 12px; border-radius: 4px;
+    font-family: inherit; font-size: 11px; font-weight: 600;
+    margin-top: 8px;
+}
+.apply-btn:hover { background: rgba(118, 185, 0, 0.2); }
+.apply-btn:active { transform: scale(0.98); }
 .interpreter-settings { display: flex; flex-direction: column; gap: 8px; }
 
 /* Face management */

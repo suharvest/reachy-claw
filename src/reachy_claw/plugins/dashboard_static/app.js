@@ -259,7 +259,7 @@ function handleDashboardMsg(msg) {
             break;
 
         case 'llm_settings':
-            syncLlmUI(msg.backend, msg.model);
+            syncLlmUI(msg.backend, msg.model, msg.ollama_url, msg.gateway_host, msg.gateway_port);
             break;
 
         case 'volume':
@@ -907,21 +907,51 @@ function initSettings() {
     // LLM backend/model selection
     const llmBackend = document.getElementById('llm-backend');
     const ollamaModel = document.getElementById('ollama-model');
-    if (llmBackend) {
-        llmBackend.onchange = () => {
-            const backend = llmBackend.value;
-            const model = backend === 'ollama' ? ollamaModel.value : undefined;
-            if (dashboardWs && dashboardWs.readyState === 1) {
-                dashboardWs.send(JSON.stringify({ type: 'set_llm', backend, model }));
-            }
-            syncLlmUI(backend, model);
-        };
+    const ollamaUrl = document.getElementById('ollama-url');
+    const gatewayHost = document.getElementById('gateway-host');
+    const gatewayPort = document.getElementById('gateway-port');
+    const applyLlmBtn = document.getElementById('apply-llm-btn');
+
+    // Show/hide fields when backend changes
+    function updateLlmFieldsVisibility() {
+        const backend = llmBackend ? llmBackend.value : 'ollama';
+        const isOllama = backend === 'ollama';
+        const modelRow = document.getElementById('ollama-model-row');
+        const ollamaUrlRow = document.getElementById('ollama-url-row');
+        const gatewayHostRow = document.getElementById('gateway-host-row');
+        const gatewayPortRow = document.getElementById('gateway-port-row');
+        if (modelRow) modelRow.style.display = isOllama ? '' : 'none';
+        if (ollamaUrlRow) ollamaUrlRow.style.display = isOllama ? '' : 'none';
+        if (gatewayHostRow) gatewayHostRow.style.display = isOllama ? 'none' : '';
+        if (gatewayPortRow) gatewayPortRow.style.display = isOllama ? 'none' : '';
     }
-    if (ollamaModel) {
-        ollamaModel.onchange = () => {
-            if (dashboardWs && dashboardWs.readyState === 1) {
-                dashboardWs.send(JSON.stringify({ type: 'set_llm', backend: 'ollama', model: ollamaModel.value }));
+
+    if (llmBackend) {
+        llmBackend.onchange = updateLlmFieldsVisibility;
+    }
+
+    // Apply button: send all LLM settings
+    if (applyLlmBtn) {
+        applyLlmBtn.onclick = () => {
+            if (!dashboardWs || dashboardWs.readyState !== 1) {
+                showToast('Not connected', true);
+                return;
             }
+            const backend = llmBackend ? llmBackend.value : 'ollama';
+            const model = backend === 'ollama' && ollamaModel ? ollamaModel.value : undefined;
+            const ollama_url = backend === 'ollama' && ollamaUrl ? ollamaUrl.value : undefined;
+            const gateway_host = backend === 'gateway' && gatewayHost ? gatewayHost.value : undefined;
+            const gateway_port = backend === 'gateway' && gatewayPort ? parseInt(gatewayPort.value) : undefined;
+
+            dashboardWs.send(JSON.stringify({
+                type: 'set_llm',
+                backend,
+                model,
+                ollama_url,
+                gateway_host,
+                gateway_port
+            }));
+            showToast('Applying LLM settings...');
         };
     }
 
@@ -1106,13 +1136,30 @@ function syncModeUI() {
     }
 }
 
-function syncLlmUI(backend, model) {
+function syncLlmUI(backend, model, ollamaUrl, gatewayHost, gatewayPort) {
     const backendEl = document.getElementById('llm-backend');
     const modelEl = document.getElementById('ollama-model');
     const modelRow = document.getElementById('ollama-model-row');
+    const ollamaUrlRow = document.getElementById('ollama-url-row');
+    const ollamaUrlEl = document.getElementById('ollama-url');
+    const gatewayHostRow = document.getElementById('gateway-host-row');
+    const gatewayHostEl = document.getElementById('gateway-host');
+    const gatewayPortRow = document.getElementById('gateway-port-row');
+    const gatewayPortEl = document.getElementById('gateway-port');
+
     if (backendEl) backendEl.value = backend;
-    if (modelRow) modelRow.style.display = backend === 'ollama' ? '' : 'none';
+
+    // Show/hide fields based on backend
+    const isOllama = backend === 'ollama';
+    if (modelRow) modelRow.style.display = isOllama ? '' : 'none';
+    if (ollamaUrlRow) ollamaUrlRow.style.display = isOllama ? '' : 'none';
+    if (gatewayHostRow) gatewayHostRow.style.display = isOllama ? 'none' : '';
+    if (gatewayPortRow) gatewayPortRow.style.display = isOllama ? 'none' : '';
+
     if (modelEl && model) modelEl.value = model;
+    if (ollamaUrlEl && ollamaUrl) ollamaUrlEl.value = ollamaUrl;
+    if (gatewayHostEl && gatewayHost) gatewayHostEl.value = gatewayHost;
+    if (gatewayPortEl && gatewayPort) gatewayPortEl.value = gatewayPort;
 }
 
 function setMode(mode) {
