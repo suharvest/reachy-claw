@@ -260,7 +260,7 @@ class AudioCapture:
         try:
             stream = sd.InputStream(
                 samplerate=self.config.sample_rate,
-                channels=1,
+                channels=2,  # ReSpeaker has 2 input channels
                 dtype=np.float32,
                 device=self._device_id,
                 blocksize=frames,
@@ -276,7 +276,15 @@ class AudioCapture:
                 data, overflowed = stream.read(frames)
                 if overflowed:
                     logger.debug("Audio buffer overflow in bg reader")
-                chunk = data.flatten()
+                # Stereo to mono: average both channels
+                chunk = data.mean(axis=1) if data.shape[1] > 1 else data.flatten()
+                # Periodic energy check (every ~2 seconds)
+                if not hasattr(self, '_bg_chunk_count'):
+                    self._bg_chunk_count = 0
+                self._bg_chunk_count += 1
+                if self._bg_chunk_count % 30 == 0:
+                    energy = float(np.abs(chunk).mean())
+                    logger.info(f"BG reader: chunk {self._bg_chunk_count}, energy={energy:.6f}, shape={data.shape}")
                 try:
                     self._loop.call_soon_threadsafe(
                         self._chunk_queue.put_nowait, chunk
@@ -312,7 +320,7 @@ class AudioCapture:
             if not hasattr(self, '_input_stream') or self._input_stream is None:
                 self._input_stream = sd.InputStream(
                     samplerate=self.config.sample_rate,
-                    channels=1,
+                    channels=2,  # ReSpeaker has 2 input channels
                     dtype=np.float32,
                     device=self._device_id,
                     blocksize=frames,
@@ -324,7 +332,8 @@ class AudioCapture:
             data, overflowed = await asyncio.to_thread(self._input_stream.read, frames)
             if overflowed:
                 logger.debug("Audio buffer overflow - some audio was lost")
-            return data.flatten()
+            # Stereo to mono: average both channels
+            return data.mean(axis=1) if data.shape[1] > 1 else data.flatten()
 
         except ImportError:
             logger.warning("sounddevice not available for local mic")
