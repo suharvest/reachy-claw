@@ -53,6 +53,8 @@ class DashboardPlugin(Plugin):
         # Capture gallery proxy (same-origin for vision-trt)
         app.router.add_get("/api/captures/list", self._proxy_captures_list)
         app.router.add_get("/api/captures/image/{filename}", self._proxy_captures_image)
+        # Ollama models API (proxy to avoid CORS)
+        app.router.add_get("/api/ollama/models", self._proxy_ollama_models)
         app.router.add_static("/static", STATIC_DIR, show_index=False)
 
         self._runner = web.AppRunner(app)
@@ -934,6 +936,52 @@ class DashboardPlugin(Plugin):
                     )
         except Exception as e:
             return web.Response(text=str(e), status=502)
+
+    async def _proxy_ollama_models(self, request):
+        """Proxy Ollama /api/tags to get available models.
+
+        Query param 'url' can override the base URL (for testing remote services).
+        Returns model list or fallback defaults on failure.
+        """
+        from aiohttp import web, ClientSession, ClientTimeout
+        import json
+
+        # Allow URL override via query param, else use config
+        url_override = request.query.get("url")
+        base_url = url_override or self.app.config.ollama_base_url
+        tags_url = f"{base_url.rstrip('/')}/api/tags"
+
+        # Default fallback models
+        default_models = ["qwen3.5:0.8b", "qwen3.5:2b-q4_K_M", "qwen3.5:4b"]
+
+        timeout = ClientTimeout(total=5)
+        try:
+            async with ClientSession(timeout=timeout) as session:
+                async with session.get(tags_url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        models = []
+                        for model in data.get("models", []):
+                            name = model.get("name", "")
+                            if name:
+                                models.append(name)
+                        if not models:
+                            models = default_models
+                        return web.Response(
+                            text=json.dumps({"models": models, "source": "ollama"}),
+                            content_type="application/json",
+                        )
+                    else:
+                        return web.Response(
+                            text=json.dumps({"models": default_models, "source": "fallback"}),
+                            content_type="application/json",
+                        )
+        except Exception as e:
+            logger.debug("Ollama models fetch failed: %s", e)
+            return web.Response(
+                text=json.dumps({"models": default_models, "source": "fallback"}),
+                content_type="application/json",
+            )
 
     async def _handle_stream_proxy(self, request):
         """Proxy MJPEG stream from vision-trt (same-origin for browser)."""

@@ -1,0 +1,11 @@
+[    2537ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://100.67.111.58:8640/favicon.ico:0
+[  144164ms] [WARNING] MJPEG stream error: TypeError: network error @ http://100.67.111.58:8640/static/app.js:625
+[  203911ms] [WARNING] MJPEG stream error: TypeError: network error @ http://100.67.111.58:8640/static/app.js:625
+[  266066ms] [WARNING] MJPEG stream error: TypeError: network error @ http://100.67.111.58:8640/static/app.js:625
+[  291379ms] [WARNING] MJPEG stream error: TypeError: network error @ http://100.67.111.58:8640/static/app.js:625
+[  322710ms] [WARNING] MJPEG stream error: TypeError: network error @ http://100.67.111.58:8640/static/app.js:625
+[  368517ms] [WARNING] MJPEG stream error: TypeError: network error @ http://100.67.111.58:8640/static/app.js:625
+[  399579ms] [ERROR] WebSocket connection to 'ws://100.67.111.58:8640/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://100.67.111.58:8640/static/app.js:118
+[  401899ms] [ERROR] WebSocket connection to 'ws://100.67.111.58:8640/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://100.67.111.58:8640/static/app.js:118
+[  405342ms] [ERROR] WebSocket connection to 'ws://100.67.111.58:8640/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://100.67.111.58:8640/static/app.js:118
+[  410475ms] [ERROR] WebSocket connection to 'ws://100.67.111.58:8640/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://100.67.111.58:8640/static/app.js:118

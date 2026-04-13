@@ -912,6 +912,35 @@ function initSettings() {
     const gatewayPort = document.getElementById('gateway-port');
     const applyLlmBtn = document.getElementById('apply-llm-btn');
 
+    // Default models (fallback when Ollama API unavailable)
+    const defaultModels = ["qwen3.5:0.8b", "qwen3.5:2b-q4_K_M", "qwen3.5:4b"];
+
+    // Fetch models from Ollama API and update select
+    async function fetchOllamaModels(baseUrl) {
+        try {
+            const res = await fetch(`/api/ollama/models?url=${encodeURIComponent(baseUrl)}`);
+            const data = await res.json();
+            updateModelSelect(data.models || defaultModels);
+        } catch (e) {
+            console.log('Failed to fetch Ollama models:', e);
+            updateModelSelect(defaultModels);
+        }
+    }
+
+    // Update model select options
+    function updateModelSelect(models) {
+        if (!ollamaModel) return;
+        const current = ollamaModel.value;
+        ollamaModel.innerHTML = '';
+        for (const m of models) {
+            const opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m;
+            if (m === current) opt.selected = true;
+            ollamaModel.appendChild(opt);
+        }
+    }
+
     // Show/hide fields when backend changes
     function updateLlmFieldsVisibility() {
         const backend = llmBackend ? llmBackend.value : 'ollama';
@@ -924,10 +953,25 @@ function initSettings() {
         if (ollamaUrlRow) ollamaUrlRow.style.display = isOllama ? '' : 'none';
         if (gatewayHostRow) gatewayHostRow.style.display = isOllama ? 'none' : '';
         if (gatewayPortRow) gatewayPortRow.style.display = isOllama ? 'none' : '';
+        // Fetch models when switching to Ollama backend
+        if (isOllama && ollamaUrl && ollamaUrl.value) {
+            fetchOllamaModels(ollamaUrl.value);
+        }
     }
 
     if (llmBackend) {
         llmBackend.onchange = updateLlmFieldsVisibility;
+    }
+
+    // Fetch models when Ollama URL changes
+    if (ollamaUrl) {
+        ollamaUrl.onchange = () => {
+            if (llmBackend && llmBackend.value === 'ollama' && ollamaUrl.value) {
+                fetchOllamaModels(ollamaUrl.value);
+            }
+        };
+        // Also fetch on blur (when user finishes typing)
+        ollamaUrl.onblur = ollamaUrl.onchange;
     }
 
     // Apply button: send all LLM settings

@@ -1,0 +1,28 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - generic [ref=e6]: 👀
+        - text: What I see
+      - generic [ref=e8]:
+        - generic [ref=e9]: 📷
+        - generic [ref=e10]: Connecting to vision...
+    - generic [ref=e18]: Neutral
+    - generic [ref=e20]:
+      - img "logo" [ref=e21]
+      - generic [ref=e22]:
+        - generic [ref=e23]: Reachy's
+        - generic [ref=e24]: Mind
+    - generic [ref=e25]:
+      - generic [ref=e26]:
+        - generic [ref=e27]: 👂
+        - generic [ref=e28]: What I hear
+        - img "waveform" [ref=e29]
+      - generic [ref=e30]: Listening...
+    - generic [ref=e31]:
+      - generic [ref=e32]: Smiling face
+      - generic [ref=e33]:
+        - generic [ref=e34]: ❤️
+        - generic [ref=e35]: "0"
+  - button [ref=e38] [cursor=pointer]:
+    - img [ref=e39]

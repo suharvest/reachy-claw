@@ -1,0 +1,9 @@
+[    1894ms] [ERROR] WebSocket connection to 'ws://100.67.111.58:8630/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://100.67.111.58:8640/static/app.js:86
+[    3417ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://100.67.111.58:8640/favicon.ico:0
+[    3417ms] [ERROR] WebSocket connection to 'ws://100.67.111.58:8630/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://100.67.111.58:8640/static/app.js:86
+[    5711ms] [ERROR] WebSocket connection to 'ws://100.67.111.58:8630/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://100.67.111.58:8640/static/app.js:86
+[    9094ms] [ERROR] WebSocket connection to 'ws://100.67.111.58:8630/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://100.67.111.58:8640/static/app.js:86
+[   13212ms] [ERROR] WebSocket connection to 'ws://100.67.111.58:8640/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://100.67.111.58:8640/static/app.js:118
+[   15505ms] [ERROR] WebSocket connection to 'ws://100.67.111.58:8640/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://100.67.111.58:8640/static/app.js:118
+[   18933ms] [ERROR] WebSocket connection to 'ws://100.67.111.58:8640/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://100.67.111.58:8640/static/app.js:118
+[   24063ms] [ERROR] WebSocket connection to 'ws://100.67.111.58:8640/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://100.67.111.58:8640/static/app.js:118
