@@ -56,9 +56,14 @@ class Config:
     matcha_speaker_id: int = 0
     matcha_speed: float = 1.2
     matcha_pitch_shift: float = 0.0
+    matcha_clone_seed: int = 42
     kokoro_speaker_id: int = 3  # zf_001 (中文女声)
     kokoro_speed: float = 1.2
     kokoro_pitch_shift: float = 0.0
+    kokoro_clone_seed: int = 42
+
+    # Voice cloning (qwen3 backend)
+    cloned_voice_name: str | None = None  # name of cloned voice (without .bin)
 
     # VAD
     vad_backend: str = "silero"  # "silero", "energy"

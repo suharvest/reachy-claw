@@ -28,6 +28,7 @@ class DashboardPlugin(Plugin):
         self._last_llm_emotion: str | None = None
         self._capture_count: int = 0
         self._audio_card: str | None = None
+        self._voice_clone_supported: bool = False
 
     def setup(self) -> bool:
         try:
@@ -213,6 +214,7 @@ class DashboardPlugin(Plugin):
     async def _handle_ws_message(self, data: dict) -> None:
         """Handle client → server WS messages."""
         msg_type = data.get("type")
+        logger.info("WS message received: %s", msg_type)
         if msg_type == "set_mode":
             mode = data.get("mode", "conversation")
             if mode not in ("conversation", "monologue", "interpreter"):
@@ -355,33 +357,73 @@ class DashboardPlugin(Plugin):
             await self._broadcast(self._get_voice_settings())
 
         elif msg_type == "set_voice":
+            voice_name = data.get("voice_name")  # Cloned voice name (optional)
             sid = int(data.get("speaker_id", 3))
             pitch = float(data.get("pitch_shift", 0.0))
             speed = float(data.get("speed", 1.0))
-            # Determine current TTS backend name for config keys
             backend = self.app.config.tts_backend  # "matcha" or "kokoro"
-            setattr(self.app.config, f"{backend}_speaker_id", sid)
-            setattr(self.app.config, f"{backend}_pitch_shift", pitch)
-            setattr(self.app.config, f"{backend}_speed", speed)
-            # Hot-apply to running TTS backend
-            conv = self.app.get_plugin("conversation")
-            if conv and hasattr(conv, "_tts"):
-                tts = conv._tts
-                # Unwrap reconnecting proxy if needed
-                if hasattr(tts, "_backend"):
-                    tts = tts._backend
-                if hasattr(tts, "_speaker_id"):
-                    tts._speaker_id = sid
-                if hasattr(tts, "_pitch_shift"):
-                    tts._pitch_shift = pitch
-                if hasattr(tts, "_speed"):
-                    tts._speed = speed
-            self._save_overrides([
-                f"{backend}_speaker_id",
-                f"{backend}_pitch_shift",
-                f"{backend}_speed",
-            ])
+
+            if voice_name:
+                # Clone mode: load embedding and set to TTS instance
+                embedding_path = self.app.config.cache_dir / "voices" / f"{voice_name}.bin"
+                self.app.config.cloned_voice_name = voice_name
+                # Directly set to running TTS instance
+                conv = self.app.get_plugin("conversation")
+                if conv and hasattr(conv, "_tts"):
+                    tts = conv._tts
+                    if hasattr(tts, "_backend"):
+                        tts = tts._backend
+                    if hasattr(tts, "set_cloned_voice"):
+                        tts.set_cloned_voice(str(embedding_path), voice_name)
+                    # Also update pitch/speed
+                    if hasattr(tts, "_pitch_shift"):
+                        tts._pitch_shift = pitch
+                    if hasattr(tts, "_speed"):
+                        tts._speed = speed
+                setattr(self.app.config, f"{backend}_pitch_shift", pitch)
+                setattr(self.app.config, f"{backend}_speed", speed)
+                self._save_overrides(["cloned_voice_name", f"{backend}_pitch_shift", f"{backend}_speed"])
+            else:
+                # Speaker ID mode
+                setattr(self.app.config, f"{backend}_speaker_id", sid)
+                setattr(self.app.config, f"{backend}_pitch_shift", pitch)
+                setattr(self.app.config, f"{backend}_speed", speed)
+                self.app.config.cloned_voice_name = None
+                # Hot-apply to running TTS backend
+                conv = self.app.get_plugin("conversation")
+                if conv and hasattr(conv, "_tts"):
+                    tts = conv._tts
+                    if hasattr(tts, "_backend"):
+                        tts = tts._backend
+                    if hasattr(tts, "_speaker_id"):
+                        tts._speaker_id = sid
+                    if hasattr(tts, "_pitch_shift"):
+                        tts._pitch_shift = pitch
+                    if hasattr(tts, "_speed"):
+                        tts._speed = speed
+                    # Clear cloned voice
+                    if hasattr(tts, "set_cloned_voice"):
+                        tts.set_cloned_voice(None)
+                self._save_overrides([
+                    f"{backend}_speaker_id",
+                    f"{backend}_pitch_shift",
+                    f"{backend}_speed",
+                    "cloned_voice_name",
+                ])
             await self._broadcast(self._get_voice_settings())
+
+        elif msg_type == "get_tts_capabilities":
+            logger.info("Received get_tts_capabilities request")
+            await self._send_tts_capabilities()
+
+        elif msg_type == "get_cloned_voices":
+            logger.info("Received get_cloned_voices request")
+            await self._send_cloned_voices()
+
+        elif msg_type == "clone_voice":
+            name = data.get("name", "").strip()
+            audio_b64 = data.get("audio_b64", "")
+            await self._handle_clone_voice(name, audio_b64)
 
         elif msg_type == "get_llm":
             cfg = self.app.config
@@ -554,7 +596,139 @@ class DashboardPlugin(Plugin):
             "speaker_id": getattr(self.app.config, f"{backend}_speaker_id", 0),
             "pitch_shift": getattr(self.app.config, f"{backend}_pitch_shift", 0.0),
             "speed": getattr(self.app.config, f"{backend}_speed", 1.0),
+            "voice_clone_supported": getattr(self, "_voice_clone_supported", False),
+            "cloned_voice_name": getattr(self.app.config, "cloned_voice_name", None),
         }
+
+    async def _send_tts_capabilities(self) -> None:
+        """Query jetson-voice TTS capabilities and cache result."""
+        import aiohttp
+        url = f"{self.app.config.speech_service_url}/tts/capabilities"
+        logger.info("Querying TTS capabilities from %s", url)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        capabilities = data.get("capabilities", [])
+                        self._voice_clone_supported = "voice_clone" in capabilities
+                        logger.info("TTS capabilities: %s, voice_clone=%s", capabilities, self._voice_clone_supported)
+                        await self._broadcast({
+                            "type": "tts_capabilities",
+                            "voice_clone": self._voice_clone_supported,
+                            "backend": data.get("backend"),
+                        })
+                        return
+        except Exception as e:
+            logger.warning("Failed to get TTS capabilities: %s", e)
+        self._voice_clone_supported = False
+        await self._broadcast({"type": "tts_capabilities", "voice_clone": False})
+
+    async def _send_cloned_voices(self) -> None:
+        """List cloned voice embeddings from cache/voices/ directory."""
+        import os
+        voices_dir = Path(os.environ.get("DATA_DIR", str(self.app.config.cache_dir))) / "voices"
+        voices = []
+        if voices_dir.is_dir():
+            for f in voices_dir.iterdir():
+                if f.suffix == ".bin":
+                    voices.append({"name": f.stem, "filename": f.name})
+        await self._broadcast({"type": "cloned_voices", "voices": voices})
+
+    async def _handle_clone_voice(self, name: str, audio_b64: str) -> None:
+        """Extract embedding from audio, save to cache/voices/ directory."""
+        import base64
+        import os
+        import tempfile
+
+        import aiohttp
+
+        if not name or not audio_b64:
+            await self._broadcast({"type": "clone_voice_result", "error": "Missing name or audio"})
+            return
+
+        # Sanitize name (alphanumeric + underscore only)
+        import re
+        name = name[:32]
+        if not name or not name.strip():
+            await self._broadcast({"type": "clone_voice_result", "error": "Please enter a voice name"})
+            return
+
+        audio_bytes = base64.b64decode(audio_b64)
+        
+        # Detect audio format from magic bytes
+        audio_format = "webm"
+        if len(audio_bytes) >= 4:
+            if audio_bytes[:4] == b'RIFF':
+                audio_format = "wav"
+            elif audio_bytes[:3] == b'ID3':
+                audio_format = "mp3"
+            elif len(audio_bytes) >= 2 and audio_bytes[:2] == b'\xff\xfb':
+                audio_format = "mp3"
+            elif audio_bytes[:4] == b'ftyp':
+                audio_format = "m4a"
+            
+        logger.info("Received audio: %d bytes, format=%s", len(audio_bytes), audio_format)
+
+        # Convert to WAV if needed
+        if audio_format != "wav":
+            logger.info("Converting %s to WAV...", audio_format)
+            import subprocess
+            with tempfile.NamedTemporaryFile(suffix=f".{audio_format}", delete=False) as tmp_in:
+                tmp_in.write(audio_bytes)
+                tmp_in_path = tmp_in.name
+            tmp_out_path = tmp_in_path.replace(f".{audio_format}", ".wav")
+            try:
+                result = subprocess.run(
+                    ["ffmpeg", "-y", "-i", tmp_in_path, "-ar", "24000", "-ac", "1", tmp_out_path],
+                    capture_output=True, timeout=30
+                )
+                if result.returncode != 0:
+                    logger.error("ffmpeg failed: %s", result.stderr.decode())
+                    await self._broadcast({"type": "clone_voice_result", "error": "Audio conversion failed"})
+                    os.unlink(tmp_in_path)
+                    return
+                with open(tmp_out_path, "rb") as f:
+                    audio_bytes = f.read()
+                logger.info("Converted to WAV: %d bytes", len(audio_bytes))
+            finally:
+                os.unlink(tmp_in_path)
+                if os.path.exists(tmp_out_path):
+                    os.unlink(tmp_out_path)
+
+        url = f"{self.app.config.speech_service_url}/tts/clone/embedding"
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                data = aiohttp.FormData()
+                data.add_field("file", audio_bytes, filename="audio.wav", content_type="audio/wav")
+                async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status != 200:
+                        err = await resp.text()
+                        logger.error("Embedding API error: %s", err)
+                        await self._broadcast({"type": "clone_voice_result", "error": err})
+                        return
+                    result = await resp.json()
+                    embedding_b64 = result["speaker_embedding_b64"]
+                    embedding_bytes = base64.b64decode(embedding_b64)
+
+            # Save embedding to voices directory
+            voices_dir = Path(os.environ.get("DATA_DIR", str(self.app.config.cache_dir))) / "voices"
+            voices_dir.mkdir(parents=True, exist_ok=True)
+            filename = f"{name}.bin"
+            filepath = voices_dir / filename
+            filepath.write_bytes(embedding_bytes)
+
+            logger.info("Saved cloned voice: %s (%d bytes)", filepath, len(embedding_bytes))
+            await self._broadcast({
+                "type": "clone_voice_result",
+                "success": True,
+                "voice": {"name": name, "filename": filename}
+            })
+
+        except Exception as e:
+            logger.error("Voice clone failed: %s", e)
+            await self._broadcast({"type": "clone_voice_result", "error": str(e)})
 
     async def _send_capture_info(self) -> None:
         """Send capture storage info (path + count) to dashboard."""

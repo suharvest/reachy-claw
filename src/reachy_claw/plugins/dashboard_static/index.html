@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>EMOTION MIRROR</title>
-<link rel="stylesheet" href="/static/style.css?v=16">
+<link rel="stylesheet" href="/static/style.css?v=18">
 <link rel="stylesheet" href="/static/diary.css?v=3">
 </head>
 <body>
@@ -286,7 +286,18 @@
                 </div>
                 <div class="detail-section">
                     <h3>Voice</h3>
-                    <div class="volume-row">
+                    <!-- Voice Clone Mode (shown when supported) -->
+                    <div class="volume-row" id="voice-clone-row" style="display:none">
+                        <span class="voice-label">Cloned Voice</span>
+                        <select class="lang-select" id="voice-select">
+                            <option value="">-- Select Voice --</option>
+                        </select>
+                        <button class="clone-voice-btn" id="clone-voice-btn" title="Clone new voice">
+                            <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1 1.93c-3.94-.49-7-3.85-7-7.93h2c0 3.31 2.69 6 6 6s6-2.69 6-6h2c0 4.08-3.06 7.44-7 7.93V19h4v2H8v-2h4v-3.07z"/></svg>
+                        </button>
+                    </div>
+                    <!-- Speaker ID Mode (shown when clone not supported) -->
+                    <div class="volume-row" id="speaker-id-row">
                         <span class="voice-label">Speaker ID</span>
                         <input type="number" class="voice-input" id="voice-sid" min="0" max="99" value="3">
                     </div>
@@ -382,7 +393,47 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="/static/app.js?v=3"></script>
+<!-- Voice Clone Modal -->
+<div class="clone-overlay" id="clone-overlay" style="display:none">
+    <div class="clone-modal">
+        <div class="clone-header">
+            <h3>Clone Voice</h3>
+            <button class="settings-close" id="clone-close">&times;</button>
+        </div>
+        <div class="clone-content">
+            <div class="clone-name-row">
+                <span class="voice-label">Voice Name</span>
+                <input type="text" class="enroll-input" id="clone-name" placeholder="my_voice" maxlength="32">
+            </div>
+            <div class="clone-method">
+                <button class="clone-method-btn active" id="clone-record-btn">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1 1.93c-3.94-.49-7-3.85-7-7.93h2c0 3.31 2.69 6 6 6s6-2.69 6-6h2c0 4.08-3.06 7.44-7 7.93V19h4v2H8v-2h4v-3.07z"/></svg>
+                    Record
+                </button>
+                <button class="clone-method-btn" id="clone-upload-btn">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/></svg>
+                    Upload
+                </button>
+            </div>
+            <div class="clone-record-area" id="clone-record-area">
+                <button class="record-btn" id="record-start-btn">
+                    <div class="record-icon"></div>
+                    <span>Start Recording</span>
+                </button>
+                <div class="record-status" id="record-status"></div>
+                <div class="record-timer" id="record-timer">0:00</div>
+            </div>
+            <div class="clone-upload-area" id="clone-upload-area" style="display:none">
+                <input type="file" id="clone-audio-input" accept=".wav,.mp3,.m4a,.webm" style="display:none">
+                <button class="action-btn" id="clone-select-btn">Select Audio File</button>
+                <span class="upload-filename" id="upload-filename"></span>
+            </div>
+            <button class="enroll-btn" id="clone-submit-btn" disabled>Clone Voice</button>
+        </div>
+    </div>
+</div>
+
+<script src="/static/app.js?v=7"></script>
 <script src="/static/diary.js?v=3"></script>
 </body>
 </html>

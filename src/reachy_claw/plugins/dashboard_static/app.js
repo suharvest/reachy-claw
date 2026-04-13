@@ -132,6 +132,9 @@ function connectDashboard() {
             setTimeout(() => { restartStatus.textContent = ''; }, 3000);
         }
         if (restartBtn) restartBtn.disabled = false;
+        // Query TTS capabilities and cloned voices
+        dashboardWs.send(JSON.stringify({ type: 'get_tts_capabilities' }));
+        dashboardWs.send(JSON.stringify({ type: 'get_cloned_voices' }));
     };
 
     dashboardWs.onmessage = (e) => {
@@ -280,7 +283,36 @@ function handleDashboardMsg(msg) {
             break;
 
         case 'voice_settings':
-            setVoiceUI(msg.speaker_id, msg.pitch_shift, msg.speed);
+            voiceSid = msg.speaker_id;
+            voicePitch = msg.pitch_shift;
+            voiceSpeed = msg.speed;
+            voiceCloneSupported = msg.voice_clone_supported || false;
+            selectedVoiceName = msg.cloned_voice_name || null;
+            updateVoiceUI();
+            setVoiceInputs();
+            break;
+
+        case 'tts_capabilities':
+            voiceCloneSupported = msg.voice_clone || false;
+            updateVoiceUI();
+            break;
+
+        case 'cloned_voices':
+            clonedVoices = msg.voices || [];
+            updateVoiceSelect();
+            break;
+
+        case 'clone_voice_result':
+            if (msg.success) {
+                clonedVoices.push(msg.voice);
+                updateVoiceSelect();
+                document.getElementById('voice-select').value = msg.voice.name;
+                selectedVoiceName = msg.voice.name;
+                showToast('Voice cloned: ' + msg.voice.name);
+            } else {
+                showToast('Clone failed: ' + msg.error, true);
+            }
+            closeCloneModal();
             break;
 
         case 'motor_state':
@@ -1272,19 +1304,44 @@ document.getElementById('capture-export-btn').onclick = async () => {
 let voiceSid = 3;
 let voicePitch = 1.5;
 let voiceSpeed = 0.8;
+let voiceCloneSupported = false;
+let clonedVoices = [];
+let selectedVoiceName = null;
+let mediaRecorder = null;
+let audioChunks = [];
+let recordingStartTime = null;
+let cloneAudioBlob = null;
 
 function initVoice() {
     const sidInput = document.getElementById('voice-sid');
+    const voiceSelect = document.getElementById('voice-select');
+    const cloneBtn = document.getElementById('clone-voice-btn');
     const pitchSlider = document.getElementById('voice-pitch');
     const pitchValue = document.getElementById('voice-pitch-value');
     const speedSlider = document.getElementById('voice-speed');
     const speedValue = document.getElementById('voice-speed-value');
 
-    sidInput.onchange = () => {
-        voiceSid = Math.max(0, parseInt(sidInput.value) || 0);
-        sidInput.value = voiceSid;
-        sendVoice();
-    };
+    // Speaker ID input (fallback mode)
+    if (sidInput) {
+        sidInput.onchange = () => {
+            voiceSid = Math.max(0, parseInt(sidInput.value) || 0);
+            sidInput.value = voiceSid;
+            sendVoice();
+        };
+    }
+
+    // Voice select (clone mode)
+    if (voiceSelect) {
+        voiceSelect.onchange = () => {
+            selectedVoiceName = voiceSelect.value || null;
+            sendVoice();
+        };
+    }
+
+    // Clone button opens modal
+    if (cloneBtn) {
+        cloneBtn.onclick = () => openCloneModal();
+    }
 
     pitchSlider.oninput = () => {
         voicePitch = parseFloat(pitchSlider.value);
@@ -1297,28 +1354,241 @@ function initVoice() {
         speedValue.textContent = voiceSpeed.toFixed(1) + 'x';
     };
     speedSlider.onchange = () => sendVoice();
+
+    // Query TTS capabilities on init
+    if (dashboardWs && dashboardWs.readyState === 1) {
+        dashboardWs.send(JSON.stringify({ type: 'get_tts_capabilities' }));
+        dashboardWs.send(JSON.stringify({ type: 'get_cloned_voices' }));
+    }
 }
 
-function setVoiceUI(sid, pitch, speed) {
-    voiceSid = sid;
-    voicePitch = pitch;
-    voiceSpeed = speed;
-    document.getElementById('voice-sid').value = sid;
-    document.getElementById('voice-pitch').value = pitch;
-    document.getElementById('voice-pitch-value').textContent = (pitch >= 0 ? '+' : '') + pitch.toFixed(1);
-    document.getElementById('voice-speed').value = speed;
-    document.getElementById('voice-speed-value').textContent = speed.toFixed(1) + 'x';
+function updateVoiceUI() {
+    const cloneRow = document.getElementById('voice-clone-row');
+    const speakerRow = document.getElementById('speaker-id-row');
+    if (voiceCloneSupported) {
+        if (cloneRow) cloneRow.style.display = 'flex';
+        if (speakerRow) speakerRow.style.display = 'none';
+    } else {
+        if (cloneRow) cloneRow.style.display = 'none';
+        if (speakerRow) speakerRow.style.display = 'flex';
+    }
+}
+
+function updateVoiceSelect() {
+    const select = document.getElementById('voice-select');
+    if (!select) return;
+    select.innerHTML = '<option value="">-- Select Voice --</option>';
+    for (const v of clonedVoices) {
+        const opt = document.createElement('option');
+        opt.value = v.name;
+        opt.textContent = v.name;
+        select.appendChild(opt);
+    }
+    if (selectedVoiceName) {
+        select.value = selectedVoiceName;
+    }
+}
+
+function setVoiceInputs() {
+    document.getElementById('voice-sid').value = voiceSid;
+    document.getElementById('voice-pitch').value = voicePitch;
+    document.getElementById('voice-pitch-value').textContent = (voicePitch >= 0 ? '+' : '') + voicePitch.toFixed(1);
+    document.getElementById('voice-speed').value = voiceSpeed;
+    document.getElementById('voice-speed-value').textContent = voiceSpeed.toFixed(1) + 'x';
+    if (selectedVoiceName) {
+        const select = document.getElementById('voice-select');
+        if (select) select.value = selectedVoiceName;
+    }
 }
 
 function sendVoice() {
-    if (dashboardWs && dashboardWs.readyState === 1) {
-        dashboardWs.send(JSON.stringify({
-            type: 'set_voice',
-            speaker_id: voiceSid,
-            pitch_shift: voicePitch,
-            speed: voiceSpeed,
-        }));
+    if (!dashboardWs || dashboardWs.readyState !== 1) return;
+    const msg = {
+        type: 'set_voice',
+        pitch_shift: voicePitch,
+        speed: voiceSpeed,
+    };
+    if (voiceCloneSupported && selectedVoiceName) {
+        msg.voice_name = selectedVoiceName;
+    } else {
+        msg.speaker_id = voiceSid;
     }
+    dashboardWs.send(JSON.stringify(msg));
+}
+
+// ── Voice Clone Modal ────────────────────────────────────────────────
+function openCloneModal() {
+    document.getElementById('clone-overlay').style.display = 'flex';
+    document.getElementById('clone-name').value = '';
+    document.getElementById('clone-submit-btn').disabled = true;
+    document.getElementById('record-status').textContent = '';
+    document.getElementById('record-timer').textContent = '0:00';
+    resetRecordState();
+}
+
+function closeCloneModal() {
+    document.getElementById('clone-overlay').style.display = 'none';
+    resetRecordState();
+}
+
+function resetRecordState() {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+    }
+    mediaRecorder = null;
+    audioChunks = [];
+    recordingStartTime = null;
+    cloneAudioBlob = null;
+    const btn = document.getElementById('record-start-btn');
+    if (btn) {
+        btn.classList.remove('recording');
+        btn.querySelector('span').textContent = 'Start Recording';
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const closeBtn = document.getElementById('clone-close');
+    if (closeBtn) closeBtn.onclick = closeCloneModal;
+
+    // Method toggle
+    const recordBtn = document.getElementById('clone-record-btn');
+    const uploadBtn = document.getElementById('clone-upload-btn');
+    const recordArea = document.getElementById('clone-record-area');
+    const uploadArea = document.getElementById('clone-upload-area');
+
+    if (recordBtn) {
+        recordBtn.onclick = () => {
+            recordBtn.classList.add('active');
+            uploadBtn.classList.remove('active');
+            recordArea.style.display = 'flex';
+            uploadArea.style.display = 'none';
+        };
+    }
+    if (uploadBtn) {
+        uploadBtn.onclick = () => {
+            uploadBtn.classList.add('active');
+            recordBtn.classList.remove('active');
+            recordArea.style.display = 'none';
+            uploadArea.style.display = 'flex';
+        };
+    }
+
+    // Recording logic
+    const startBtn = document.getElementById('record-start-btn');
+    if (startBtn) {
+        startBtn.onclick = async () => {
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
+                stopRecording();
+            } else {
+                await startRecording();
+            }
+        };
+    }
+
+    // Upload logic
+    const selectBtn = document.getElementById('clone-select-btn');
+    const audioInput = document.getElementById('clone-audio-input');
+    if (selectBtn && audioInput) {
+        selectBtn.onclick = () => audioInput.click();
+        audioInput.onchange = (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            document.getElementById('upload-filename').textContent = file.name;
+            cloneAudioBlob = file;
+            document.getElementById('clone-submit-btn').disabled = false;
+        };
+    }
+
+    // Submit clone
+    const submitBtn = document.getElementById('clone-submit-btn');
+    if (submitBtn) {
+        submitBtn.onclick = async () => {
+            const name = document.getElementById('clone-name').value.trim();
+            if (!name) {
+                showToast('Enter a voice name', true);
+                return;
+            }
+            if (!cloneAudioBlob) {
+                showToast('Record or upload audio first', true);
+                return;
+            }
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Cloning...';
+
+            const reader = new FileReader();
+            reader.onload = async () => {
+                const b64 = reader.result.split(',')[1];
+                dashboardWs.send(JSON.stringify({
+                    type: 'clone_voice',
+                    name: name,
+                    audio_b64: b64,
+                }));
+            };
+            reader.onerror = () => {
+                showToast('Failed to read audio', true);
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Clone Voice';
+            };
+            reader.readAsDataURL(cloneAudioBlob);
+        };
+    }
+});
+
+async function startRecording() {
+    // Check if HTTPS or localhost (required for microphone access)
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+        showToast('Microphone requires HTTPS. Use https:// or localhost.', true);
+        return;
+    }
+    
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+        audioChunks = [];
+
+        mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data);
+        mediaRecorder.onstop = async () => {
+            const blob = new Blob(audioChunks, { type: 'audio/webm' });
+            cloneAudioBlob = blob;
+            document.getElementById('clone-submit-btn').disabled = false;
+            document.getElementById('record-status').textContent = 'Recording saved (' + Math.round(blob.size / 1024) + ' KB)';
+            stream.getTracks().forEach(t => t.stop());
+        };
+
+        mediaRecorder.start();
+        recordingStartTime = Date.now();
+        const btn = document.getElementById('record-start-btn');
+        btn.classList.add('recording');
+        btn.querySelector('span').textContent = 'Stop';
+        updateRecordTimer();
+    } catch (e) {
+        console.error('Microphone error:', e);
+        if (e.name === 'NotAllowedError') {
+            showToast('Microphone blocked. Click the lock icon in address bar to allow.', true);
+        } else if (e.name === 'NotFoundError') {
+            showToast('No microphone found on this device.', true);
+        } else {
+            showToast('Microphone error: ' + e.message, true);
+        }
+    }
+}
+
+function stopRecording() {
+    if (mediaRecorder) {
+        mediaRecorder.stop();
+    }
+    const btn = document.getElementById('record-start-btn');
+    btn.classList.remove('recording');
+    btn.querySelector('span').textContent = 'Start Recording';
+}
+
+function updateRecordTimer() {
+    if (!recordingStartTime || !mediaRecorder || mediaRecorder.state !== 'recording') return;
+    const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+    const mins = Math.floor(elapsed / 60);
+    const secs = elapsed % 60;
+    document.getElementById('record-timer').textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+    requestAnimationFrame(updateRecordTimer);
 }
 
 // ── Audio detection sliders ──────────────────────────────────────────

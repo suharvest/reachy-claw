@@ -181,6 +181,7 @@ class KokoroTTS(TTSBackend):
         speaker_id: int = 0
         speed: float = 1.0
         pitch_shift: float = 0.0
+        clone_seed: int = 42
 
     def __init__(
         self,
@@ -188,12 +189,39 @@ class KokoroTTS(TTSBackend):
         speaker_id: int = 0,
         speed: float = 1.0,
         pitch_shift: float = 0.0,
+        clone_seed: int = 42,
     ):
         self._base_url = base_url.rstrip("/")
         self._speaker_id = speaker_id
         self._speed = speed
         self._pitch_shift = pitch_shift
+        self._clone_seed = clone_seed
+        self._cloned_voice_embedding: bytes | None = None
+        self._cloned_voice_name: str | None = None
         self._check_streaming_support()
+
+    def set_cloned_voice(self, embedding_path: str | None, name: str | None = None) -> None:
+        """Set cloned voice embedding for synthesis.
+
+        Args:
+            embedding_path: Path to .bin file (1024 float32 embedding), or None to disable.
+            name: Voice name (for logging/debugging).
+        """
+        if embedding_path:
+            import os
+            if os.path.exists(embedding_path):
+                with open(embedding_path, "rb") as f:
+                    self._cloned_voice_embedding = f.read()
+                self._cloned_voice_name = name
+                logger.info("Kokoro TTS: using cloned voice '%s'", name)
+            else:
+                logger.warning("Cloned voice file not found: %s", embedding_path)
+                self._cloned_voice_embedding = None
+                self._cloned_voice_name = None
+        else:
+            self._cloned_voice_embedding = None
+            self._cloned_voice_name = None
+            logger.info("Kokoro TTS: switched to speaker_id mode")
 
     def _check_streaming_support(self) -> None:
         """Probe server health and /tts/stream endpoint at init time.
@@ -224,18 +252,33 @@ class KokoroTTS(TTSBackend):
             logger.info("Kokoro TTS: using batch mode (no /tts/stream)")
 
     async def synthesize(self, text: str) -> str:
+        import base64
         import json
         import urllib.request
 
-        payload = json.dumps({
-            "text": text,
-            "sid": self._speaker_id,
-            "speed": self._speed,
-            "pitch": self._pitch_shift or None,
-        }).encode()
+        if self._cloned_voice_embedding:
+            # Use /tts/clone endpoint with speaker embedding
+            # Use fixed seed for deterministic output with cloned voice
+            payload = json.dumps({
+                "text": text,
+                "speaker_embedding_b64": base64.b64encode(self._cloned_voice_embedding).decode(),
+                "speed": self._speed,
+                "pitch": self._pitch_shift,
+                "seed": self._clone_seed,
+            }).encode()
+            endpoint = f"{self._base_url}/tts/clone"
+        else:
+            # Use /tts endpoint with speaker_id
+            payload = json.dumps({
+                "text": text,
+                "sid": self._speaker_id,
+                "speed": self._speed,
+                "pitch": self._pitch_shift,
+            }).encode()
+            endpoint = f"{self._base_url}/tts"
 
         req = urllib.request.Request(
-            f"{self._base_url}/tts",
+            endpoint,
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -260,23 +303,40 @@ class KokoroTTS(TTSBackend):
         return tmp.name
 
     async def synthesize_streaming(self, text: str):
-        """Stream PCM chunks from Jetson /tts/stream endpoint."""
+        """Stream PCM chunks from Jetson TTS endpoint.
+
+        Supports both speaker_id mode (/tts/stream) and clone mode (/tts/clone/stream).
+        """
         import asyncio
+        import base64
         import json
         import struct
         import urllib.request
 
         import numpy as np
 
-        payload = json.dumps({
-            "text": text,
-            "sid": self._speaker_id,
-            "speed": self._speed,
-            "pitch": self._pitch_shift or None,
-        }).encode()
+        if self._cloned_voice_embedding:
+            # Clone streaming mode: /tts/clone/stream
+            payload = json.dumps({
+                "text": text,
+                "speaker_embedding_b64": base64.b64encode(self._cloned_voice_embedding).decode(),
+                "speed": self._speed,
+                "pitch": self._pitch_shift,
+                "seed": self._clone_seed,
+            }).encode()
+            endpoint = f"{self._base_url}/tts/clone/stream"
+        else:
+            # Standard streaming with speaker_id
+            payload = json.dumps({
+                "text": text,
+                "sid": self._speaker_id,
+                "speed": self._speed,
+                "pitch": self._pitch_shift,
+            }).encode()
+            endpoint = f"{self._base_url}/tts/stream"
 
         req = urllib.request.Request(
-            f"{self._base_url}/tts/stream",
+            endpoint,
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",

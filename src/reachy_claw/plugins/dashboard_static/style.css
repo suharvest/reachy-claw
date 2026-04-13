@@ -845,4 +845,78 @@ body {
     transition: opacity 0.3s; pointer-events: none;
 }
 .toast.show { opacity: 1; }
+
+/* Voice Clone Button */
+.clone-voice-btn {
+    background: var(--green); border: 1px solid var(--green-dim); border-radius: 4px;
+    color: var(--bg); width: 32px; height: 32px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    margin-left: 8px; transition: all 0.2s; flex-shrink: 0;
+}
+.clone-voice-btn:hover { background: var(--green-dim); border-color: var(--green); color: var(--text-bright); }
+.clone-voice-btn svg { width: 16px; height: 16px; }
+
+/* Clone Modal */
+.clone-overlay {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, 0.85);
+    z-index: 2200; display: flex; align-items: center; justify-content: center;
+}
+.clone-modal {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; width: 400px; max-width: 90vw; padding: 20px;
+}
+.clone-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 16px;
+}
+.clone-header h3 { font-size: 14px; color: var(--text-bright); font-weight: 600; }
+.clone-content { display: flex; flex-direction: column; gap: 16px; }
+.clone-name-row { display: flex; align-items: center; gap: 12px; }
+.clone-name-row .voice-label { min-width: 80px; }
+
+.clone-method { display: flex; gap: 8px; }
+.clone-method-btn {
+    flex: 1; padding: 12px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); cursor: pointer;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    font-size: 13px; transition: all 0.2s;
+}
+.clone-method-btn:hover { border-color: var(--text-dim); }
+.clone-method-btn.active { border-color: var(--green); color: var(--green); }
+.clone-method-btn svg { width: 18px; height: 18px; }
+
+/* Record Area */
+.clone-record-area {
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+}
+.record-btn {
+    width: 100%; padding: 20px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    transition: all 0.2s;
+}
+.record-btn:hover { border-color: var(--text-dim); }
+.record-btn.recording { border-color: var(--red); color: var(--red); }
+.record-icon {
+    width: 40px; height: 40px; background: var(--border); border-radius: 50%;
+    transition: all 0.3s;
+}
+.record-btn.recording .record-icon {
+    background: var(--red);
+    animation: pulse 1s infinite;
+}
+@keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.6; transform: scale(0.95); }
+}
+.record-btn span { font-size: 13px; }
+.record-status { font-size: 12px; color: var(--text-dim); }
+.record-timer { font-size: 18px; color: var(--text-dim); font-family: monospace; }
+
+/* Upload Area */
+.clone-upload-area {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+}
+.upload-filename { font-size: 12px; color: var(--text-dim); }
 .toast.error { border-color: var(--red); color: var(--red); }
