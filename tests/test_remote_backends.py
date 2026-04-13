@@ -154,6 +154,7 @@ class TestKokoroTTS:
                 assert body["text"] == "Hello world"
                 assert body["sid"] == 0
                 assert body["speed"] == 1.0
+                assert body["pitch"] == 0.0
             finally:
                 os.unlink(path)
 
@@ -173,8 +174,38 @@ class TestKokoroTTS:
                 body = json.loads(req.data.decode())
                 assert body["sid"] == 45
                 assert body["speed"] == 1.5
+                assert body["pitch"] == 0.0
             finally:
                 os.unlink(path)
+
+    @pytest.mark.asyncio
+    async def test_synthesize_clone_mode_passes_seed_and_zero_pitch(self):
+        with self._mock_health():
+            tts = KokoroTTS(base_url="http://jetson:8000", clone_seed=1234)
+
+        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+            f.write(b"x" * 16)
+            embedding_path = f.name
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"fake wav"
+
+        try:
+            tts.set_cloned_voice(embedding_path, "test_voice")
+            with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+                path = await tts.synthesize("Test clone")
+                try:
+                    req = mock_open.call_args[0][0]
+                    assert req.full_url.endswith("/tts/clone")
+                    body = json.loads(req.data.decode())
+                    assert body["text"] == "Test clone"
+                    assert body["seed"] == 1234
+                    assert body["pitch"] == 0.0
+                    assert "speaker_embedding_b64" in body
+                finally:
+                    os.unlink(path)
+        finally:
+            os.unlink(embedding_path)
 
 
 # ── Factory: KokoroTTS ──────────────────────────────────────────────────
@@ -228,8 +259,10 @@ class TestConfigSpeechFields:
         assert config.sensevoice_language == "auto"
         assert config.kokoro_speaker_id == 3
         assert config.kokoro_speed == 1.2
+        assert config.kokoro_clone_seed == 42
         assert config.matcha_speaker_id == 0
         assert config.matcha_speed == 1.2
+        assert config.matcha_clone_seed == 42
 
     def test_env_override(self):
         with patch.dict(os.environ, {"SPEECH_SERVICE_URL": "http://custom:9000"}):
