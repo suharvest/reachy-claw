@@ -279,6 +279,7 @@ class ParaformerStreamingSTT(STTBackend):
         self._sample_rate = 16000
         self._partial_text = ""
         self._final_text = ""
+        self._chunks_sent = 0
 
     def preload(self) -> None:
         import urllib.request
@@ -367,11 +368,14 @@ class ParaformerStreamingSTT(STTBackend):
         self._sample_rate = sample_rate
         self._partial_text = ""
         self._final_text = ""
+        self._chunks_sent = 0
         if self._ws is not None:
             return
         ws_url = f"{self._ws_url}/asr/stream?language={self._language}&sample_rate={sample_rate}"
-        self._ws = websockets.sync.client.connect(ws_url)
-        logger.debug("Paraformer streaming WebSocket connected")
+        # Increase ping timeout to 60s (default 20s) to avoid premature disconnection
+        # during silence periods
+        self._ws = websockets.sync.client.connect(ws_url, ping_timeout=60)
+        logger.debug("Paraformer streaming WebSocket connected: %s", ws_url)
 
     def ensure_connected(self, sample_rate: int = 16000) -> None:
         """Alias for start_stream — keep WS alive."""
@@ -389,9 +393,11 @@ class ParaformerStreamingSTT(STTBackend):
             # Auto-reconnect
             try:
                 ws_url = f"{self._ws_url}/asr/stream?language={self._language}&sample_rate={self._sample_rate}"
-                self._ws = websockets.sync.client.connect(ws_url)
-                logger.debug("Paraformer WebSocket reconnected")
-            except Exception:
+                self._ws = websockets.sync.client.connect(ws_url, ping_timeout=60)
+                self._chunks_sent = 0
+                logger.debug("Paraformer WebSocket reconnected: %s", ws_url)
+            except Exception as e:
+                logger.warning("Paraformer WebSocket reconnect failed: %s", e)
                 return None
 
         # Convert to int16 bytes
@@ -405,14 +411,20 @@ class ParaformerStreamingSTT(STTBackend):
 
         try:
             self._ws.send(chunk_int.tobytes())
+            self._chunks_sent += 1
+            if self._chunks_sent % 100 == 0:
+                logger.debug("Paraformer stream sent %d chunks", self._chunks_sent)
         except Exception:
             self._close_ws()
             return None
 
         # Non-blocking receive — check if server sent a result
         try:
-            raw = self._ws.recv(timeout=0)
-        except (TimeoutError, Exception):
+            raw = self._ws.recv(timeout=0.01)
+        except TimeoutError:
+            return None
+        except Exception:
+            self._close_ws()
             return None
 
         try:
@@ -442,7 +454,7 @@ class ParaformerStreamingSTT(STTBackend):
         import json
 
         # Fallback: best text we have so far
-        result = self._partial_text or self._final_text or ""
+        result = self._final_text or self._partial_text or ""
 
         if self._ws is not None:
             try:
