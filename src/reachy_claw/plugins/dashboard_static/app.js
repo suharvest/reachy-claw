@@ -915,6 +915,9 @@ function initSettings() {
     // Default models (fallback when Ollama API unavailable)
     const defaultModels = ["qwen3.5:0.8b", "qwen3.5:2b-q4_K_M", "qwen3.5:4b"];
 
+    // Debounce timer for URL changes
+    let fetchModelsTimer = null;
+
     // Fetch models from Ollama API and update select
     async function fetchOllamaModels(baseUrl) {
         try {
@@ -927,17 +930,25 @@ function initSettings() {
         }
     }
 
-    // Update model select options
+    // Update model select options (preserve current selection if model exists in new list)
     function updateModelSelect(models) {
         if (!ollamaModel) return;
         const current = ollamaModel.value;
         ollamaModel.innerHTML = '';
+        let found = false;
         for (const m of models) {
             const opt = document.createElement('option');
             opt.value = m;
             opt.textContent = m;
-            if (m === current) opt.selected = true;
+            if (m === current) {
+                opt.selected = true;
+                found = true;
+            }
             ollamaModel.appendChild(opt);
+        }
+        // If current model not in list, select first
+        if (!found && models.length > 0) {
+            ollamaModel.value = models[0];
         }
     }
 
@@ -953,25 +964,22 @@ function initSettings() {
         if (ollamaUrlRow) ollamaUrlRow.style.display = isOllama ? '' : 'none';
         if (gatewayHostRow) gatewayHostRow.style.display = isOllama ? 'none' : '';
         if (gatewayPortRow) gatewayPortRow.style.display = isOllama ? 'none' : '';
-        // Fetch models when switching to Ollama backend
-        if (isOllama && ollamaUrl && ollamaUrl.value) {
-            fetchOllamaModels(ollamaUrl.value);
-        }
     }
 
     if (llmBackend) {
         llmBackend.onchange = updateLlmFieldsVisibility;
     }
 
-    // Fetch models when Ollama URL changes
+    // Debounced fetch on URL change (500ms delay to avoid flicker)
     if (ollamaUrl) {
-        ollamaUrl.onchange = () => {
-            if (llmBackend && llmBackend.value === 'ollama' && ollamaUrl.value) {
-                fetchOllamaModels(ollamaUrl.value);
-            }
+        ollamaUrl.oninput = () => {
+            if (fetchModelsTimer) clearTimeout(fetchModelsTimer);
+            fetchModelsTimer = setTimeout(() => {
+                if (llmBackend && llmBackend.value === 'ollama' && ollamaUrl.value) {
+                    fetchOllamaModels(ollamaUrl.value);
+                }
+            }, 500);
         };
-        // Also fetch on blur (when user finishes typing)
-        ollamaUrl.onblur = ollamaUrl.onchange;
     }
 
     // Apply button: send all LLM settings
