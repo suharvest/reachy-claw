@@ -41,6 +41,48 @@ let asrActiveTimer = null;
 // Thought bubble history (max 3)
 const MAX_THOUGHTS = 5;
 
+// ── LLM settings shared state (used by updateRobotState + syncLlmUI) ──
+let llmDirty = false;
+let modelFetchPending = false;
+let lastModelFetchUrl = '';
+let lastModelFetchTime = 0;
+const defaultOllamaModels = ["qwen3.5:0.8b", "qwen3.5:2b-q4_K_M", "qwen3.5:4b"];
+
+function updateModelSelect(models) {
+    const el = document.getElementById('ollama-model');
+    if (!el) return;
+    const current = el.value;
+    el.innerHTML = '';
+    let found = false;
+    for (const m of models) {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        if (m === current) { opt.selected = true; found = true; }
+        el.appendChild(opt);
+    }
+    if (!found && models.length > 0) el.value = models[0];
+}
+
+async function fetchOllamaModels(baseUrl, force) {
+    const now = Date.now();
+    if (!force && baseUrl === lastModelFetchUrl && now - lastModelFetchTime < 10000) return;
+    if (modelFetchPending) return;
+    modelFetchPending = true;
+    lastModelFetchUrl = baseUrl;
+    lastModelFetchTime = now;
+    try {
+        const res = await fetch(`/api/ollama/models?url=${encodeURIComponent(baseUrl)}`);
+        const data = await res.json();
+        updateModelSelect(data.models || defaultOllamaModels);
+    } catch (e) {
+        console.log('Failed to fetch Ollama models:', e);
+        updateModelSelect(defaultOllamaModels);
+    } finally {
+        modelFetchPending = false;
+    }
+}
+
 // ── DOM refs ────────────────────────────────────────────────────────
 const videoEl = document.getElementById('video-stream');
 const canvasEl = document.getElementById('overlay-canvas');
@@ -259,6 +301,7 @@ function handleDashboardMsg(msg) {
             break;
 
         case 'llm_settings':
+            llmDirty = false;
             syncLlmUI(msg.backend, msg.model, msg.ollama_url, msg.gateway_host, msg.gateway_port);
             break;
 
@@ -554,8 +597,8 @@ function updateRobotState(msg) {
         const lbl = document.getElementById('energy-threshold-value');
         if (lbl) { lbl.textContent = msg.barge_in_energy_threshold.toFixed(3); }
     }
-    if (msg.llm_backend !== undefined) {
-        syncLlmUI(msg.llm_backend, msg.ollama_model);
+    if (msg.llm_backend !== undefined && !llmDirty) {
+        syncLlmUI(msg.llm_backend, msg.ollama_model, msg.ollama_url, msg.gateway_host, msg.gateway_port);
     }
     document.getElementById('dot-robot').className = 'dot live';
 }
@@ -912,45 +955,8 @@ function initSettings() {
     const gatewayPort = document.getElementById('gateway-port');
     const applyLlmBtn = document.getElementById('apply-llm-btn');
 
-    // Default models (fallback when Ollama API unavailable)
-    const defaultModels = ["qwen3.5:0.8b", "qwen3.5:2b-q4_K_M", "qwen3.5:4b"];
-
     // Debounce timer for URL changes
     let fetchModelsTimer = null;
-
-    // Fetch models from Ollama API and update select
-    async function fetchOllamaModels(baseUrl) {
-        try {
-            const res = await fetch(`/api/ollama/models?url=${encodeURIComponent(baseUrl)}`);
-            const data = await res.json();
-            updateModelSelect(data.models || defaultModels);
-        } catch (e) {
-            console.log('Failed to fetch Ollama models:', e);
-            updateModelSelect(defaultModels);
-        }
-    }
-
-    // Update model select options (preserve current selection if model exists in new list)
-    function updateModelSelect(models) {
-        if (!ollamaModel) return;
-        const current = ollamaModel.value;
-        ollamaModel.innerHTML = '';
-        let found = false;
-        for (const m of models) {
-            const opt = document.createElement('option');
-            opt.value = m;
-            opt.textContent = m;
-            if (m === current) {
-                opt.selected = true;
-                found = true;
-            }
-            ollamaModel.appendChild(opt);
-        }
-        // If current model not in list, select first
-        if (!found && models.length > 0) {
-            ollamaModel.value = models[0];
-        }
-    }
 
     // Show/hide fields when backend changes
     function updateLlmFieldsVisibility() {
@@ -967,24 +973,26 @@ function initSettings() {
     }
 
     if (llmBackend) {
-        llmBackend.onchange = updateLlmFieldsVisibility;
+        llmBackend.onchange = () => { llmDirty = true; updateLlmFieldsVisibility(); };
+    }
+    if (ollamaModel) {
+        ollamaModel.onchange = () => { llmDirty = true; };
     }
 
-    // Debounced fetch on URL change (500ms delay to avoid flicker)
+    // Debounced fetch on URL input (only after user stops typing)
     if (ollamaUrl) {
-        ollamaUrl.oninput = () => {
-            if (fetchModelsTimer) clearTimeout(fetchModelsTimer);
-            fetchModelsTimer = setTimeout(() => {
-                if (llmBackend && llmBackend.value === 'ollama' && ollamaUrl.value) {
-                    fetchOllamaModels(ollamaUrl.value);
-                }
-            }, 500);
+        ollamaUrl.oninput = () => { llmDirty = true; };
+        ollamaUrl.onblur = () => {
+            if (llmBackend && llmBackend.value === 'ollama' && ollamaUrl.value) {
+                fetchOllamaModels(ollamaUrl.value, true);
+            }
         };
     }
 
     // Apply button: send all LLM settings
     if (applyLlmBtn) {
         applyLlmBtn.onclick = () => {
+            llmDirty = false;
             if (!dashboardWs || dashboardWs.readyState !== 1) {
                 showToast('Not connected', true);
                 return;
@@ -1208,7 +1216,15 @@ function syncLlmUI(backend, model, ollamaUrl, gatewayHost, gatewayPort) {
     if (gatewayHostRow) gatewayHostRow.style.display = isOllama ? 'none' : '';
     if (gatewayPortRow) gatewayPortRow.style.display = isOllama ? 'none' : '';
 
-    if (modelEl && model) modelEl.value = model;
+    if (modelEl && model) {
+        modelEl.value = model;
+        // If target model isn't in the select options, fetch from Ollama to populate
+        if (isOllama && modelEl.value !== model && ollamaUrl) {
+            fetchOllamaModels(ollamaUrl).then(() => {
+                if (modelEl) modelEl.value = model;
+            });
+        }
+    }
     if (ollamaUrlEl && ollamaUrl) ollamaUrlEl.value = ollamaUrl;
     if (gatewayHostEl && gatewayHost) gatewayHostEl.value = gatewayHost;
     if (gatewayPortEl && gatewayPort) gatewayPortEl.value = gatewayPort;
