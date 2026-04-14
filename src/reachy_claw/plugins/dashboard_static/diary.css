@@ -988,3 +988,27 @@
 
 /* ── Google Fonts (add Noto Serif SC + JetBrains Mono) ───────────── */
 @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap');
+
+/* ── Small Screen Responsive ─────────────────────────────────────── */
+
+@media (max-width: 900px) {
+    .page-tabs { padding: 0 16px; }
+    .page-tab { padding: 12px 20px; font-size: 12px; }
+
+    #page-diary { padding-top: 42px; }
+    .diary-page { height: calc(100vh - 42px); }
+    .diary-inner { padding: 24px 16px 60px; }
+
+    .narration-content { padding: 0 20px; }
+}
+
+@media (max-height: 500px) {
+    .page-tabs { padding: 0 16px; }
+    .page-tab { padding: 8px 20px; font-size: 11px; }
+
+    #page-diary { padding-top: 36px; }
+    .diary-page { height: calc(100vh - 36px); }
+    .diary-inner { padding: 16px 16px 40px; }
+
+    .narration-chart { height: 140px; }
+}
