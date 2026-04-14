@@ -37,6 +37,8 @@ class ReachyClawApp:
         self.motor_enabled = True
 
         self._plugins: List[Plugin] = []
+        self._reconnect_task: asyncio.Task | None = None
+        self._connect_kwargs: dict = {}  # saved from connect_robot for reconnect
 
     def get_plugin(self, name: str) -> "Plugin | None":
         """Find a registered plugin by name."""
@@ -244,6 +246,9 @@ class ReachyClawApp:
         if sys.platform == "darwin" and "media_backend" not in kwargs:
             kwargs["media_backend"] = "no_media"
 
+        # Save for reconnect
+        self._connect_kwargs = kwargs
+
         # Auto-spawn daemon for USB-connected Lite
         if self.config.reachy_spawn_daemon:
             self._ensure_daemon(self.config.reachy_serialport)
@@ -264,6 +269,7 @@ class ReachyClawApp:
                 logger.warning(f"Media backend unavailable ({e}), retrying with no_media")
                 try:
                     kwargs["media_backend"] = "no_media"
+                    self._connect_kwargs = kwargs
                     self.reachy = ReachyMini(**kwargs)
                     self.reachy.__enter__()
                     self.reachy.enable_motors()
@@ -344,6 +350,48 @@ class ReachyClawApp:
         logger.info(f"Plugin '{plugin.name}' registered")
         return True
 
+    def _disconnect_robot(self) -> None:
+        """Clean up broken robot connection and mark for reconnect."""
+        if self.reachy is None:
+            return
+        logger.warning("Robot connection lost, switching to sim mode")
+        old = self.reachy
+        self.reachy = None
+        if self._owns_reachy:
+            try:
+                old.__exit__(None, None, None)
+            except Exception:
+                pass
+        self._owns_reachy = False
+
+    async def _daemon_reconnect_loop(self) -> None:
+        """Background loop: reconnect to daemon with exponential backoff (5s → 30s cap)."""
+        try:
+            from reachy_mini import ReachyMini
+        except ImportError:
+            return
+
+        interval = 5
+        max_interval = 30
+        while self.running:
+            await asyncio.sleep(interval)
+            if self.reachy is not None:
+                # Connection alive — reset backoff
+                interval = 5
+                continue
+            logger.info("Attempting daemon reconnect...")
+            try:
+                reachy = ReachyMini(**self._connect_kwargs)
+                reachy.__enter__()
+                reachy.enable_motors()
+                self.reachy = reachy
+                self._owns_reachy = True
+                interval = 5  # reset backoff on success
+                logger.info("Daemon reconnected (motors enabled)")
+            except Exception as e:
+                logger.debug(f"Daemon reconnect failed: {e}")
+                interval = min(interval * 2, max_interval)
+
     async def run(self) -> None:
         """Start all registered plugins concurrently."""
         if not self._plugins:
@@ -358,6 +406,12 @@ class ReachyClawApp:
         for plugin in self._plugins:
             plugin._running = True
             tasks.append(asyncio.create_task(plugin.start(), name=plugin.name))
+
+        # Start daemon reconnect loop (handles both startup failure and mid-run disconnect)
+        if self._connect_kwargs:
+            self._reconnect_task = asyncio.create_task(
+                self._daemon_reconnect_loop(), name="daemon-reconnect"
+            )
 
         self.healthy = True
         logger.info("App marked healthy")
@@ -376,6 +430,12 @@ class ReachyClawApp:
         logger.info("Shutting down plugins...")
         self.running = False
         self.healthy = False
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+            try:
+                await self._reconnect_task
+            except asyncio.CancelledError:
+                pass
         for plugin in reversed(self._plugins):
             try:
                 await plugin.stop()

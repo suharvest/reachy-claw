@@ -303,6 +303,8 @@ class MotionPlugin(Plugin):
 
             pose = create_head_pose(yaw=yaw, pitch=pitch, roll=roll, degrees=True)
             reachy.set_target_head_pose(pose)
+        except ConnectionError:
+            self.app._disconnect_robot()
         except Exception:
             pass
 
@@ -373,5 +375,7 @@ class MotionPlugin(Plugin):
                 reachy.goto_target(**kwargs)
 
             logger.debug(f"Executed: {expr.description}")
+        except ConnectionError:
+            self.app._disconnect_robot()
         except Exception as e:
             logger.error(f"Failed to execute expression: {e}")
