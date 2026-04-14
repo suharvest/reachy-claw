@@ -1,6 +1,8 @@
-"""Lightweight Ollama LLM client with streaming and emotion parsing.
+"""Lightweight Ollama LLM client with streaming, emotion parsing, and skill loading.
 
-Supports optional tool calling (describe_scene) for VLM vision queries.
+Supports progressive skill loading: LLM starts with a lightweight skill index,
+calls load_skill() to activate tools on demand, then uses them via tool calling.
+Also supports VLM vision queries via describe_scene.
 Uses httpx (already a project dependency) to call Ollama's /api/chat endpoint.
 """
 
@@ -102,6 +104,8 @@ class OllamaConfig:
     enable_vlm: bool = False
     vlm_model: str = ""
     vlm_prompt: str = "Describe what you see in this image briefly."
+    # Skill-based tool calling (requires capable model, e.g. 7B+)
+    skill_dir: str = "skills"  # directory containing skill subdirs, each with SKILL.md
 
 
 class OllamaClient:
@@ -109,6 +113,11 @@ class OllamaClient:
 
     Implements the same callback interface so ConversationPlugin can use it
     without changes to its pipeline logic.
+
+    When skill_dir contains skill subdirs, supports progressive tool loading:
+    1. System prompt includes a lightweight skill index
+    2. LLM calls load_skill(name) to activate a section's tools
+    3. Activated tools become available for the rest of the turn
     """
 
     def __init__(self, ollama_config: OllamaConfig):
@@ -122,6 +131,20 @@ class OllamaClient:
 
         self.callbacks = StreamCallbacks()
 
+        # Skill loading
+        self._skill_sections: dict[str, "SkillSection"] = {}
+        self._skill_index: str = ""
+        self._tool_api_base: dict[str, str] = {}  # tool_name → api_base URL
+        if ollama_config.skill_dir:
+            from .skill_loader import load_skill_dir, build_skill_index
+            sections = load_skill_dir(ollama_config.skill_dir)
+            self._skill_sections = {s.key: s for s in sections}
+            self._skill_index = build_skill_index(sections)
+            # Build tool → api_base mapping for all tools across all sections
+            for s in sections:
+                for t in s.tools:
+                    self._tool_api_base[t.name] = s.api_base
+
     @property
     def is_connected(self) -> bool:
         return self._connected
@@ -130,6 +153,10 @@ class OllamaClient:
         self._http = httpx.AsyncClient(
             base_url=self._config.base_url,
             timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0),
+        )
+        # Separate client for skill tool HTTP calls (no base_url, absolute URLs)
+        self._skill_http = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=10.0),
         )
         self._connected = True
         logger.info(
@@ -166,6 +193,9 @@ class OllamaClient:
         if self._http:
             await self._http.aclose()
             self._http = None
+        if hasattr(self, '_skill_http') and self._skill_http:
+            await self._skill_http.aclose()
+            self._skill_http = None
         self._connected = False
         logger.info("OllamaClient disconnected")
 
@@ -185,9 +215,13 @@ class OllamaClient:
         pass  # No server to notify
 
     async def send_robot_result(self, command_id: str, result: dict) -> None:
-        pass  # No tool calling in this mode
+        pass  # Tool execution goes through HTTP, not callbacks
 
     # ── Internal ──────────────────────────────────────────────────────
+
+    @property
+    def skills_enabled(self) -> bool:
+        return bool(self._skill_sections)
 
     async def _stream_chat(self, user_text: str) -> None:
         """Call Ollama /api/chat with streaming and optional tool-call loop."""
@@ -203,10 +237,12 @@ class OllamaClient:
             self._config.enable_vlm, self.capture_frame is not None, vlm_active,
         )
         if vlm_active:
-            # Dedicated VLM prompt: tool rule first, reduced tags for reliability
             system = f"Current time: {now}\n{_VLM_SYSTEM_PROMPT}"
         else:
             system = f"Current time: {now}\n{self._config.system_prompt}"
+        # Append skill index to system prompt if skills are loaded
+        if self._skill_index:
+            system = f"{system}\n\n{self._skill_index}"
         messages = [{"role": "system", "content": system}]
         if self._config.max_history > 0:
             messages.extend(self._history[-(self._config.max_history * 2):])
@@ -219,7 +255,6 @@ class OllamaClient:
         try:
             # Keyword-based forced VLM: skip first LLM call entirely,
             # go straight to frame capture → VLM → single LLM call with result.
-            # Only check the raw user speech, not injected context like [Faces: ...].
             raw_speech = user_text.split("\n", 1)[-1] if "\n" in user_text else user_text
             force_vision = (
                 vlm_active and bool(_VISION_KEYWORDS.search(raw_speech))
@@ -230,14 +265,11 @@ class OllamaClient:
                 import time as _time
                 t0 = _time.monotonic()
                 tc = {"function": {"name": "describe_scene", "arguments": {}}}
-                result = await self._execute_tool(tc)
+                result = await self._execute_tool(tc, [])
                 elapsed = _time.monotonic() - t0
                 logger.info(
                     "Forced VLM executed in %.1fs (%d chars)", elapsed, len(result),
                 )
-                # Replace the original user message with one that includes
-                # the scene description. Small models don't handle tool
-                # message format, so we fold it into the user turn.
                 messages[-1] = {
                     "role": "user",
                     "content": (
@@ -246,12 +278,14 @@ class OllamaClient:
                     ),
                 }
                 full_text, _ = await self._stream_response(
-                    messages, run_id, include_tools=False
+                    messages, run_id, tools=[]
                 )
+            elif self.skills_enabled:
+                full_text = await self._tool_call_loop(messages, run_id)
             else:
-                # Normal path: no tools — small models misfire tool calls
+                # No skills — simple streaming, no tools
                 full_text, _ = await self._stream_response(
-                    messages, run_id, include_tools=False
+                    messages, run_id, tools=[]
                 )
 
         except asyncio.CancelledError:
@@ -291,11 +325,55 @@ class OllamaClient:
                 self.callbacks.on_stream_end(clean_full, run_id)
             )
 
+    async def _tool_call_loop(
+        self, messages: list[dict], run_id: str, max_rounds: int = 5,
+    ) -> str:
+        """Run the tool call loop: LLM → tool calls → results → LLM → ...
+
+        Starts with only load_skill as available tool. When a skill is loaded,
+        its tools are added to the active set for subsequent rounds.
+        """
+        from .skill_loader import LOAD_SKILL_TOOL
+
+        active_tools = [LOAD_SKILL_TOOL]
+        if self._config.enable_vlm and self.capture_frame:
+            active_tools.append(_DESCRIBE_SCENE_TOOL)
+
+        full_text = ""
+        for round_idx in range(max_rounds):
+            text, tool_calls = await self._stream_response(
+                messages, run_id, tools=active_tools,
+            )
+            full_text = text
+
+            if not tool_calls:
+                break  # LLM gave a text response, done
+
+            logger.info(
+                "Tool call round %d: %s",
+                round_idx + 1,
+                [tc.get("function", {}).get("name") for tc in tool_calls],
+            )
+
+            # Append assistant message with tool calls
+            messages.append({
+                "role": "assistant",
+                "content": text,
+                "tool_calls": tool_calls,
+            })
+
+            # Execute each tool call and collect results
+            for tc in tool_calls:
+                result = await self._execute_tool(tc, active_tools)
+                messages.append({"role": "tool", "content": result})
+
+        return full_text
+
     async def _stream_response(
         self,
         messages: list[dict],
         run_id: str,
-        include_tools: bool = True,
+        tools: list[dict] | None = None,
     ) -> tuple[str, list[dict]]:
         """Stream a single Ollama /api/chat call, return (full_text, tool_calls)."""
         payload: dict = {
@@ -308,11 +386,10 @@ class OllamaClient:
                 "num_predict": 60 if self._config.monologue_mode else 150,
             },
         }
-        use_tools = include_tools and self._config.enable_vlm and self.capture_frame
-        if use_tools:
+        if tools:
             # Tool call responses need more tokens for the tool JSON + preamble
-            payload["options"]["num_predict"] = 200
-            payload["tools"] = [_DESCRIBE_SCENE_TOOL]
+            payload["options"]["num_predict"] = 300
+            payload["tools"] = tools
 
         full_text = ""
         tool_calls: list[dict] = []
@@ -355,33 +432,79 @@ class OllamaClient:
 
         return full_text, tool_calls
 
-    async def _execute_tool(self, tool_call: dict) -> str:
-        """Execute a tool call and return the result string."""
+    async def _execute_tool(
+        self, tool_call: dict, active_tools: list[dict],
+    ) -> str:
+        """Execute a tool call and return the result string.
+
+        For load_skill: loads section tools into active_tools list (mutated).
+        For describe_scene: captures frame and calls VLM.
+        For skill tools (e.g. reachy_*): dispatches via on_robot_command callback.
+        """
         func = tool_call.get("function", {})
         name = func.get("name", "")
-        if name != "describe_scene" or not self.capture_frame:
-            return "Tool not available"
-        b64 = await asyncio.to_thread(self.capture_frame)
-        if not b64:
-            return "Camera not available"
-        vlm_model = self._config.vlm_model or self._config.model
-        resp = await self._http.post(
-            "/api/chat",
-            json={
-                "model": vlm_model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": self._config.vlm_prompt,
-                        "images": [b64],
-                    }
-                ],
-                "stream": False,
-                "think": False,
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()["message"]["content"]
+        args = func.get("arguments", {})
+
+        # ── load_skill: activate a skill section's tools ──
+        if name == "load_skill":
+            skill_name = args.get("name", "")
+            section = self._skill_sections.get(skill_name)
+            if not section:
+                available = ", ".join(self._skill_sections.keys())
+                return f"Unknown skill '{skill_name}'. Available: {available}"
+            new_tools = section.to_ollama_tools()
+            # Add to active tools (mutates the caller's list)
+            existing_names = {
+                t.get("function", {}).get("name") for t in active_tools
+            }
+            for t in new_tools:
+                if t["function"]["name"] not in existing_names:
+                    active_tools.append(t)
+            tool_names = ", ".join(t.name for t in section.tools)
+            logger.info("Loaded skill '%s': %s", skill_name, tool_names)
+            return f"Skill '{skill_name}' loaded. Available tools: {tool_names}"
+
+        # ── describe_scene: VLM vision ──
+        if name == "describe_scene":
+            if not self.capture_frame:
+                return "Camera not available"
+            b64 = await asyncio.to_thread(self.capture_frame)
+            if not b64:
+                return "Camera not available"
+            vlm_model = self._config.vlm_model or self._config.model
+            resp = await self._http.post(
+                "/api/chat",
+                json={
+                    "model": vlm_model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": self._config.vlm_prompt,
+                            "images": [b64],
+                        }
+                    ],
+                    "stream": False,
+                    "think": False,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()["message"]["content"]
+
+        # ── Skill tools: POST to the skill's api_base ──
+        api_base = self._tool_api_base.get(name, "")
+        if not api_base:
+            return json.dumps({"status": "error", "message": f"No api_base configured for tool '{name}'"})
+
+        url = f"{api_base}/api/ai/commands"
+        try:
+            resp = await self._skill_http.post(
+                url, json={"command": name, "args": args},
+            )
+            resp.raise_for_status()
+            return resp.text
+        except Exception as e:
+            logger.error("Skill tool '%s' failed: %s", name, e)
+            return json.dumps({"status": "error", "message": str(e)})
 
 
 def _extract_emotion(text: str) -> tuple[str, str | None]:

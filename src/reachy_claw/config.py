@@ -96,11 +96,24 @@ class Config:
     ollama_monologue_prompt: str = ""  # empty = use default MONOLOGUE_SYSTEM_PROMPT
     ollama_temperature: float = 0.7
     ollama_max_history: int = 3  # conversation turns to keep (0 = stateless)
+    ollama_skill_dir: str = "skills"  # directory containing skill subdirs, each with SKILL.md
 
     # VLM (Vision Language Model)
     enable_vlm: bool = False
     vlm_model: str = "qwen3.5:2b"  # vision model (empty = use ollama_model)
     vlm_prompt: str = "Describe what you see in this image briefly."
+
+    # SenseCraft integration
+    sensecraft_address: str | None = None  # e.g. "192.168.1.100:3260" (http:// auto-added)
+
+    @property
+    def sensecraft_url(self) -> str | None:
+        """Get SenseCraft URL with HTTP protocol added."""
+        if not self.sensecraft_address:
+            return None
+        if self.sensecraft_address.startswith('http://') or self.sensecraft_address.startswith('https://'):
+            return self.sensecraft_address
+        return f"http://{self.sensecraft_address}"
 
     # Behavior
     wake_word: str | None = None
@@ -125,6 +138,7 @@ class Config:
     vision_max_roll: float = 15.0
     vision_smoothing_alpha: float = 0.35
     vision_deadzone: float = 0.01
+    vision_min_face_size: float = 0.05  # minimum face bbox fraction (0-1), smaller = ignored
     vision_face_lost_delay: float = 2.0
 
     # Vision TRT service (used when vision_tracker_type == "remote")
@@ -226,6 +240,7 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("llm", "monologue_prompt"): "ollama_monologue_prompt",
     ("llm", "temperature"): "ollama_temperature",
     ("llm", "max_history"): "ollama_max_history",
+    ("llm", "skill_dir"): "ollama_skill_dir",
     ("vlm", "enabled"): "enable_vlm",
     ("vlm", "model"): "vlm_model",
     ("vlm", "prompt"): "vlm_prompt",
@@ -242,6 +257,7 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("vision", "max_roll"): "vision_max_roll",
     ("vision", "smoothing_alpha"): "vision_smoothing_alpha",
     ("vision", "deadzone"): "vision_deadzone",
+    ("vision", "min_face_size"): "vision_min_face_size",
     ("vision", "face_lost_delay"): "vision_face_lost_delay",
     ("vision", "service_url"): "vision_service_url",
     ("vision", "emotion_threshold"): "vision_emotion_threshold",

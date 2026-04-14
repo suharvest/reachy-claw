@@ -302,6 +302,7 @@ class ConversationPlugin(Plugin):
                     enable_vlm=config.enable_vlm and not self._interpreter_mode,
                     vlm_model=config.vlm_model,
                     vlm_prompt=config.vlm_prompt,
+                    skill_dir=config.ollama_skill_dir,
                 )
                 self._client = OllamaClient(ollama_cfg)
                 self._client.capture_frame = self._capture_frame_b64
@@ -900,7 +901,12 @@ class ConversationPlugin(Plugin):
             config.ollama_base_url = ollama_url
             if isinstance(self._client, OllamaClient):
                 self._client._config.base_url = ollama_url
-                self._client._http_client = httpx.AsyncClient(base_url=ollama_url)
+                if self._client._http:
+                    await self._client._http.aclose()
+                self._client._http = httpx.AsyncClient(
+                    base_url=ollama_url,
+                    timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0),
+                )
                 self._client._history.clear()
                 logger.info(f"Ollama base_url switched to: {ollama_url}")
             if model:
@@ -981,6 +987,9 @@ class ConversationPlugin(Plugin):
             "status": self._cmd_status,
             "stop_conversation": self._cmd_stop_conversation,
             "resume_conversation": self._cmd_resume_conversation,
+            # SenseCraft integration (prefix stripped: sensecraft_* → *)
+            "check_connection": self._cmd_sensecraft_check_connection,
+            "get_status": self._cmd_sensecraft_get_status,
         }
         handler = handlers.get(action)
         if not handler:
@@ -1198,6 +1207,81 @@ class ConversationPlugin(Plugin):
         self._conversation_stopped = False
         logger.info("Conversation RESUMED by gateway command")
         return {"status": "success", "conversation": "active"}
+
+    # ── SenseCraft integration commands ───────────────────────────────
+
+    def _cmd_sensecraft_check_connection(self, params: dict) -> dict:
+        """Check if SenseCraft is available and return connection status."""
+        import requests
+        url = self.app.config.sensecraft_url
+        if not url:
+            return {
+                "status": "error",
+                "connected": False,
+                "message": "SenseCraft address not configured. Set sensecraft_address in config (e.g. '192.168.1.100:3260').",
+            }
+        try:
+            # Quick health check - ping the API
+            resp = requests.get(f"{url}/api/solutions", timeout=3.0)
+            if resp.ok:
+                return {
+                    "status": "success",
+                    "connected": True,
+                    "url": url,
+                    "message": "SenseCraft is online and ready for deployment.",
+                }
+            else:
+                return {
+                    "status": "error",
+                    "connected": False,
+                    "url": url,
+                    "message": f"SenseCraft returned HTTP {resp.status_code}",
+                }
+        except requests.exceptions.Timeout:
+            return {
+                "status": "error",
+                "connected": False,
+                "url": url,
+                "message": "SenseCraft connection timed out. Check if the URL is correct and reachable.",
+            }
+        except requests.exceptions.ConnectionError:
+            return {
+                "status": "error",
+                "connected": False,
+                "url": url,
+                "message": "Cannot connect to SenseCraft. Check network connectivity.",
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "connected": False,
+                "url": url,
+                "message": str(e),
+            }
+
+    def _cmd_sensecraft_get_status(self, params: dict) -> dict:
+        """Get detailed SenseCraft status including available solutions."""
+        import requests
+        url = self.app.config.sensecraft_url
+        if not url:
+            return {"status": "error", "message": "SenseCraft address not configured"}
+        try:
+            # Get solutions list as a quick health check
+            resp = requests.get(f"{url}/api/solutions", timeout=5.0)
+            if resp.ok:
+                data = resp.json()
+                solutions = data.get("solutions", [])
+                return {
+                    "status": "success",
+                    "connected": True,
+                    "url": url,
+                    "solution_count": len(solutions),
+                    "solution_ids": [s.get("id") for s in solutions[:10]],  # first 10
+                }
+            else:
+                return {"status": "error", "connected": False, "message": f"HTTP {resp.status_code}"}
+        except Exception as e:
+            return {"status": "error", "connected": False, "message": str(e)}
 
     # ── Pipeline task 1: Audio loop (mic → VAD → STT → send) ─────────
 
