@@ -4,6 +4,7 @@ services:
   reachy-claw:
     volumes:
       - ${REACHY_CLAW_SRC:-/home/recomputer/reachy-claw-src/src/reachy_claw}:/app/src/reachy_claw:ro
+      - /home/recomputer/reachy-claw-src/skills:/app/skills:ro
 
   vision-trt:
     volumes:

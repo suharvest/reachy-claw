@@ -26,6 +26,12 @@ gateway:
   path: /desktop-robot
   # token: your-openclaw-token
 
+# SenseCraft integration (for deployment tools)
+sensecraft:
+  address: ""                  # SenseCraft IP:Port, e.g. "192.168.1.100:3260"
+  # HTTP protocol added automatically when LLM calls SenseCraft API
+  # When set, LLM can check SenseCraft availability and deploy IoT solutions
+
 reachy:
   connection_mode: auto        # auto, localhost_only, network
   media_backend: default       # default, gstreamer

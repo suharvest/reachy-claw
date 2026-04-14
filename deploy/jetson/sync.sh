@@ -36,12 +36,17 @@ rsync -avz --delete -v \
   "$PROJECT_ROOT/src/reachy_claw/" \
   "$JETSON:~/reachy-claw-src/src/reachy_claw/"
 
+# 4. Skills (dereference symlinks with -L)
+rsync -avzL --delete -v \
+  "$PROJECT_ROOT/skills/" \
+  "$JETSON:~/reachy-claw-src/skills/"
+
 echo "=== Sync complete ==="
 
 if $RESTART; then
   echo "=== Restarting containers (dev mode) ==="
   ssh "$JETSON" "cd ~/reachy-deploy/reachy && \
-    $COMPOSE stop reachy-claw 2>&1 && \
+    $COMPOSE down --remove-orphans reachy-claw 2>&1 && \
     $COMPOSE --profile vision up -d vision-trt 2>&1 && \
     sleep 3 && \
     $COMPOSE up -d reachy-claw 2>&1"
