@@ -23,12 +23,15 @@ class MediaPipeTracker(HeadTracker):
         self,
         min_detection_confidence: float = 0.5,
         model_selection: int = 0,
+        min_face_size: float = 0.05,
     ) -> None:
         """Initialize MediaPipe-based head tracker.
 
         Args:
             min_detection_confidence: Minimum confidence for detection.
             model_selection: 0 for short-range (2m), 1 for long-range (5m).
+            min_face_size: Minimum face bbox size as fraction of frame (0-1).
+                Faces smaller than this are ignored. Default 0.05 (5% of frame).
         """
         import mediapipe as mp
 
@@ -37,7 +40,8 @@ class MediaPipeTracker(HeadTracker):
             min_detection_confidence=min_detection_confidence,
             model_selection=model_selection,
         )
-        logger.info("MediaPipe face detection initialized")
+        self._min_face_size = min_face_size
+        logger.info("MediaPipe face detection initialized (min_face_size=%.0f%%)", min_face_size * 100)
 
     def get_head_position(
         self, img: NDArray[np.uint8]
@@ -53,6 +57,10 @@ class MediaPipeTracker(HeadTracker):
 
             detection = results.detections[0]
             bbox = detection.location_data.relative_bounding_box
+
+            # Ignore faces that are too small (person too far away)
+            if bbox.width < self._min_face_size or bbox.height < self._min_face_size:
+                return None, None
 
             center_x = bbox.xmin + bbox.width / 2
             center_y = bbox.ymin + bbox.height / 2

@@ -36,6 +36,7 @@ def create_head_tracker(tracker_type: str = "mediapipe", **kwargs) -> HeadTracke
 
     Args:
         tracker_type: "mediapipe" or "none".
+        **kwargs: Passed to tracker constructor (e.g. min_face_size).
     """
     if tracker_type == "mediapipe":
         from .mediapipe_tracker import MediaPipeTracker

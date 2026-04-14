@@ -154,7 +154,10 @@ class FaceTrackerPlugin(Plugin):
                 return
 
         try:
-            self._tracker = create_head_tracker(self._tracker_type)
+            self._tracker = create_head_tracker(
+                self._tracker_type,
+                min_face_size=self.app.config.vision_min_face_size,
+            )
         except Exception as e:
             logger.error(f"Failed to initialize tracker: {e}")
             if self._cap:
