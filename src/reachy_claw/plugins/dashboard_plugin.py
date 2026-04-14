@@ -55,6 +55,8 @@ class DashboardPlugin(Plugin):
         app.router.add_get("/api/captures/image/{filename}", self._proxy_captures_image)
         # Ollama models API (proxy to avoid CORS)
         app.router.add_get("/api/ollama/models", self._proxy_ollama_models)
+        # AI commands endpoint (unified tool execution for skills)
+        app.router.add_post("/api/ai/commands", self._handle_ai_command)
         app.router.add_static("/static", STATIC_DIR, show_index=False)
 
         self._runner = web.AppRunner(app)
@@ -145,6 +147,49 @@ class DashboardPlugin(Plugin):
             status=503,
         )
 
+    async def _handle_ai_command(self, request):
+        """Unified tool execution endpoint for skills.
+
+        POST /api/ai/commands
+        Body: {"command": "reachy_move_head", "args": {"yaw": 10, "pitch": -5}}
+
+        Strips known prefixes (reachy_, sensecraft_) to get the action name,
+        then dispatches to the conversation plugin's robot command handler.
+        """
+        from aiohttp import web
+        import json as _json
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"status": "error", "message": "Invalid JSON"}, status=400,
+            )
+        command = data.get("command", "")
+        args = data.get("args", {})
+        if not command:
+            return web.json_response(
+                {"status": "error", "message": "Missing 'command' field"}, status=400,
+            )
+
+        # Strip prefix to get action name: reachy_move_head → move_head
+        for prefix in ("reachy_", "sensecraft_"):
+            if command.startswith(prefix):
+                action = command[len(prefix):]
+                break
+        else:
+            action = command
+
+        # Find the conversation plugin and execute
+        conv = self.app.get_plugin("ConversationPlugin")
+        if not conv:
+            return web.json_response(
+                {"status": "error", "message": "ConversationPlugin not available"},
+                status=503,
+            )
+        result = await asyncio.to_thread(conv._execute_robot_command, action, args)
+        return web.json_response(result)
+
     async def _handle_index(self, request):
         from aiohttp import web
 
@@ -221,11 +266,28 @@ class DashboardPlugin(Plugin):
             mode = data.get("mode", "conversation")
             if mode not in ("conversation", "monologue", "interpreter"):
                 return
+            # Save previous mode for potential restore
+            prev_mode = self.app.config.conversation_mode
             conv = self.app.get_plugin("conversation")
             if conv and hasattr(conv, "switch_mode"):
                 conv.switch_mode(mode)
             self._save_overrides(["conversation_mode"])
-            await self._broadcast({"type": "mode_changed", "mode": mode})
+            await self._broadcast({
+                "type": "mode_changed",
+                "mode": mode,
+                "prev_mode": prev_mode,
+            })
+
+        elif msg_type == "get_mode":
+            conv = self.app.get_plugin("conversation")
+            mode = self.app.config.conversation_mode
+            monologue = conv and getattr(conv, "_monologue_mode", False)
+            interpreter = conv and getattr(conv, "_interpreter_mode", False)
+            if monologue:
+                mode = "monologue"
+            elif interpreter:
+                mode = "interpreter"
+            await self._broadcast({"type": "mode", "mode": mode})
 
         elif msg_type == "set_interpreter_langs":
             source = data.get("source", "Chinese")
@@ -547,6 +609,15 @@ class DashboardPlugin(Plugin):
                     conv.exit_narration_mode()
             # Notify frontend to close overlay
             await self._broadcast({"type": "diary_narrate_end"})
+
+        elif msg_type == "send_message":
+            # External text input (from SenseCraft etc.) - send to LLM directly
+            text = data.get("text", "")
+            if text.strip():
+                conv = self.app.get_plugin("conversation")
+                if conv and hasattr(conv, "_process_and_send"):
+                    # Use the same path as ASR input
+                    asyncio.create_task(conv._process_and_send(text.strip()))
 
     # ── Diary Narration ─────────────────────────────────────────────
 
@@ -1092,6 +1163,9 @@ class DashboardPlugin(Plugin):
             "barge_in_energy_threshold": self.app.config.barge_in_energy_threshold,
             "llm_backend": self.app.config.llm_backend,
             "ollama_model": self.app.config.ollama_model,
+            "ollama_url": self.app.config.ollama_base_url,
+            "gateway_host": self.app.config.gateway_host,
+            "gateway_port": self.app.config.gateway_port,
         })
 
     # ── EventBus callbacks ────────────────────────────────────────────
