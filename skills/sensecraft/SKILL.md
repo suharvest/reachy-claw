@@ -1,0 +1,1 @@
+/Users/harvest/project/app_collaboration/docs/ai/skill.md

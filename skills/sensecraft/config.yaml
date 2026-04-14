@@ -1,0 +1,3 @@
+api_base: http://localhost:3260
+health_check: http://localhost:3260/api/ai/settings
+timeout: 3
