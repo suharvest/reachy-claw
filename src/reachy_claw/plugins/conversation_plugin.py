@@ -1227,6 +1227,52 @@ class ConversationPlugin(Plugin):
                     if action == "bg_listen" and hasattr(self._mode_manager.current, 'bg_listen'):
                         await self._mode_manager.current.bg_listen(chunk, streaming_stt, self)
                         continue
+
+                # Barge-in during THINKING: cancel pending LLM if user speaks.
+                # No cooldown needed (no TTS playing), just energy + VAD.
+                if (
+                    self._state == ConvState.THINKING
+                    and self.app.config.barge_in_enabled
+                    and self._mode_manager
+                    and self._mode_manager.current.barge_in
+                ):
+                    energy = float(np.abs(chunk).mean())
+                    if energy >= self.app.config.barge_in_energy_threshold:
+                        vad_ok = True
+                        if self._vad:
+                            prob = await asyncio.to_thread(
+                                self._vad.speech_probability, chunk, self.app.config.sample_rate
+                            )
+                            vad_ok = prob >= self.app.config.barge_in_silero_threshold
+                        if vad_ok:
+                            barge_in_count += 1
+                            barge_in_chunks.append(chunk)
+                            if barge_in_count >= confirm_frames:
+                                logger.info(
+                                    f"Barge-in during THINKING ({barge_in_count} frames)"
+                                )
+                                speech_frames = list(barge_in_chunks)
+                                await self._fire_interrupt()
+                                self._set_state(ConvState.LISTENING)
+                                if streaming_stt:
+                                    replay = list(pre_roll) + list(barge_in_chunks)
+                                    def _reset_and_replay_thinking():
+                                        self._stt.reset_stream()
+                                        self._stt.start_stream(self.app.config.sample_rate)
+                                        for c in replay:
+                                            self._stt.feed_chunk(c)
+                                    await asyncio.to_thread(_reset_and_replay_thinking)
+                                silence_count = 0
+                                barge_in_count = 0
+                                barge_in_chunks.clear()
+                                pre_roll.clear()
+                                continue
+                        else:
+                            barge_in_count = max(0, barge_in_count - 1)
+                    else:
+                        barge_in_count = max(0, barge_in_count - 1)
+                    pre_roll.append(chunk)
+
                 if not self._mode_manager or self._mode_manager.current.name != "interpreter":
                     if streaming_stt:
                         # Keep feeding audio so STT has context when user speaks
@@ -1531,8 +1577,8 @@ class ConversationPlugin(Plugin):
     async def _sentence_accumulator(self) -> None:
         """Consume stream text deltas, split into sentences, feed sentence_queue."""
         sentence_ends = {
-            ".", "!", "?", ",", ";", "\n",
-            "\u3002", "\uff01", "\uff1f", "\uff0c", "\uff1b", "\u3001",
+            ".", "!", "?", "\n",
+            "\u3002", "\uff01", "\uff1f",
         }
         buffer = ""
         last_chunk_ts = time.monotonic()
@@ -1898,31 +1944,15 @@ class ConversationPlugin(Plugin):
                 source = self._tts.synthesize_streaming(text)
 
             if self.app.reachy and getattr(getattr(self.app.reachy, "media", None), "audio", None) is not None:
-                # Accumulate all chunks first, then push as continuous audio
-                all_chunks = []
-                sample_rate = 16000
-                async for chunk, sr in source:
-                    if self._interrupt_event.is_set():
-                        return True
-                    all_chunks.append(chunk)
-                    sample_rate = sr
-
-                if not all_chunks:
-                    return False
-
-                audio = np.concatenate(all_chunks)
-
-                # Apply software volume gain
-                vol = self.app.config.audio_volume
-                if vol != 1.0:
-                    audio = np.clip(audio * vol, -1.0, 1.0).astype(np.float32)
-
-                # Resample to 16kHz if TTS outputs a different rate
-                audio, sample_rate = _resample_if_needed(audio, sample_rate)
-
+                # Progressive streaming: push audio to GStreamer as TTS chunks
+                # arrive, instead of accumulating the entire sentence first.
+                # This cuts time-to-first-audio by the TTS synthesis duration.
                 reachy = self.app.reachy
+                vol = self.app.config.audio_volume
+                chunk_size = 1600  # 100ms playback chunks at 16kHz
+                prebuf = 4
+                sample_rate = 16000
 
-                # Keep pipeline alive across sentences — only start if not already playing
                 if not self._gst_playing:
                     reachy.media.start_playing()
                     self._gst_playing = True
@@ -1930,40 +1960,67 @@ class ConversationPlugin(Plugin):
                     self._wobbler.start()
 
                 interrupted = False
-                chunk_size = 1600  # 100ms chunks at 16kHz
-                prebuf = 4  # push first N chunks without sleeping to fill pipeline buffer
-                audio_duration = len(audio) / sample_rate
                 t_push_start = time.monotonic()
+                total_samples = 0
+                residual = np.array([], dtype=np.float32)
+                push_idx = 0
+                last_sample = 0.0
+
                 try:
-                    for idx, i in enumerate(range(0, len(audio), chunk_size)):
+                    async for tts_chunk, sr in source:
                         if self._interrupt_event.is_set():
                             interrupted = True
                             break
-                        chunk = audio[i : i + chunk_size]
-                        reachy.media.push_audio_sample(chunk)
+                        sample_rate = sr
+
+                        # Resample if needed
+                        tts_chunk, sample_rate = _resample_if_needed(tts_chunk, sample_rate)
+
+                        # Apply volume
+                        if vol != 1.0:
+                            tts_chunk = np.clip(tts_chunk * vol, -1.0, 1.0).astype(np.float32)
+
+                        # Append to residual and push in chunk_size pieces
+                        residual = np.concatenate([residual, tts_chunk])
+                        while len(residual) >= chunk_size:
+                            piece = residual[:chunk_size]
+                            residual = residual[chunk_size:]
+                            reachy.media.push_audio_sample(piece)
+                            if self._wobbler:
+                                self._wobbler.feed(piece)
+                            total_samples += chunk_size
+                            push_idx += 1
+                            if push_idx > prebuf:
+                                await asyncio.sleep(chunk_size / sample_rate * 0.9)
+                            if self._interrupt_event.is_set():
+                                interrupted = True
+                                break
+
+                    # Push remaining residual
+                    if not interrupted and len(residual) > 0:
+                        reachy.media.push_audio_sample(residual)
                         if self._wobbler:
-                            self._wobbler.feed(chunk)
-                        if idx >= prebuf:
-                            await asyncio.sleep(chunk_size / sample_rate * 0.9)
+                            self._wobbler.feed(residual)
+                        total_samples += len(residual)
+                        last_sample = float(residual[-1])
+                    elif not interrupted and total_samples > 0:
+                        # last_sample from the last full chunk
+                        pass
                 finally:
                     if self._wobbler:
                         self._wobbler.reset()
                     if self.app.motor_enabled:
                         reachy.set_target_antenna_joint_positions([0.0, 0.0])
 
-                # Push a fade-out tail to avoid pop/click between sentences
-                # or when pipeline stops.  Ramps from last sample to zero.
-                if not interrupted and len(audio) > 0:
+                # Push a fade-out tail to avoid pop/click
+                if not interrupted and total_samples > 0:
                     fade_len = 800  # 50ms at 16kHz
-                    last_val = float(audio[-1])
-                    fade = np.linspace(last_val, 0.0, fade_len, dtype=np.float32)
+                    fade = np.linspace(last_sample, 0.0, fade_len, dtype=np.float32)
                     reachy.media.push_audio_sample(fade)
 
-                # Wait for ALSA buffer to finish playing before returning.
-                # Push runs faster than realtime (0.9x + prebuf), so there's
-                # audio still in the buffer.  Wait interruptibly so barge-in
-                # can still cut in.
-                if not interrupted:
+                # Wait for ALSA buffer to drain
+                if not interrupted and total_samples > 0:
+                    audio_duration = total_samples / sample_rate
                     remaining = audio_duration - (time.monotonic() - t_push_start)
                     if remaining > 0:
                         try:
@@ -1972,9 +2029,8 @@ class ConversationPlugin(Plugin):
                             )
                             interrupted = True
                         except asyncio.TimeoutError:
-                            pass  # audio finished naturally
+                            pass
 
-                # Don't stop pipeline here — it stays open for next sentence
                 return interrupted
             else:
                 # Local playback via sounddevice (no temp file, no subprocess)

@@ -86,7 +86,7 @@ class Config:
     barge_in_energy_threshold: float = 0.02
     barge_in_confirm_frames: int = 2  # consecutive VAD-positive frames before interrupt (~128ms)
     barge_in_silero_threshold: float = 0.5  # stricter VAD threshold during playback
-    barge_in_cooldown_ms: int = 300  # ignore barge-in for N ms after TTS starts
+    barge_in_cooldown_ms: int = 80  # ignore barge-in for N ms after TTS starts (low: ReSpeaker AEC handles echo)
 
     # LLM backend (local Ollama, replaces gateway when set)
     llm_backend: str = "gateway"  # "gateway" (OpenClaw) or "ollama"

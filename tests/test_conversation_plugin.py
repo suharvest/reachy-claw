@@ -436,7 +436,7 @@ class TestBargeInConfig:
 
     def test_default_cooldown_ms(self):
         config = Config()
-        assert config.barge_in_cooldown_ms == 300
+        assert config.barge_in_cooldown_ms == 80
 
     def test_custom_cooldown_ms(self):
         config = Config(barge_in_cooldown_ms=1000)
