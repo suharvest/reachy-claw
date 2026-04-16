@@ -21,14 +21,11 @@ from typing import Any, Coroutine
 
 import numpy as np
 
-try:
-    import httpx
-except ImportError:
-    httpx = None  # type: ignore[assignment]
-
 from ..audio import AudioCapture, WakeWordDetector
 from ..gateway import DesktopRobotClient
 from ..llm import OllamaClient, OllamaConfig, MONOLOGUE_SYSTEM_PROMPT
+from ..mode import ModeContext, ModeManager
+from ..modes import ConversationMode, MonologueMode, InterpreterMode
 from ..motion.head_wobbler import HeadWobbler
 from ..plugin import Plugin
 from ..stt import create_stt_backend
@@ -58,113 +55,6 @@ class SentenceItem:
 # In-band sentinel: when placed in _stream_text_queue, tells the
 # accumulator to discard its buffer (stale text from a previous response).
 _RESET_BUFFER = object()
-
-
-# ── Interpreter Sequencer ─────────────────────────────────────────────
-
-
-class _InterpreterSequencer:
-    """Concurrent translator with ordered output for interpreter mode.
-
-    Bypasses OllamaClient — calls Ollama /api/chat directly via httpx.
-    Translates utterances concurrently but emits to sentence_queue in
-    utterance order (FIFO by submission time, not completion time).
-    """
-
-    def __init__(self, config, sentence_queue, events):
-        self._config = config
-        self._sentence_queue = sentence_queue
-        self._events = events
-        self._http: httpx.AsyncClient | None = None
-        self._slots: list[asyncio.Task] = []
-        self._seq = 0
-        self._emitter_task: asyncio.Task | None = None
-        self._running = False
-
-    async def start(self):
-        if httpx is None:
-            raise RuntimeError("httpx is required for interpreter mode — pip install httpx")
-        self._http = httpx.AsyncClient(
-            base_url=self._config.ollama_base_url,
-            timeout=httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0),
-        )
-        self._running = True
-        self._emitter_task = asyncio.create_task(self._emitter_loop())
-
-    async def stop(self):
-        self._running = False
-        for task in self._slots:
-            if not task.done():
-                task.cancel()
-        self._slots.clear()
-        if self._emitter_task:
-            self._emitter_task.cancel()
-        if self._http:
-            await self._http.aclose()
-            self._http = None
-
-    def submit(self, text: str):
-        """Submit an utterance for translation. Returns immediately."""
-        self._seq += 1
-        seq = self._seq
-        task = asyncio.create_task(self._translate(seq, text))
-        self._slots.append(task)
-
-    async def _translate(self, seq: int, text: str) -> tuple[int, str]:
-        """Call Ollama /api/chat (non-streaming) and return (seq, translated_text)."""
-        from ..llm import INTERPRETER_SYSTEM_PROMPT
-
-        system_prompt = self._config.interpreter_prompt or INTERPRETER_SYSTEM_PROMPT.format(
-            source_lang=self._config.interpreter_source_lang,
-            target_lang=self._config.interpreter_target_lang,
-        )
-        payload = {
-            "model": self._config.ollama_model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Translate: \"{text}\""},
-            ],
-            "stream": False,
-            "think": False,
-            "options": {"temperature": 0.3, "num_predict": 200},
-        }
-        try:
-            resp = await self._http.post("/api/chat", json=payload)
-            resp.raise_for_status()
-            translated = resp.json()["message"]["content"].strip()
-            self._events.emit(
-                "llm_end", {"full_text": translated, "run_id": f"interp-{seq}"}
-            )
-            return (seq, translated)
-        except Exception as e:
-            logger.error(f"Interpreter translation failed (seq={seq}): {e}")
-            return (seq, "")
-
-    async def _emitter_loop(self):
-        """Consume completed translations in order and feed to sentence_queue."""
-        while self._running:
-            if not self._slots:
-                await asyncio.sleep(0.05)
-                continue
-
-            first = self._slots[0]
-            try:
-                seq, translated = await asyncio.shield(first)
-            except (asyncio.CancelledError, Exception):
-                self._slots.pop(0)
-                continue
-
-            self._slots.pop(0)
-
-            if translated:
-                logger.info(f"Interpreter emit seq={seq}: \"{translated[:40]}\"")
-                # Emit to EventBus so dashboard displays the translation
-                run_id = f"interp-{seq}"
-                self._events.emit("llm_delta", {"text": translated, "run_id": run_id})
-                self._events.emit("llm_end", {"full_text": translated, "run_id": run_id, "emotion": ""})
-                await self._sentence_queue.put(
-                    SentenceItem(text=translated, is_last=True)
-                )
 
 
 # ── Plugin ────────────────────────────────────────────────────────────
@@ -216,14 +106,8 @@ class ConversationPlugin(Plugin):
         self._thinking_watchdog_s: float = 30.0
 
         # Mode state
-        self._monologue_mode = False
-        self._interpreter_mode = False
+        self._mode_manager: ModeManager | None = None  # initialized in start()
         self._narration_mode = False  # True during diary narration — suppresses conversation
-        self._interp_sequencer: _InterpreterSequencer | None = None
-        self._last_speech_time: float = 0.0  # for monologue auto-trigger
-        self._pending_speech: str | None = None  # speech heard while speaking (monologue)
-        self._bg_speech_frames: list[np.ndarray] = []  # frames for bg listening
-        self._bg_silence_count: int = 0  # silence counter for bg listening
 
     def setup(self) -> bool:
         return True
@@ -269,28 +153,12 @@ class ConversationPlugin(Plugin):
                 logger.info("Running in standalone mode - no server connection")
                 return
 
-            # Mode setup
-            self._monologue_mode = config.conversation_mode == "monologue"
-            self._interpreter_mode = config.conversation_mode == "interpreter"
-
             if config.llm_backend == "ollama":
-                from ..llm import DEFAULT_SYSTEM_PROMPT, INTERPRETER_SYSTEM_PROMPT
+                from ..llm import DEFAULT_SYSTEM_PROMPT
 
-                if self._interpreter_mode:
-                    system_prompt = config.interpreter_prompt or INTERPRETER_SYSTEM_PROMPT.format(
-                        source_lang=config.interpreter_source_lang,
-                        target_lang=config.interpreter_target_lang,
-                    )
-                    history = 0
-                    temperature = 0.3
-                elif self._monologue_mode:
-                    system_prompt = config.ollama_monologue_prompt or MONOLOGUE_SYSTEM_PROMPT
-                    history = max(config.ollama_max_history, 5)
-                    temperature = max(config.ollama_temperature, 0.9)
-                else:
-                    system_prompt = config.ollama_system_prompt or DEFAULT_SYSTEM_PROMPT
-                    history = config.ollama_max_history
-                    temperature = config.ollama_temperature
+                system_prompt = config.ollama_system_prompt or DEFAULT_SYSTEM_PROMPT
+                history = config.ollama_max_history
+                temperature = config.ollama_temperature
 
                 ollama_cfg = OllamaConfig(
                     base_url=config.ollama_base_url,
@@ -298,8 +166,8 @@ class ConversationPlugin(Plugin):
                     system_prompt=system_prompt,
                     temperature=temperature,
                     max_history=history,
-                    skip_emotion_extraction=self._interpreter_mode,
-                    enable_vlm=config.enable_vlm and not self._interpreter_mode,
+                    skip_emotion_extraction=False,
+                    enable_vlm=config.enable_vlm,
                     vlm_model=config.vlm_model,
                     vlm_prompt=config.vlm_prompt,
                     skill_dir=config.ollama_skill_dir,
@@ -310,12 +178,7 @@ class ConversationPlugin(Plugin):
                 self._setup_callbacks()
                 if config.gateway_warmup:
                     await self._client.warmup_session()
-                mode_label = (
-                    " (interpreter)" if self._interpreter_mode
-                    else " (monologue)" if self._monologue_mode
-                    else ""
-                )
-                logger.info(f"Using Ollama LLM: {config.ollama_model}{mode_label}")
+                logger.info(f"Using Ollama LLM: {config.ollama_model}")
             else:
                 self._client = DesktopRobotClient(config)
                 await self._client.connect()
@@ -323,14 +186,29 @@ class ConversationPlugin(Plugin):
                 if config.gateway_warmup:
                     await self._client.warmup_session()
 
-            # Start interpreter sequencer if needed
-            if self._interpreter_mode:
-                self._interp_sequencer = _InterpreterSequencer(
-                    config=config,
-                    sentence_queue=self._sentence_queue,
-                    events=self.app.events,
-                )
-                await self._interp_sequencer.start()
+            # Initialize ModeManager after backends are connected
+            ctx = ModeContext(
+                app=self.app,
+                sentence_queue=self._sentence_queue,
+                audio_queue=self._audio_queue,
+                events=self.app.events,
+                spawn_task=self._spawn_task,
+                get_vision_context=self._get_vision_context,
+                capture_frame=self._capture_frame_b64,
+            )
+            self._mode_manager = ModeManager(ctx)
+            self._mode_manager.register(ConversationMode())
+            self._mode_manager.register(MonologueMode())
+            self._mode_manager.register(InterpreterMode())
+            await self._mode_manager.switch(config.conversation_mode)
+            self.app.events.subscribe("monologue_trigger", self._on_monologue_trigger)
+
+            # Apply mode-specific OllamaClient config after switch
+            if isinstance(self._client, OllamaClient) and self._mode_manager:
+                await self._do_switch_mode(config.conversation_mode)
+
+            mode_label = f" ({config.conversation_mode})" if config.conversation_mode != "conversation" else ""
+            logger.info(f"Mode: {config.conversation_mode}{mode_label}")
 
         async def _init_tts():
             logger.info(f"TTS backend: {config.tts_backend}")
@@ -384,8 +262,6 @@ class ConversationPlugin(Plugin):
             self._tts_worker(),
             self._output_pipeline(),
         ]
-        if self._monologue_mode:
-            tasks.append(self._monologue_timer())
 
         async def _guarded(coro, name: str):
             try:
@@ -468,7 +344,8 @@ class ConversationPlugin(Plugin):
             # Reset monologue timer when finishing speaking, so there's
             # a full monologue_interval gap for ASR to process user speech
             if old_state == ConvState.SPEAKING and new_state == ConvState.IDLE:
-                self._last_speech_time = time.monotonic()
+                if self._mode_manager and hasattr(self._mode_manager.current, 'last_speech_time'):
+                    self._mode_manager.current.last_speech_time = time.monotonic()
             # Drain deferred task-completion announcements when we go IDLE
             if new_state == ConvState.IDLE and self._pending_announcements:
                 self._spawn_task(
@@ -481,7 +358,7 @@ class ConversationPlugin(Plugin):
                     self._thinking_watchdog(), name="thinking-watchdog"
                 )
             # Drive antenna animation from state changes (conversation mode only)
-            if not self._monologue_mode:
+            if not self._mode_manager or self._mode_manager.current.play_emotions:
                 emotion = self._STATE_EMOTION_MAP.get(new_state)
                 if emotion:
                     self.app.emotions.queue_emotion(emotion)
@@ -643,7 +520,7 @@ class ConversationPlugin(Plugin):
     async def _on_emotion(self, emotion: str) -> None:
         """Server sends an emotion tag — queue it for immediate expression."""
         self.app.events.emit("emotion", {"emotion": emotion})
-        if self.app.config.play_emotions and not self._monologue_mode:
+        if self.app.config.play_emotions and (not self._mode_manager or self._mode_manager.current.play_emotions):
             logger.info(f"Emotion from server: {emotion}")
             self.app.emotions.queue_emotion(emotion)
 
@@ -678,48 +555,6 @@ class ConversationPlugin(Plugin):
             elif emo and emo != "neutral":
                 descs.append(f"someone looks {emo}")
         return ", ".join(descs)
-
-    # ── Monologue mode ─────────────────────────────────────────────────
-
-    def _compose_monologue_prompt(self, transcript: str | None = None) -> str:
-        """Build natural-language LLM input for monologue mode from speech + vision."""
-        parts = []
-        if transcript:
-            parts.append(f"heard: \"{transcript}\"")
-
-        vision = self.app.get_plugin("vision_client")
-        if vision and getattr(vision, "_last_faces_summary", None):
-            faces = vision._last_faces_summary
-            # Deduplicate: collect named persons, count remaining strangers
-            named: dict[str, str] = {}  # name → emotion
-            stranger_count = 0
-            for f in faces:
-                name = f.get("identity")
-                emo = f.get("emotion", "neutral")
-                if name:
-                    named[name] = emo
-                else:
-                    stranger_count += 1
-            descs = [f"{n} looks {e}" for n, e in named.items()]
-            # Only count strangers that aren't duplicate detections of known people
-            real_strangers = max(0, stranger_count - len(named))
-            if real_strangers == 1:
-                descs.append("someone you don't know")
-            elif real_strangers > 1:
-                descs.append(f"{real_strangers} people you don't know")
-            if descs:
-                parts.append(f"you see: {', '.join(descs)}")
-        elif vision:
-            emo = getattr(vision, "_last_emotion", None)
-            identity = getattr(vision, "current_identity", None)
-            if identity:
-                parts.append(f"you see: {identity} looks {emo or 'neutral'}")
-            elif emo and emo != "neutral":
-                parts.append(f"you see: someone looks {emo}")
-
-        if not parts:
-            parts.append("nobody around")
-        return ". ".join(parts)
 
     def _capture_frame_b64(self) -> str | None:
         """Capture camera frame, return base64 JPEG. Called from worker thread."""
@@ -773,93 +608,52 @@ class ConversationPlugin(Plugin):
 
     def switch_mode(self, mode: str) -> None:
         """Hot-switch between conversation, monologue, and interpreter modes."""
-        from ..llm import DEFAULT_SYSTEM_PROMPT, INTERPRETER_SYSTEM_PROMPT
+        if self._mode_manager:
+            asyncio.ensure_future(self._do_switch_mode(mode))
 
-        self._monologue_mode = mode == "monologue"
-        self._interpreter_mode = mode == "interpreter"
-        self.app.config.conversation_mode = mode
+    async def _do_switch_mode(self, mode: str) -> None:
+        """Async mode switch -- updates ModeManager and OllamaClient config."""
+        from ..llm import DEFAULT_SYSTEM_PROMPT, MONOLOGUE_SYSTEM_PROMPT
 
-        # Conversation mode requires barge-in; interpreter/monologue don't
-        if mode == "conversation":
-            self.app.config.barge_in_enabled = True
-        elif mode == "interpreter":
-            self.app.config.barge_in_enabled = False
+        await self._mode_manager.switch(mode)
+        current = self._mode_manager.current
 
         if isinstance(self._client, OllamaClient):
-            if self._interpreter_mode:
-                self._client._config.system_prompt = self.app.config.interpreter_prompt or INTERPRETER_SYSTEM_PROMPT.format(
-                    source_lang=self.app.config.interpreter_source_lang,
-                    target_lang=self.app.config.interpreter_target_lang,
+            overrides = current.get_ollama_config(self.app.config)
+            if current.system_prompt:
+                self._client._config.system_prompt = current.system_prompt
+            elif current.name == "interpreter":
+                from ..llm import INTERPRETER_SYSTEM_PROMPT
+                self._client._config.system_prompt = (
+                    self.app.config.interpreter_prompt
+                    or INTERPRETER_SYSTEM_PROMPT.format(
+                        source_lang=self.app.config.interpreter_source_lang,
+                        target_lang=self.app.config.interpreter_target_lang,
+                    )
                 )
-                self._client._config.skip_emotion_extraction = True
-                self._client._config.monologue_mode = False
-                self._client._config.max_history = 0
-                self._client._config.temperature = 0.3
-                self._client._config.enable_vlm = False  # VLM overrides system prompt
-            elif self._monologue_mode:
+            elif current.name == "monologue":
                 self._client._config.system_prompt = (
                     self.app.config.ollama_monologue_prompt or MONOLOGUE_SYSTEM_PROMPT
                 )
-                self._client._config.skip_emotion_extraction = False
-                self._client._config.monologue_mode = True
-                # Monologue respects dashboard history setting as-is
-                self._client._config.temperature = max(self._client._config.temperature, 0.9)
             else:
                 self._client._config.system_prompt = (
                     self.app.config.ollama_system_prompt or DEFAULT_SYSTEM_PROMPT
                 )
-                self._client._config.skip_emotion_extraction = False
-                self._client._config.monologue_mode = False
-                # Restore settings that interpreter may have overridden
-                self._client._config.max_history = self.app.config.ollama_max_history
+            self._client._config.skip_emotion_extraction = overrides.get("skip_emotion_extraction", False)
+            self._client._config.monologue_mode = current.name == "monologue"
+            if "temperature" in overrides:
+                self._client._config.temperature = overrides["temperature"]
+            else:
                 self._client._config.temperature = self.app.config.ollama_temperature
+            if "max_history" in overrides:
+                self._client._config.max_history = overrides["max_history"]
+            else:
+                self._client._config.max_history = self.app.config.ollama_max_history
+            if "enable_vlm" in overrides:
+                self._client._config.enable_vlm = overrides["enable_vlm"]
+            else:
                 self._client._config.enable_vlm = self.app.config.enable_vlm
-            # Reset history on mode switch
             self._client._history.clear()
-
-        # Start/stop monologue timer on mode switch
-        if self._monologue_mode:
-            # Start timer if not already running
-            if not hasattr(self, '_monologue_timer_task') or self._monologue_timer_task.done():
-                self._monologue_timer_task = asyncio.ensure_future(self._monologue_timer())
-                self._last_speech_time = time.monotonic()
-        else:
-            # Cancel timer when leaving monologue mode
-            task = getattr(self, '_monologue_timer_task', None)
-            if task and not task.done():
-                task.cancel()
-
-        # Start/stop interpreter sequencer (only if pipeline is running)
-        if self._interpreter_mode and hasattr(self, '_sentence_queue'):
-            async def _start_sequencer():
-                if self._interp_sequencer:
-                    await self._interp_sequencer.stop()
-                self._interp_sequencer = _InterpreterSequencer(
-                    config=self.app.config,
-                    sentence_queue=self._sentence_queue,
-                    events=self.app.events,
-                )
-                await self._interp_sequencer.start()
-            try:
-                asyncio.ensure_future(_start_sequencer())
-            except RuntimeError:
-                pass  # no event loop — sequencer will start in _init_gateway
-        elif not self._interpreter_mode and self._interp_sequencer:
-            seq = self._interp_sequencer
-            self._interp_sequencer = None
-            async def _stop_sequencer(s=seq):
-                await s.stop()
-                if hasattr(self, '_sentence_queue'):
-                    _drain_queue(self._sentence_queue)
-                if hasattr(self, '_audio_queue'):
-                    _drain_queue(self._audio_queue)
-            try:
-                asyncio.ensure_future(_stop_sequencer())
-            except RuntimeError:
-                pass
-
-        if self._interpreter_mode and not isinstance(self._client, OllamaClient):
-            logger.warning("Interpreter mode requires Ollama backend; gateway does not support custom system prompts")
 
         logger.info(f"Conversation mode switched to: {mode}")
 
@@ -903,9 +697,10 @@ class ConversationPlugin(Plugin):
                 self._client._config.base_url = ollama_url
                 if self._client._http:
                     await self._client._http.aclose()
-                self._client._http = httpx.AsyncClient(
+                import httpx as _httpx
+                self._client._http = _httpx.AsyncClient(
                     base_url=ollama_url,
-                    timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0),
+                    timeout=_httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0),
                 )
                 self._client._history.clear()
                 logger.info(f"Ollama base_url switched to: {ollama_url}")
@@ -927,20 +722,27 @@ class ConversationPlugin(Plugin):
         if backend == "ollama":
             from ..llm import DEFAULT_SYSTEM_PROMPT, INTERPRETER_SYSTEM_PROMPT
 
-            if self._interpreter_mode:
-                system_prompt = config.interpreter_prompt or INTERPRETER_SYSTEM_PROMPT.format(
-                    source_lang=config.interpreter_source_lang,
-                    target_lang=config.interpreter_target_lang,
-                )
-                history, temperature = 0, 0.3
-            elif self._monologue_mode:
-                system_prompt = config.ollama_monologue_prompt or MONOLOGUE_SYSTEM_PROMPT
-                history = max(config.ollama_max_history, 5)
-                temperature = max(config.ollama_temperature, 0.9)
+            if self._mode_manager:
+                current = self._mode_manager.current
+                overrides = current.get_ollama_config(config)
+                if current.name == "interpreter":
+                    system_prompt = config.interpreter_prompt or INTERPRETER_SYSTEM_PROMPT.format(
+                        source_lang=config.interpreter_source_lang,
+                        target_lang=config.interpreter_target_lang,
+                    )
+                elif current.name == "monologue":
+                    system_prompt = config.ollama_monologue_prompt or MONOLOGUE_SYSTEM_PROMPT
+                else:
+                    system_prompt = config.ollama_system_prompt or DEFAULT_SYSTEM_PROMPT
+                history = overrides.get("max_history", config.ollama_max_history)
+                temperature = overrides.get("temperature", config.ollama_temperature)
             else:
                 system_prompt = config.ollama_system_prompt or DEFAULT_SYSTEM_PROMPT
                 history = config.ollama_max_history
                 temperature = config.ollama_temperature
+
+            skip_emo = self._mode_manager.current.skip_emotion_extraction if self._mode_manager else False
+            vlm = self._mode_manager.current.enable_vlm if (self._mode_manager and self._mode_manager.current.enable_vlm is not None) else config.enable_vlm
 
             ollama_cfg = OllamaConfig(
                 base_url=config.ollama_base_url,
@@ -948,8 +750,8 @@ class ConversationPlugin(Plugin):
                 system_prompt=system_prompt,
                 temperature=temperature,
                 max_history=history,
-                skip_emotion_extraction=self._interpreter_mode,
-                enable_vlm=config.enable_vlm and not self._interpreter_mode,
+                skip_emotion_extraction=skip_emo,
+                enable_vlm=vlm,
                 vlm_model=config.vlm_model,
                 vlm_prompt=config.vlm_prompt,
             )
@@ -1311,7 +1113,8 @@ class ConversationPlugin(Plugin):
             )
 
         self._set_state(ConvState.IDLE)
-        self._last_speech_time = time.monotonic()
+        if self._mode_manager and hasattr(self._mode_manager.current, 'last_speech_time'):
+            self._mode_manager.current.last_speech_time = time.monotonic()
 
         if self._client:
             await self._client.send_state_change("listening")
@@ -1343,14 +1146,17 @@ class ConversationPlugin(Plugin):
                 chunk = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
 
             # ── SPEAKING state ──
-            if self._state == ConvState.SPEAKING and not self._interpreter_mode:
-                # Monologue mode: always listen in background (no barge-in)
-                if self._monologue_mode:
-                    await self._bg_listen(chunk, streaming_stt)
+            if self._state == ConvState.SPEAKING and self._mode_manager:
+                action = self._mode_manager.current.on_speaking_audio(chunk, self._mode_manager._ctx)
+                if action == "bg_listen":
+                    if hasattr(self._mode_manager.current, 'bg_listen'):
+                        await self._mode_manager.current.bg_listen(chunk, streaming_stt, self)
                     continue
+                elif action == "ignore":
+                    continue
+                # "barge_in" falls through to existing barge-in detection
 
-                # Conversation mode: detect barge-in (3-layer defense)
-                elif not self.app.config.barge_in_enabled:
+                if not self.app.config.barge_in_enabled:
                     continue
 
                 # Layer 1: Cooldown — ignore early frames after TTS starts
@@ -1394,16 +1200,19 @@ class ConversationPlugin(Plugin):
                     await self._fire_interrupt()
                     self._set_state(ConvState.LISTENING)
                     if streaming_stt:
-                        # Restart STT and replay pre-roll (~640ms) + confirmed
-                        # barge-in speech (~128ms) so the utterance start and
-                        # the VAD-verified speech aren't lost.
+                        # Reset STT stream and replay pre-roll (~640ms) +
+                        # confirmed barge-in speech (~128ms) so the utterance
+                        # start and the VAD-verified speech aren't lost.
+                        # Uses in-band reset (no WebSocket reconnect) when
+                        # supported by the server, saving 100-500ms.
                         replay = list(pre_roll) + list(barge_in_chunks)
-                        def _restart_stt():
-                            self._stt.cancel_stream()
+                        def _reset_and_replay():
+                            self._stt.reset_stream()
+                            # If reset_stream() fell back to close, reconnect
                             self._stt.start_stream(self.app.config.sample_rate)
                             for c in replay:
                                 self._stt.feed_chunk(c)
-                        await asyncio.to_thread(_restart_stt)
+                        await asyncio.to_thread(_reset_and_replay)
                     silence_count = 0
                     barge_in_count = 0
                     barge_in_chunks.clear()
@@ -1411,11 +1220,13 @@ class ConversationPlugin(Plugin):
                 continue
 
             # ── TRANSCRIBING / THINKING states ──
-            if self._state in (ConvState.TRANSCRIBING, ConvState.THINKING) and not self._interpreter_mode:
-                if self._monologue_mode:
-                    await self._bg_listen(chunk, streaming_stt)
-                    continue
-                else:
+            if self._state in (ConvState.TRANSCRIBING, ConvState.THINKING):
+                if self._mode_manager:
+                    action = self._mode_manager.current.on_speaking_audio(chunk, self._mode_manager._ctx)
+                    if action == "bg_listen" and hasattr(self._mode_manager.current, 'bg_listen'):
+                        await self._mode_manager.current.bg_listen(chunk, streaming_stt, self)
+                        continue
+                if not self._mode_manager or self._mode_manager.current.name != "interpreter":
                     if streaming_stt:
                         # Keep feeding audio so STT has context when user speaks
                         # next — prevents first-syllable loss after silence gap.
@@ -1423,7 +1234,7 @@ class ConversationPlugin(Plugin):
                     continue
 
             # ── Interpreter continuous mode: feed ASR regardless of state ──
-            if self._interpreter_mode and streaming_stt:
+            if self._mode_manager and self._mode_manager.current.name == "interpreter" and streaming_stt:
                 partial = await asyncio.to_thread(self._stt.feed_chunk, chunk)
                 if partial and partial.text:
                     logger.debug(f"Partial: \"{partial.text}\" (final={partial.is_final}, stable={partial.is_stable})")
@@ -1452,8 +1263,7 @@ class ConversationPlugin(Plugin):
                         interp_last_stable = ""
                         self.app.events.emit("asr_final", {"text": text})
                         logger.info(f"Interpreter translate: \"{text}\"")
-                        if self._interp_sequencer:
-                            self._interp_sequencer.submit(text)
+                        self._mode_manager.current.preprocess_utterance(text, self._mode_manager._ctx)
                 continue
 
             # ── IDLE / LISTENING states: accumulate speech ──
@@ -1572,66 +1382,6 @@ class ConversationPlugin(Plugin):
         self._stt.cancel_stream()
         self._stt.start_stream(self.app.config.sample_rate)
 
-    async def _bg_listen(self, chunk: np.ndarray, streaming_stt: bool) -> None:
-        """Background listening during SPEAKING/THINKING in monologue mode.
-
-        Runs VAD on audio and feeds speech to streaming STT without
-        interrupting playback. Detected speech is stored in _pending_speech
-        for inclusion in the next monologue prompt.
-        """
-        max_silence_bg = int(
-            self.app.config.silence_duration * self.app.config.sample_rate / 1024
-        )
-        has_speech = await asyncio.to_thread(self._audio._detect_speech, chunk)
-
-        if has_speech:
-            if not self._bg_speech_frames:
-                # Speech start — begin streaming STT
-                logger.debug("BG listen: speech detected while speaking")
-                if streaming_stt:
-                    self._stt.cancel_stream()  # cancel any stale stream
-                    await asyncio.to_thread(
-                        self._stt.start_stream, self.app.config.sample_rate
-                    )
-            self._bg_speech_frames.append(chunk)
-            self._bg_silence_count = 0
-
-            if streaming_stt:
-                partial = await asyncio.to_thread(self._stt.feed_chunk, chunk)
-                if partial and partial.text:
-                    self.app.events.emit("asr_partial", {"text": partial.text})
-                    if partial.is_final:
-                        # STT says utterance complete
-                        text = await asyncio.to_thread(self._stt.finish_stream)
-                        if text and text.strip():
-                            logger.info(f'BG heard: "{text}"')
-                            self.app.events.emit("asr_final", {"text": text})
-                            self._pending_speech = text
-                        self._bg_speech_frames = []
-                        self._bg_silence_count = 0
-                        if self._vad:
-                            self._vad.reset()
-
-        elif self._bg_speech_frames:
-            # Silence after speech — keep feeding STT
-            self._bg_silence_count += 1
-            self._bg_speech_frames.append(chunk)
-            if streaming_stt:
-                await asyncio.to_thread(self._stt.feed_chunk, chunk)
-
-            if self._bg_silence_count >= max_silence_bg:
-                # End of bg utterance
-                if streaming_stt:
-                    text = await asyncio.to_thread(self._stt.finish_stream)
-                    if text and text.strip():
-                        logger.info(f'BG heard: "{text}"')
-                        self.app.events.emit("asr_final", {"text": text})
-                        self._pending_speech = text
-                self._bg_speech_frames = []
-                self._bg_silence_count = 0
-                if self._vad:
-                    self._vad.reset()
-
     async def _transcribe_and_send(self, audio: np.ndarray) -> None:
         """Transcribe audio (batch) and send to AI."""
         try:
@@ -1721,19 +1471,18 @@ class ConversationPlugin(Plugin):
             return
 
         # Send to AI
-        if self._monologue_mode:
-            text = self._compose_monologue_prompt(text)
-        else:
-            # Inject face recognition context into conversation
-            ctx = self._get_vision_context()
-            if ctx:
-                text = f"[Faces: {ctx}]\n{text}"
+        if self._mode_manager:
+            result = self._mode_manager.current.preprocess_utterance(text, self._mode_manager._ctx)
+            if result is None:
+                return
+            text = result
         logger.info("Sending to AI...")
         self._set_state(ConvState.THINKING)
         self._t_send = time.perf_counter()
-        self._last_speech_time = time.monotonic()
+        if self._mode_manager and hasattr(self._mode_manager.current, 'last_speech_time'):
+            self._mode_manager.current.last_speech_time = time.monotonic()
 
-        if self.app.config.play_emotions and not self._monologue_mode:
+        if self.app.config.play_emotions and (not self._mode_manager or self._mode_manager.current.play_emotions):
             self.app.emotions.queue_emotion("thinking")
 
         if self._client:
@@ -1744,7 +1493,7 @@ class ConversationPlugin(Plugin):
         except Exception as e:
             logger.error(f"Error sending to AI: {e}")
             self.app.events.emit("asr_final", {"text": ""})
-            if self.app.config.play_emotions and not self._monologue_mode:
+            if self.app.config.play_emotions and (not self._mode_manager or self._mode_manager.current.play_emotions):
                 self.app.emotions.queue_emotion("sad")
             self._set_state(ConvState.IDLE)
 
@@ -1763,40 +1512,18 @@ class ConversationPlugin(Plugin):
             logger.error(f"Monologue send error: {e}")
             self._set_state(ConvState.IDLE)
 
-    # ── Monologue timer (independent of audio input) ───────────────────
+    # ── Monologue trigger handler ─────────────────────────────────────
 
-    async def _monologue_timer(self) -> None:
-        """Periodically trigger monologue when idle, independent of audio stream.
-
-        Runs as a separate async task so monologue generation works even when
-        the microphone device is missing or no audio chunks are flowing.
-        """
-        interval = self.app.config.monologue_interval
-        logger.info(f"Monologue timer started (interval={interval}s)")
-
-        while self._running:
-            await asyncio.sleep(1.0)  # check every second
-
-            if not self._monologue_mode or self._narration_mode:
-                continue  # mode switched or narration active — stay alive but do nothing
-
-            if (
-                self._state != ConvState.IDLE
-                or not self._client
-                or time.monotonic() - self._last_speech_time < interval
-            ):
-                continue
-
-            # Grab any speech captured in background, then clear
-            transcript = self._pending_speech
-            self._pending_speech = None
-            prompt = self._compose_monologue_prompt(transcript)
+    def _on_monologue_trigger(self, data: dict) -> None:
+        """Handle monologue auto-trigger from MonologueMode timer."""
+        if self._state != ConvState.IDLE or not self._client or self._narration_mode:
+            return
+        prompt = data.get("prompt", "")
+        if prompt:
             self._spawn_task(
                 self._process_and_send_raw(prompt),
                 name="conversation.monologue_auto",
             )
-            # Reset timer so next monologue waits a full interval
-            self._last_speech_time = time.monotonic()
 
     # ── Pipeline task 2: Sentence accumulator ─────────────────────────
 

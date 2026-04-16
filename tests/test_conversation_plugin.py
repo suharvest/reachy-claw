@@ -283,7 +283,9 @@ class TestCallbacks:
 
         text = plugin._stream_text_queue.get_nowait()
         assert text == "hello"
-        assert plugin._state == ConvState.SPEAKING
+        # State stays THINKING — transition to SPEAKING happens in _output_pipeline
+        # when audio actually starts playing.
+        assert plugin._state == ConvState.THINKING
 
     @pytest.mark.asyncio
     async def test_stream_end_puts_none(self, standalone_app):
@@ -304,16 +306,15 @@ class TestCallbacks:
         assert sentinel is None
 
     @pytest.mark.asyncio
-    async def test_task_completed_queues_notification_for_output_pipeline(
+    async def test_task_completed_queues_deferred_announcement(
         self, standalone_app
     ):
         plugin = ConversationPlugin(standalone_app)
+        # Plugin has no client and is not IDLE, so announcement should be deferred
+        plugin._state = ConvState.SPEAKING
         await plugin._on_task_completed("Background search finished", "task-1")
 
-        item = plugin._sentence_queue.get_nowait()
-        assert item is not None
-        assert item.text == "Background search finished"
-        assert item.is_last is True
+        assert len(plugin._pending_announcements) == 1
 
 
 # ── Fire interrupt ────────────────────────────────────────────────────
@@ -768,103 +769,116 @@ class TestRunIdGuards:
 # ── switch_mode: barge-in auto-enable ────────────────────────────────
 
 
+@pytest.fixture
+def mode_plugin(standalone_app):
+    """ConversationPlugin with ModeManager initialized for testing."""
+    from reachy_claw.mode import ModeContext, ModeManager
+    from reachy_claw.modes import ConversationMode, MonologueMode, InterpreterMode
+
+    plugin = ConversationPlugin(standalone_app)
+    ctx = ModeContext(
+        app=standalone_app,
+        sentence_queue=asyncio.Queue(),
+        audio_queue=asyncio.Queue(),
+        events=standalone_app.events,
+        spawn_task=plugin._spawn_task,
+        get_vision_context=lambda: None,
+        capture_frame=lambda: None,
+    )
+    plugin._mode_manager = ModeManager(ctx)
+    plugin._mode_manager.register(ConversationMode())
+    plugin._mode_manager.register(MonologueMode())
+    plugin._mode_manager.register(InterpreterMode())
+    return plugin
+
+
 class TestSwitchMode:
-    """switch_mode('conversation') should auto-enable barge-in."""
-
-    def test_conversation_mode_enables_barge_in(self, standalone_app):
-        plugin = ConversationPlugin(standalone_app)
-        standalone_app.config.barge_in_enabled = False
-
-        plugin.switch_mode("conversation")
-
-        assert standalone_app.config.barge_in_enabled is True
-        assert plugin._monologue_mode is False
+    """switch_mode delegates to ModeManager and updates config."""
 
     @pytest.mark.asyncio
-    async def test_monologue_mode_does_not_force_barge_in(self, standalone_app):
-        plugin = ConversationPlugin(standalone_app)
+    async def test_conversation_mode_enables_barge_in(self, mode_plugin, standalone_app):
         standalone_app.config.barge_in_enabled = False
 
-        plugin.switch_mode("monologue")
+        await mode_plugin._do_switch_mode("conversation")
+
+        assert standalone_app.config.barge_in_enabled is True
+        assert mode_plugin._mode_manager.current.name == "conversation"
+
+    @pytest.mark.asyncio
+    async def test_monologue_mode_does_not_force_barge_in(self, mode_plugin, standalone_app):
+        standalone_app.config.barge_in_enabled = False
+
+        await mode_plugin._do_switch_mode("monologue")
 
         # Monologue mode should NOT force barge_in on
         assert standalone_app.config.barge_in_enabled is False
-        assert plugin._monologue_mode is True
+        assert mode_plugin._mode_manager.current.name == "monologue"
 
-
-    def test_interpreter_mode_disables_barge_in(self, standalone_app):
-        plugin = ConversationPlugin(standalone_app)
+    @pytest.mark.asyncio
+    async def test_interpreter_mode_disables_barge_in(self, mode_plugin, standalone_app):
         standalone_app.config.barge_in_enabled = True
 
-        plugin.switch_mode("interpreter")
+        await mode_plugin._do_switch_mode("interpreter")
 
         assert standalone_app.config.barge_in_enabled is False
-        assert plugin._interpreter_mode is True
-        assert plugin._monologue_mode is False
+        assert mode_plugin._mode_manager.current.name == "interpreter"
 
-    def test_interpreter_to_conversation_restores_barge_in(self, standalone_app):
-        plugin = ConversationPlugin(standalone_app)
+    @pytest.mark.asyncio
+    async def test_interpreter_to_conversation_restores_barge_in(self, mode_plugin, standalone_app):
+        await mode_plugin._do_switch_mode("interpreter")
+        assert mode_plugin._mode_manager.current.name == "interpreter"
 
-        plugin.switch_mode("interpreter")
-        assert plugin._interpreter_mode is True
-
-        plugin.switch_mode("conversation")
-        assert plugin._interpreter_mode is False
+        await mode_plugin._do_switch_mode("conversation")
+        assert mode_plugin._mode_manager.current.name == "conversation"
         assert standalone_app.config.barge_in_enabled is True
 
-    def test_interpreter_mode_ollama_config(self, standalone_app):
+    @pytest.mark.asyncio
+    async def test_interpreter_mode_ollama_config(self, mode_plugin, standalone_app):
         """Interpreter mode sets correct OllamaClient config."""
         from reachy_claw.llm import OllamaClient, OllamaConfig
 
-        plugin = ConversationPlugin(standalone_app)
-        plugin._client = OllamaClient(OllamaConfig())
+        mode_plugin._client = OllamaClient(OllamaConfig())
         standalone_app.config.interpreter_source_lang = "Chinese"
         standalone_app.config.interpreter_target_lang = "English"
 
-        plugin.switch_mode("interpreter")
+        await mode_plugin._do_switch_mode("interpreter")
 
-        assert plugin._client._config.skip_emotion_extraction is True
-        assert plugin._client._config.max_history == 0
-        assert plugin._client._config.temperature == 0.3
-        assert plugin._client._config.monologue_mode is False
-        assert "Chinese" in plugin._client._config.system_prompt
-        assert "English" in plugin._client._config.system_prompt
+        assert mode_plugin._client._config.skip_emotion_extraction is True
+        assert mode_plugin._client._config.max_history == 0
+        assert mode_plugin._client._config.temperature == 0.3
+        assert mode_plugin._client._config.monologue_mode is False
+        assert "Chinese" in mode_plugin._client._config.system_prompt
+        assert "English" in mode_plugin._client._config.system_prompt
 
-    def test_switch_interpreter_to_conversation_restores_config(self, standalone_app):
+    @pytest.mark.asyncio
+    async def test_switch_interpreter_to_conversation_restores_config(self, mode_plugin, standalone_app):
         """Switching from interpreter back to conversation restores OllamaClient config."""
         from reachy_claw.llm import OllamaClient, OllamaConfig
 
-        plugin = ConversationPlugin(standalone_app)
         standalone_app.config.ollama_max_history = 5
         standalone_app.config.ollama_temperature = 0.7
         standalone_app.config.enable_vlm = True
-        plugin._client = OllamaClient(OllamaConfig(
+        mode_plugin._client = OllamaClient(OllamaConfig(
             max_history=5, temperature=0.7, enable_vlm=True,
         ))
 
         # Switch to interpreter — config gets overridden
-        plugin.switch_mode("interpreter")
-        assert plugin._client._config.max_history == 0
-        assert plugin._client._config.temperature == 0.3
-        assert plugin._client._config.enable_vlm is False
+        await mode_plugin._do_switch_mode("interpreter")
+        assert mode_plugin._client._config.max_history == 0
+        assert mode_plugin._client._config.temperature == 0.3
+        assert mode_plugin._client._config.enable_vlm is False
 
         # Switch back to conversation — config restored
-        plugin.switch_mode("conversation")
-        assert plugin._client._config.max_history == 5
-        assert plugin._client._config.temperature == 0.7
-        assert plugin._client._config.enable_vlm is True
+        await mode_plugin._do_switch_mode("conversation")
+        assert mode_plugin._client._config.max_history == 5
+        assert mode_plugin._client._config.temperature == 0.7
+        assert mode_plugin._client._config.enable_vlm is True
 
-    def test_interpreter_skips_wake_word(self, standalone_app):
-        """Interpreter mode should not check wake word."""
-        plugin = ConversationPlugin(standalone_app)
-        standalone_app.config.wake_word = "hey reachy"
-        plugin._interpreter_mode = True
-
-        # In interpreter mode, wake word check is bypassed
-        # (the condition includes `not self._interpreter_mode`)
-        assert plugin._interpreter_mode is True
-        # Verify the flag is set correctly — actual wake word bypass
-        # is tested by checking the code path condition
+    @pytest.mark.asyncio
+    async def test_interpreter_mode_name(self, mode_plugin, standalone_app):
+        """Interpreter mode is correctly identified by name."""
+        await mode_plugin._do_switch_mode("interpreter")
+        assert mode_plugin._mode_manager.current.name == "interpreter"
 
 
 # ── Sentence accumulator: RESET_BUFFER clears buffer ────────────────
@@ -1058,14 +1072,15 @@ class TestConversationStopped:
 
 class TestStreamDeltaRunId:
     @pytest.mark.asyncio
-    async def test_first_delta_sets_speaking_state(self, standalone_app):
+    async def test_first_delta_stays_thinking(self, standalone_app):
+        """First delta stays in THINKING — transition to SPEAKING happens in output pipeline."""
         plugin = ConversationPlugin(standalone_app)
         plugin._current_run_id = "run-1"
         plugin._state = ConvState.THINKING
 
         await plugin._on_stream_delta("Hi", "run-1")
 
-        assert plugin._state == ConvState.SPEAKING
+        assert plugin._state == ConvState.THINKING
 
     @pytest.mark.asyncio
     async def test_delta_emits_llm_delta_event(self, standalone_app):
