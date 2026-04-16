@@ -281,12 +281,8 @@ class DashboardPlugin(Plugin):
         elif msg_type == "get_mode":
             conv = self.app.get_plugin("conversation")
             mode = self.app.config.conversation_mode
-            monologue = conv and getattr(conv, "_monologue_mode", False)
-            interpreter = conv and getattr(conv, "_interpreter_mode", False)
-            if monologue:
-                mode = "monologue"
-            elif interpreter:
-                mode = "interpreter"
+            if conv and getattr(conv, "_mode_manager", None):
+                mode = conv._mode_manager.current.name
             await self._broadcast({"type": "mode", "mode": mode})
 
         elif msg_type == "set_interpreter_langs":
@@ -296,7 +292,7 @@ class DashboardPlugin(Plugin):
             self.app.config.interpreter_target_lang = target
             # If currently in interpreter mode, re-apply with new languages
             conv = self.app.get_plugin("conversation")
-            if conv and getattr(conv, "_interpreter_mode", False):
+            if conv and getattr(conv, "_mode_manager", None) and conv._mode_manager.current.name == "interpreter":
                 conv.switch_mode("interpreter")
             self._save_overrides(["interpreter_source_lang", "interpreter_target_lang"])
             await self._broadcast({
@@ -337,15 +333,14 @@ class DashboardPlugin(Plugin):
             # Hot-apply: if OllamaClient is active in matching mode, update live
             conv = self.app.get_plugin("conversation")
             if conv and hasattr(conv, "_client") and isinstance(conv._client, OllamaClient):
-                is_monologue = getattr(conv, "_monologue_mode", False)
-                is_interpreter = getattr(conv, "_interpreter_mode", False)
-                if mode == "interpreter" and is_interpreter:
+                current_mode = conv._mode_manager.current.name if getattr(conv, "_mode_manager", None) else "conversation"
+                if mode == "interpreter" and current_mode == "interpreter":
                     interp_default = INTERPRETER_SYSTEM_PROMPT.format(
                         source_lang=self.app.config.interpreter_source_lang,
                         target_lang=self.app.config.interpreter_target_lang,
                     )
                     conv._client._config.system_prompt = prompt or interp_default
-                elif (mode == "monologue" and is_monologue) or (mode == "conversation" and not is_monologue and not is_interpreter):
+                elif (mode == "monologue" and current_mode == "monologue") or (mode == "conversation" and current_mode == "conversation"):
                     conv._client._config.system_prompt = prompt or (
                         MONOLOGUE_SYSTEM_PROMPT if is_monologue else DEFAULT_SYSTEM_PROMPT
                     )
