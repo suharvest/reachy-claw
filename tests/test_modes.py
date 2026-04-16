@@ -236,3 +236,72 @@ class TestConversationMode:
         assert overrides["skip_emotion_extraction"] is False
         assert "temperature" not in overrides
         assert "max_history" not in overrides
+
+
+from reachy_claw.modes.monologue import MonologueMode
+
+
+class TestMonologueMode:
+    def test_name(self):
+        m = MonologueMode()
+        assert m.name == "monologue"
+
+    def test_config_overrides(self):
+        m = MonologueMode()
+        assert m.barge_in is False
+        assert m.temperature == 0.9
+        assert m.skip_emotion_extraction is False
+        assert m.play_emotions is False
+
+    def test_on_speaking_audio_returns_bg_listen(self):
+        m = MonologueMode()
+        ctx = _make_ctx()
+        assert m.on_speaking_audio(b"chunk", ctx) == "bg_listen"
+
+    @pytest.mark.asyncio
+    async def test_enter_starts_timer(self):
+        m = MonologueMode()
+        ctx = _make_ctx()
+        ctx.app.config.monologue_interval = 5.0
+        mock_task = MagicMock()
+        ctx.spawn_task.return_value = mock_task
+
+        await m.enter(ctx)
+
+        ctx.spawn_task.assert_called_once()
+        assert m._timer_task is mock_task
+
+    @pytest.mark.asyncio
+    async def test_exit_cancels_timer(self):
+        m = MonologueMode()
+        ctx = _make_ctx()
+        ctx.app.config.monologue_interval = 5.0
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        ctx.spawn_task.return_value = mock_task
+
+        await m.enter(ctx)
+        await m.exit(ctx)
+
+        mock_task.cancel.assert_called_once()
+
+    def test_compose_monologue_prompt_with_transcript(self):
+        m = MonologueMode()
+        ctx = _make_ctx()
+        ctx.app.get_plugin = MagicMock(return_value=None)
+        result = m.compose_monologue_prompt("hello world", ctx)
+        assert 'heard: "hello world"' in result
+
+    def test_compose_monologue_prompt_no_input(self):
+        m = MonologueMode()
+        ctx = _make_ctx()
+        ctx.app.get_plugin = MagicMock(return_value=None)
+        result = m.compose_monologue_prompt(None, ctx)
+        assert "nobody around" in result
+
+    def test_preprocess_utterance_calls_compose(self):
+        m = MonologueMode()
+        ctx = _make_ctx()
+        ctx.app.get_plugin = MagicMock(return_value=None)
+        result = m.preprocess_utterance("hi", ctx)
+        assert 'heard: "hi"' in result
