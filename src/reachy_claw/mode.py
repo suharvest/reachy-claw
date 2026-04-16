@@ -88,3 +88,48 @@ class Mode(ABC):
         Returns: "barge_in" | "bg_listen" | "ignore".
         """
         return "barge_in" if self.barge_in else "ignore"
+
+
+class ModeManager:
+    """Manages conversation mode lifecycle and switching."""
+
+    def __init__(self, ctx: ModeContext) -> None:
+        self._ctx = ctx
+        self._modes: dict[str, Mode] = {}
+        self._current: Mode | None = None
+
+    def register(self, mode: Mode) -> None:
+        """Register a mode. Can be called before the first switch."""
+        self._modes[mode.name] = mode
+
+    @property
+    def current(self) -> Mode:
+        """The currently active mode. Raises RuntimeError if no mode is active."""
+        if self._current is None:
+            raise RuntimeError("No mode is active — call switch() first")
+        return self._current
+
+    async def switch(self, name: str) -> None:
+        """Switch to a different mode.
+
+        Calls exit() on current mode, applies new mode's config, then
+        calls enter(). No-op if already in the requested mode.
+        """
+        if self._current and self._current.name == name:
+            return
+
+        new_mode = self._modes[name]  # KeyError if unknown
+        prev_name = self._current.name if self._current else None
+
+        if self._current:
+            await self._current.exit(self._ctx)
+
+        if new_mode.barge_in is not None:
+            self._ctx.app.config.barge_in_enabled = new_mode.barge_in
+
+        self._current = new_mode
+        await new_mode.enter(self._ctx)
+
+        self._ctx.app.config.conversation_mode = name
+        self._ctx.events.emit("mode_change", {"mode": name, "prev": prev_name})
+        logger.info("Mode switched: %s → %s", prev_name, name)

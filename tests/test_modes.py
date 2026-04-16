@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from reachy_claw.mode import Mode, ModeContext
+from reachy_claw.mode import Mode, ModeContext, ModeManager
 
 
 class DummyMode(Mode):
@@ -39,6 +39,16 @@ class DummyMode2(Mode):
     skip_emotion_extraction = True
     enable_vlm = False
     play_emotions = False
+
+    def __init__(self):
+        self.entered = False
+        self.exited = False
+
+    async def enter(self, ctx: ModeContext) -> None:
+        self.entered = True
+
+    async def exit(self, ctx: ModeContext) -> None:
+        self.exited = True
 
 
 def _make_ctx() -> ModeContext:
@@ -95,3 +105,91 @@ class TestMode:
         overrides = mode.get_ollama_config(MagicMock())
         assert "temperature" not in overrides
         assert "max_history" not in overrides
+
+
+class TestModeManager:
+    @pytest.mark.asyncio
+    async def test_register_and_switch(self):
+        ctx = _make_ctx()
+        mgr = ModeManager(ctx)
+        m1 = DummyMode()
+        m2 = DummyMode2()
+        mgr.register(m1)
+        mgr.register(m2)
+
+        await mgr.switch("dummy")
+        assert mgr.current is m1
+        assert m1.entered is True
+
+    @pytest.mark.asyncio
+    async def test_switch_calls_exit_then_enter(self):
+        ctx = _make_ctx()
+        mgr = ModeManager(ctx)
+        m1 = DummyMode()
+        m2 = DummyMode2()
+        mgr.register(m1)
+        mgr.register(m2)
+
+        await mgr.switch("dummy")
+        assert m1.entered is True
+
+        await mgr.switch("dummy2")
+        assert m1.exited is True
+        assert m2.entered is True
+
+    @pytest.mark.asyncio
+    async def test_switch_same_mode_is_noop(self):
+        ctx = _make_ctx()
+        mgr = ModeManager(ctx)
+        m1 = DummyMode()
+        mgr.register(m1)
+
+        await mgr.switch("dummy")
+        m1.entered = False  # reset
+        await mgr.switch("dummy")
+        assert m1.entered is False  # not re-entered
+
+    @pytest.mark.asyncio
+    async def test_switch_emits_mode_change_event(self):
+        ctx = _make_ctx()
+        mgr = ModeManager(ctx)
+        mgr.register(DummyMode())
+        mgr.register(DummyMode2())
+
+        await mgr.switch("dummy")
+        await mgr.switch("dummy2")
+
+        calls = [c for c in ctx.events.emit.call_args_list if c[0][0] == "mode_change"]
+        assert len(calls) == 2
+        payload = calls[1][0][1]
+        assert payload["mode"] == "dummy2"
+        assert payload["prev"] == "dummy"
+
+    @pytest.mark.asyncio
+    async def test_switch_applies_barge_in(self):
+        ctx = _make_ctx()
+        mgr = ModeManager(ctx)
+        m1 = DummyMode()   # barge_in = True
+        m2 = DummyMode2()  # barge_in = False
+        mgr.register(m1)
+        mgr.register(m2)
+
+        await mgr.switch("dummy")
+        assert ctx.app.config.barge_in_enabled is True
+
+        await mgr.switch("dummy2")
+        assert ctx.app.config.barge_in_enabled is False
+
+    @pytest.mark.asyncio
+    async def test_switch_unknown_mode_raises(self):
+        ctx = _make_ctx()
+        mgr = ModeManager(ctx)
+        with pytest.raises(KeyError):
+            await mgr.switch("nonexistent")
+
+    @pytest.mark.asyncio
+    async def test_current_before_switch_raises(self):
+        ctx = _make_ctx()
+        mgr = ModeManager(ctx)
+        with pytest.raises(RuntimeError):
+            _ = mgr.current
