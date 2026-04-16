@@ -305,3 +305,51 @@ class TestMonologueMode:
         ctx.app.get_plugin = MagicMock(return_value=None)
         result = m.preprocess_utterance("hi", ctx)
         assert 'heard: "hi"' in result
+
+
+from reachy_claw.modes.interpreter import InterpreterMode
+
+
+class TestInterpreterMode:
+    def test_name(self):
+        m = InterpreterMode()
+        assert m.name == "interpreter"
+
+    def test_config_overrides(self):
+        m = InterpreterMode()
+        assert m.barge_in is False
+        assert m.temperature == 0.3
+        assert m.max_history == 0
+        assert m.skip_emotion_extraction is True
+        assert m.enable_vlm is False
+        assert m.play_emotions is False
+
+    def test_on_speaking_audio_returns_ignore(self):
+        m = InterpreterMode()
+        ctx = _make_ctx()
+        assert m.on_speaking_audio(b"chunk", ctx) == "ignore"
+
+    def test_preprocess_utterance_returns_none(self):
+        """Interpreter handles sending itself via sequencer."""
+        m = InterpreterMode()
+        ctx = _make_ctx()
+        m._sequencer = MagicMock()
+        result = m.preprocess_utterance("hello", ctx)
+        assert result is None
+        m._sequencer.submit.assert_called_once_with("hello")
+
+    @pytest.mark.asyncio
+    async def test_exit_stops_sequencer_and_drains(self):
+        m = InterpreterMode()
+        ctx = _make_ctx()
+        await ctx.sentence_queue.put("stale")
+        await ctx.audio_queue.put("stale")
+
+        mock_seq = AsyncMock()
+        m._sequencer = mock_seq
+
+        await m.exit(ctx)
+
+        mock_seq.stop.assert_awaited_once()
+        assert ctx.sentence_queue.empty()
+        assert ctx.audio_queue.empty()
