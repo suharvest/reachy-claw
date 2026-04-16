@@ -363,7 +363,7 @@ class ConversationPlugin(Plugin):
                 if emotion:
                     self.app.emotions.queue_emotion(emotion)
 
-    def _spawn_task(self, coro: Coroutine[Any, Any, Any], *, name: str) -> None:
+    def _spawn_task(self, coro: Coroutine[Any, Any, Any], *, name: str) -> asyncio.Task:
         """Track background tasks so they can be cancelled on shutdown."""
         task = asyncio.create_task(coro, name=name)
         self._pending_tasks.add(task)
@@ -381,6 +381,7 @@ class ConversationPlugin(Plugin):
                     self._set_state(ConvState.IDLE)
 
         task.add_done_callback(_on_done)
+        return task
 
     # ── Callbacks from desktop-robot protocol ─────────────────────────
 
