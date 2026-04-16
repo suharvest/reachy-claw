@@ -1,4 +1,4 @@
-"""Tests for Mode base class, ModeContext, and ModeManager."""
+"""Tests for Mode base class, ModeContext, ModeManager, and ConversationMode."""
 
 from __future__ import annotations
 
@@ -193,3 +193,46 @@ class TestModeManager:
         mgr = ModeManager(ctx)
         with pytest.raises(RuntimeError):
             _ = mgr.current
+
+
+from reachy_claw.modes import ConversationMode
+
+
+class TestConversationMode:
+    def test_name(self):
+        m = ConversationMode()
+        assert m.name == "conversation"
+
+    def test_barge_in_enabled(self):
+        m = ConversationMode()
+        assert m.barge_in is True
+
+    def test_play_emotions(self):
+        m = ConversationMode()
+        assert m.play_emotions is True
+
+    def test_preprocess_injects_vision_context(self):
+        m = ConversationMode()
+        ctx = _make_ctx()
+        ctx.get_vision_context.return_value = "Alice looks happy"
+        result = m.preprocess_utterance("hello", ctx)
+        assert result == "[Faces: Alice looks happy]\nhello"
+
+    def test_preprocess_no_vision_returns_text(self):
+        m = ConversationMode()
+        ctx = _make_ctx()
+        ctx.get_vision_context.return_value = None
+        result = m.preprocess_utterance("hello", ctx)
+        assert result == "hello"
+
+    def test_on_speaking_audio_returns_barge_in(self):
+        m = ConversationMode()
+        ctx = _make_ctx()
+        assert m.on_speaking_audio(b"chunk", ctx) == "barge_in"
+
+    def test_get_ollama_config_minimal(self):
+        m = ConversationMode()
+        overrides = m.get_ollama_config(MagicMock())
+        assert overrides["skip_emotion_extraction"] is False
+        assert "temperature" not in overrides
+        assert "max_history" not in overrides
