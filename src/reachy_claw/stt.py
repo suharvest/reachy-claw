@@ -63,6 +63,14 @@ class STTBackend(ABC):
         """Cancel the current streaming session."""
         pass
 
+    def reset_stream(self) -> None:
+        """Reset the stream for a new utterance, reusing the connection if possible.
+
+        Default falls back to cancel_stream().  Streaming backends that
+        support in-band reset can override to avoid reconnection cost.
+        """
+        self.cancel_stream()
+
 
 @register_stt("whisper")
 class WhisperSTT(STTBackend):
@@ -487,6 +495,45 @@ class ParaformerStreamingSTT(STTBackend):
         self._close_ws()
         return result
 
+    def reset_stream(self) -> None:
+        """Reset the server-side stream without closing the WebSocket.
+
+        Sends a ``{"command": "reset"}`` text message.  The server discards
+        its current recognizer stream and creates a fresh one, avoiding
+        the 100-500 ms reconnection cost of cancel_stream() + start_stream().
+        Falls back to cancel_stream() if the server doesn't support reset.
+        """
+        import json
+
+        self._partial_text = ""
+        self._final_text = ""
+        self._chunks_sent = 0
+
+        if self._ws is None:
+            return
+
+        try:
+            self._ws.send(json.dumps({"command": "reset"}))
+            # Drain messages until we get the reset ack.  The server may
+            # have queued partial ASR results before processing our reset.
+            # Short timeout: on local network the ack arrives in <10ms;
+            # avoid adding latency when the server doesn't support reset.
+            deadline = time.monotonic() + 0.2
+            while time.monotonic() < deadline:
+                remaining = max(0.05, deadline - time.monotonic())
+                raw = self._ws.recv(timeout=remaining)
+                msg = json.loads(raw)
+                if msg.get("reset"):
+                    logger.debug("Paraformer stream reset via server command")
+                    return
+                # Stale partial/final — discard and keep waiting
+                logger.debug("Discarding stale ASR result during reset: %s", msg.get("text", "")[:30])
+        except Exception as e:
+            logger.debug("Stream reset failed (%s), falling back to reconnect", e)
+
+        # Fallback: old close-and-reconnect path
+        self._close_ws()
+
     def cancel_stream(self) -> None:
         # Close the WebSocket so start_stream() opens a fresh connection.
         # This prevents stale partial results from polluting the next utterance.
@@ -574,6 +621,12 @@ class _ReconnectingSTT(STTBackend):
 
     def cancel_stream(self) -> None:
         self._backend.cancel_stream()
+
+    def reset_stream(self) -> None:
+        if hasattr(self._backend, "reset_stream"):
+            self._backend.reset_stream()
+        else:
+            self._backend.cancel_stream()
 
     def ensure_connected(self, sample_rate: int = 16000) -> None:
         if hasattr(self._backend, "ensure_connected"):
