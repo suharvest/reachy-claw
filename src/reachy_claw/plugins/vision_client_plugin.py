@@ -180,6 +180,7 @@ class VisionClientPlugin(Plugin):
             if capture and capture.get("event"):
                 self._emit_threadsafe("smile_capture", {
                     "count": capture.get("count", 0),
+                    "file": capture.get("file"),
                 })
 
             faces = msg.get("faces", [])

@@ -272,6 +272,7 @@ function handleDashboardMsg(msg) {
             captureCount = msg.count || 0;
             captureCountEl.textContent = captureCount;
             spawnFloatPlus();
+            if (msg.file) appendLiveGalleryItem(msg.file);
             break;
 
         case 'capture_reset':
@@ -1963,6 +1964,74 @@ function createSmileGallery() {
 // All loaded capture items with metadata
 let galleryItems = []; // { file, ts, el }
 
+function buildGalleryItem(file, i, bounds) {
+    const { areaW, areaH, padTop, padBot, padSide } = bounds;
+    const color = GALLERY_COLORS[i % GALLERY_COLORS.length];
+    const item = document.createElement('div');
+    item.className = 'smile-gallery-item';
+
+    const size = 70 + Math.random() * 110;
+    item.style.width = size + 'px';
+    item.style.height = size + 'px';
+
+    const x = padSide + Math.random() * (areaW - size - padSide * 2);
+    const y = padTop + Math.random() * (areaH - size - padTop - padBot);
+    const rot = (Math.random() - 0.5) * 30;
+    const baseTransform = `translate(${x}px, ${y}px)`;
+
+    item.style.transform = `${baseTransform} rotate(${rot}deg)`;
+    item.style.setProperty('--base-transform', baseTransform);
+    item.style.setProperty('--item-color-solid', color);
+    item.style.zIndex = i;
+
+    let ts = 0;
+    const match = file.match(/smile_(\d+)_/);
+    if (match) ts = parseInt(match[1]);
+    const timeStr = ts ? new Date(ts * 1000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }) : '';
+
+    item.innerHTML = `
+        <img src="/api/captures/image/${file}" alt="smile" loading="lazy">
+        ${timeStr ? `<div class="smile-gallery-time">${timeStr}</div>` : ''}
+    `;
+
+    item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openLightbox(file);
+    });
+
+    return { item, ts };
+}
+
+function appendLiveGalleryItem(file) {
+    if (!file || !smileGalleryEl || !smileGalleryEl.classList.contains('active')) return;
+    const grid = document.getElementById('gallery-grid');
+    if (!grid) return;
+
+    // Remove empty-state placeholder if present
+    const empty = grid.querySelector('.smile-gallery-empty, .smile-gallery-loading');
+    if (empty) empty.remove();
+
+    const i = galleryItems.length;
+    const bounds = {
+        areaW: window.innerWidth,
+        areaH: window.innerHeight,
+        padTop: 80, padBot: 80, padSide: 24,
+    };
+    const { item, ts } = buildGalleryItem(file, i, bounds);
+    item.classList.add('fresh-capture');
+    grid.appendChild(item);
+    galleryItems.push({ file, ts, el: item });
+
+    // Trigger entrance on next frame
+    requestAnimationFrame(() => {
+        item.classList.add('revealed');
+        setTimeout(() => item.classList.remove('fresh-capture'), 1400);
+    });
+
+    const countEl = document.getElementById('gallery-count');
+    if (countEl) countEl.textContent = galleryItems.length;
+}
+
 async function openSmileGallery() {
     createSmileGallery();
     smileGalleryEl.classList.add('active');
@@ -1996,46 +2065,9 @@ async function openSmileGallery() {
         const padSide = 24;
 
         files.forEach((file, i) => {
-            const color = GALLERY_COLORS[i % GALLERY_COLORS.length];
-            const item = document.createElement('div');
-            item.className = 'smile-gallery-item';
-
-            // Random size (70–180px, varied)
-            const size = 70 + Math.random() * 110;
-            item.style.width = size + 'px';
-            item.style.height = size + 'px';
-
-            // Random position across full screen
-            const x = padSide + Math.random() * (areaW - size - padSide * 2);
-            const y = padTop + Math.random() * (areaH - size - padTop - padBot);
-            const rot = (Math.random() - 0.5) * 30;
-            const baseTransform = `translate(${x}px, ${y}px)`;
-
-            item.style.transform = `${baseTransform} rotate(${rot}deg)`;
-            item.style.setProperty('--base-transform', baseTransform);
-            item.style.setProperty('--item-color-solid', color);
-            item.style.zIndex = i;
-
-            // Parse timestamp from filename
-            let ts = 0;
-            const match = file.match(/smile_(\d+)_/);
-            if (match) ts = parseInt(match[1]);
-            const timeStr = ts ? new Date(ts * 1000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }) : '';
-
-            item.innerHTML = `
-                <img src="/api/captures/image/${file}" alt="smile" loading="lazy">
-                ${timeStr ? `<div class="smile-gallery-time">${timeStr}</div>` : ''}
-            `;
-
-            item.addEventListener('click', (e) => {
-                e.stopPropagation();
-                openLightbox(file);
-            });
-
+            const { item, ts } = buildGalleryItem(file, i, { areaW, areaH, padTop, padBot, padSide });
             grid.appendChild(item);
             galleryItems.push({ file, ts, el: item });
-
-            // Staggered drop-in
             setTimeout(() => item.classList.add('revealed'), i * 15 + 80);
         });
 

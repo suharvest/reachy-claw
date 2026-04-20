@@ -1224,6 +1224,7 @@ class DashboardPlugin(Plugin):
         await self._broadcast({
             "type": "smile_capture",
             "count": self._capture_count,
+            "file": data.get("file"),
         })
 
     async def _restart_services(self) -> None:

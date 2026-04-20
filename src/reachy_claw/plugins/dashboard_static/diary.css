@@ -825,6 +825,34 @@
     opacity: 1;
 }
 
+/* Live-capture entrance: pop in with a colored glow pulse */
+.smile-gallery-item.fresh-capture {
+    animation: fresh-capture-pop 1.2s ease-out;
+    box-shadow:
+        0 0 0 3px var(--item-color-solid, #f0883e),
+        0 0 40px var(--item-color-solid, #f0883e),
+        0 4px 20px rgba(0, 0, 0, 0.5);
+}
+
+@keyframes fresh-capture-pop {
+    0% {
+        opacity: 0;
+        transform: var(--base-transform) scale(0.2) rotate(0deg);
+    }
+    40% {
+        opacity: 1;
+        transform: var(--base-transform) scale(1.35) rotate(0deg);
+    }
+    70% {
+        transform: var(--base-transform) scale(0.95) rotate(0deg);
+    }
+    100% {
+        opacity: 1;
+        transform: var(--base-transform) scale(1) rotate(0deg);
+    }
+}
+
+
 .smile-gallery-item:hover {
     z-index: 999 !important;
     transform: var(--base-transform) scale(1.6) rotate(0deg) !important;
