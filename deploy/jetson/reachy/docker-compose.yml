@@ -22,19 +22,15 @@ services:
     restart: unless-stopped
     network_mode: host
     privileged: true
+    # --no-media disables camera/audio/WebRTC in the daemon — we handle all media
+    # via vision-trt (local or remote) and the speech service, so the daemon has
+    # no business touching /dev/video0.
     command: >-
       reachy-mini-daemon
       --serialport ${SERIAL_PORT:-auto}
       --localhost-only
-      --deactivate-audio
+      --no-media
       --fastapi-port 38001
-    # If vision-trt is active, start it first so it grabs /dev/video0 before
-    # reachy-daemon tries to (daemon falls back gracefully when camera is busy).
-    # depends_on is a no-op if vision-trt is not included (profile inactive).
-    depends_on:
-      vision-trt:
-        condition: service_started
-        required: false
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:38001/', timeout=2)"]
       interval: 10s
