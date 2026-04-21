@@ -58,6 +58,9 @@ services:
     environment:
       - DATA_DIR=/app/data
       - HOST_DATA_DIR=${DATA_DIR:-~/reachy-data}
+      # Point at local vision-trt by default; override for remote deployment:
+      #   VISION_SERVICE_URL=tcp://<remote-ip>:8631 docker compose up -d
+      - VISION_SERVICE_URL=${VISION_SERVICE_URL:-tcp://127.0.0.1:8631}
     depends_on:
       reachy-daemon:
         condition: service_healthy

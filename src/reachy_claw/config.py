@@ -182,6 +182,10 @@ class Config:
         if env_url:
             self.speech_service_url = env_url
 
+        env_vision = os.environ.get("VISION_SERVICE_URL")
+        if env_vision:
+            self.vision_service_url = env_vision
+
     @property
     def desktop_robot_url(self) -> str:
         """WebSocket URL for the desktop-robot channel."""
