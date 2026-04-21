@@ -1246,6 +1246,16 @@ class DashboardPlugin(Plugin):
             ("reachy-claw", False),
         ]
 
+        # When vision-trt runs on a different host, its container is not managed
+        # by the local docker socket — skip it.
+        vision_url = self.app.config.vision_service_url
+        vision_host = vision_url.replace("tcp://", "").split(":")[0] if vision_url else ""
+        if vision_host and vision_host not in ("127.0.0.1", "localhost", "::1"):
+            logger.info(
+                "vision-trt is remote (%s); skipping local restart", vision_host,
+            )
+            containers = [(n, w) for n, w in containers if n != "vision-trt"]
+
         await self._broadcast({"type": "restart_status", "status": "starting"})
 
         conn = aiohttp.UnixConnector(path=sock_path)
