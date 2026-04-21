@@ -1228,18 +1228,30 @@ class DashboardPlugin(Plugin):
         })
 
     async def _restart_services(self) -> None:
-        """Restart Docker containers via Docker Engine API (Unix socket)."""
+        """Restart Docker containers via Docker Engine API (Unix socket).
+
+        Order matters: vision-trt must grab /dev/video0 before reachy-daemon
+        starts (otherwise the daemon takes the camera and vision-trt fails).
+        After restarting vision-trt we wait until its health check passes
+        before restarting the next container.
+        """
         import aiohttp
 
         sock_path = "/var/run/docker.sock"
-        containers = ["vision-trt", "reachy-daemon", "reachy-claw"]
+        # Containers where we must wait for health before moving on. vision-trt
+        # is the only one with a strict startup-order requirement (camera lock).
+        containers = [
+            ("vision-trt", True),
+            ("reachy-daemon", False),
+            ("reachy-claw", False),
+        ]
 
         await self._broadcast({"type": "restart_status", "status": "starting"})
 
         conn = aiohttp.UnixConnector(path=sock_path)
         try:
             async with aiohttp.ClientSession(connector=conn) as session:
-                for name in containers:
+                for name, wait_healthy in containers:
                     await self._broadcast({
                         "type": "restart_status",
                         "status": "restarting",
@@ -1257,8 +1269,13 @@ class DashboardPlugin(Plugin):
                                 logger.warning(
                                     "Restart %s: HTTP %d — %s", name, resp.status, body
                                 )
+                                continue
                     except Exception as e:
                         logger.error("Failed to restart %s: %s", name, e)
+                        continue
+
+                    if wait_healthy:
+                        await self._wait_container_healthy(session, name, timeout=60)
         except Exception as e:
             logger.error("Docker socket error: %s", e)
             await self._broadcast({
@@ -1269,6 +1286,40 @@ class DashboardPlugin(Plugin):
             return
 
         await self._broadcast({"type": "restart_status", "status": "done"})
+
+    async def _wait_container_healthy(self, session, name: str, timeout: int = 60) -> bool:
+        """Poll Docker container state until Health=healthy or running-without-healthcheck.
+
+        Returns True if ready (healthy or running), False if timed out.
+        """
+        import asyncio
+        import aiohttp
+
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                async with session.get(
+                    f"http://localhost/containers/{name}/json",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        state = data.get("State", {})
+                        health = state.get("Health")
+                        if health:
+                            if health.get("Status") == "healthy":
+                                logger.info("%s is healthy", name)
+                                return True
+                        elif state.get("Running"):
+                            # No healthcheck defined — running is good enough
+                            logger.info("%s is running (no healthcheck)", name)
+                            return True
+            except Exception as e:
+                logger.debug("Health probe for %s: %s", name, e)
+            await asyncio.sleep(2)
+
+        logger.warning("%s did not become healthy within %ds", name, timeout)
+        return False
 
     async def _clear_captures(self) -> None:
         """Call vision-trt API to clear captures, broadcast reset."""
