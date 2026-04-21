@@ -65,6 +65,10 @@ services:
       - ZMQ_PUB_PORT=8631
       - HTTP_PORT=8630
       - STREAM_PORT=8632
+    labels:
+      # Opt into autoheal: vision-trt has a history of camera-lock deadlocks
+      # (see commit ee5406f) where a fresh container is the only fix.
+      - autoheal=true
 
   openclaw-gateway:
     profiles: ["openclaw"]
@@ -91,7 +95,10 @@ services:
     container_name: autoheal
     restart: unless-stopped
     environment:
-      - AUTOHEAL_CONTAINER_LABEL=all
+      # Opt-in: only containers with `labels: [autoheal=true]` are restarted.
+      # Using `all` is dangerous — any transient unhealthy event (e.g. a
+      # manual `docker compose up` recreate) triggers cascading restarts.
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
       - AUTOHEAL_INTERVAL=15
       - AUTOHEAL_START_PERIOD=60
     volumes:
