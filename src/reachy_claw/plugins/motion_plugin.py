@@ -148,7 +148,7 @@ class MotionPlugin(Plugin):
                 continue
             expr = self.app.emotions.get_next_expression()
             if expr:
-                self._execute_expression(expr)
+                await self._run_expression_safe(expr)
                 await asyncio.sleep(expr.head.duration if expr.head else 0.5)
                 last_idle = time.monotonic()
             elif (
@@ -157,7 +157,7 @@ class MotionPlugin(Plugin):
                 and time.monotonic() - last_idle > config.motion_idle_animation_interval
             ):
                 idle_expr = self.app.emotions.get_idle_expression()
-                self._execute_expression(idle_expr)
+                await self._run_expression_safe(idle_expr)
                 last_idle = time.monotonic()
                 await asyncio.sleep(idle_expr.head.duration if idle_expr.head else 1.0)
             else:
@@ -183,7 +183,15 @@ class MotionPlugin(Plugin):
                 await asyncio.sleep(poll_interval)
                 continue
 
-            target = self.app.head_targets.get_fused_target()
+            try:
+                target = await asyncio.wait_for(
+                    asyncio.to_thread(self.app.head_targets.get_fused_target),
+                    timeout=0.5,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("get_fused_target() timed out; skipping tick")
+                await asyncio.sleep(poll_interval)
+                continue
 
             if target.source == "none":
                 # Decay all axes to neutral
@@ -330,6 +338,22 @@ class MotionPlugin(Plugin):
             ])
         except Exception:
             pass
+
+    async def _run_expression_safe(self, expr) -> None:
+        # Runs the blocking SDK call (reachy.goto_target) off the event loop
+        # with a timeout, so a hung daemon cannot freeze the whole loop.
+        duration = expr.head.duration if expr.head else 0.5
+        timeout = max(duration + 3.0, 5.0)
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(self._execute_expression, expr),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Expression timed out after %.1fs, skipping: %s",
+                timeout, expr.description,
+            )
 
     def _execute_expression(self, expr) -> None:
         """Execute a robot expression (head + antenna movement)."""
