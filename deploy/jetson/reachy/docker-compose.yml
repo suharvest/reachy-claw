@@ -28,6 +28,13 @@ services:
       --localhost-only
       --deactivate-audio
       --fastapi-port 38001
+    # If vision-trt is active, start it first so it grabs /dev/video0 before
+    # reachy-daemon tries to (daemon falls back gracefully when camera is busy).
+    # depends_on is a no-op if vision-trt is not included (profile inactive).
+    depends_on:
+      vision-trt:
+        condition: service_started
+        required: false
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:38001/', timeout=2)"]
       interval: 10s
@@ -41,7 +48,7 @@ services:
         max-file: "3"
 
   reachy-claw:
-    image: sensecraft-missionpack.seeed.cn/solution/reachy-claw:v1.17
+    image: sensecraft-missionpack.seeed.cn/solution/reachy-claw:v1.18
     container_name: reachy-claw
     restart: unless-stopped
     network_mode: host
