@@ -1,0 +1,28 @@
+# Disable USB autosuspend for Reachy Mini USB peripherals.
+#
+# Why: Linux USB autosuspend powers the device down after idle, and waking it
+# back up occasionally leaves /dev/video0 in a half-open state where v4l2
+# drivers report "device or resource busy" / FD allocation failures. In the
+# worst case the Reachy internal hub fails to re-enumerate and the device
+# vanishes from the USB bus entirely until physical replug.
+#
+# Symptoms: vision-trt FD leak on /dev/video0, "Input/output error" on camera
+# open, or lsusb no longer listing 38fb:1002.
+#
+# Match strategy: precise VID/PID (38fb = Pollen Robotics vendor).
+#   - 38fb:1002  SunplusIT Reachy Mini Camera (UVC)
+#   - 38fb:1001  Pollen Robotics Reachy Mini Audio (USB Audio)
+# Both sit on the same internal hub and should be kept powered.
+#
+# NOTE: We intentionally do NOT match by ATTR{product}=="Reachy Mini" —
+# the real USB iProduct strings are "Reachy Mini Camera" / "Reachy Mini Audio"
+# (with suffix), so an exact-string match would silently never fire.
+#
+# Install:
+#   sudo cp deploy/jetson/udev/99-reachy-camera.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --subsystem-match=usb
+
+SUBSYSTEM=="usb", ATTR{idVendor}=="38fb", ATTR{idProduct}=="1002", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="-1"
+
+SUBSYSTEM=="usb", ATTR{idVendor}=="38fb", ATTR{idProduct}=="1001", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="-1"
