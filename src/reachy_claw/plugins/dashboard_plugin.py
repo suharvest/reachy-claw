@@ -342,7 +342,7 @@ class DashboardPlugin(Plugin):
                     conv._client._config.system_prompt = prompt or interp_default
                 elif (mode == "monologue" and current_mode == "monologue") or (mode == "conversation" and current_mode == "conversation"):
                     conv._client._config.system_prompt = prompt or (
-                        MONOLOGUE_SYSTEM_PROMPT if is_monologue else DEFAULT_SYSTEM_PROMPT
+                        MONOLOGUE_SYSTEM_PROMPT if mode == "monologue" else DEFAULT_SYSTEM_PROMPT
                     )
 
             field_map = {
