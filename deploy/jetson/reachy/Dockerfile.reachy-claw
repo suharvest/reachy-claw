@@ -42,6 +42,13 @@ RUN rm -rf /install/lib/python3.12/site-packages/torch* \
            /install/lib/python3.12/site-packages/opt_einsum* \
            /install/lib/python3.12/site-packages/pip*
 
+# Strip test assets, type stubs, and bytecode from installed packages
+RUN find /install -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true \
+ && find /install -type d -name 'tests' -exec rm -rf {} + 2>/dev/null || true \
+ && find /install -type d -name 'test' -exec rm -rf {} + 2>/dev/null || true \
+ && find /install -type f -name '*.pyi' -delete 2>/dev/null || true \
+ && find /install -type f -name '*.pyc' -delete 2>/dev/null || true
+
 # 3) Copy full source (only this layer changes on code updates)
 COPY . .
 
@@ -49,7 +56,7 @@ COPY . .
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libcairo2 libgirepository-1.0-1 gir1.2-glib-2.0 \
+    libgirepository-1.0-1 gir1.2-glib-2.0 \
     libportaudio2 ffmpeg libasound2 \
     libgl1 libglib2.0-0 \
     gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-alsa \
