@@ -43,6 +43,10 @@ captures/
 # Whisper models cache
 ~/.cache/whisper/
 
+# Prebuilt vision model binaries (Hailo .hef, TRT .plan, etc.) — large,
+# device-specific, distributed out-of-band
+deploy/jetson/vision-trt/models/
+
 # OS
 .DS_Store
 Thumbs.db
