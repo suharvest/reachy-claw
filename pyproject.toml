@@ -37,7 +37,6 @@ piper-tts = [
 ]
 mediapipe-vision = [
     "mediapipe>=0.10.14",
-    "opencv-python>=4.8",
 ]
 remote-vision = [
     "pyzmq>=25.0",
