@@ -554,12 +554,17 @@ if os.path.isdir(_static_dir):
 
 @app.get("/health")
 async def health():
-    return {
-        "status": "ok",
-        "pipeline": service.pipeline is not None,
-        "capture": service.capture is not None and service.capture._running,
+    capture_ok = service.capture is not None and service.capture._running
+    pipeline_ok = service.pipeline is not None
+    body = {
+        "status": "ok" if (capture_ok and pipeline_ok) else "degraded",
+        "pipeline": pipeline_ok,
+        "capture": capture_ok,
         "fps": round(service._fps, 1),
     }
+    if not (capture_ok and pipeline_ok):
+        return JSONResponse(body, status_code=503)
+    return body
 
 
 @app.get("/api/stats")

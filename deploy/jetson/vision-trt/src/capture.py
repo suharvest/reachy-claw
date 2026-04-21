@@ -119,6 +119,7 @@ class GstCameraCapture:
         import os
         import struct
 
+        fd = None
         try:
             fd = os.open(self._device, os.O_RDWR)
             V4L2_PIX_FMT_MJPEG = 0x47504A4D  # 'MJPG'
@@ -134,9 +135,14 @@ class GstCameraCapture:
             actual_w = struct.unpack_from("I", fmt, 4)[0]
             actual_h = struct.unpack_from("I", fmt, 8)[0]
             logger.info(f"Camera format set to {actual_w}x{actual_h} MJPEG via ioctl")
-            os.close(fd)
         except Exception as e:
             logger.warning(f"Could not pre-set camera format: {e}")
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
     def start(self) -> bool:
         """Build and start the GStreamer pipeline.
@@ -239,6 +245,7 @@ class GstCameraCapture:
         """Parse and start a GStreamer pipeline."""
         Gst = self._Gst
         logger.info(f"Launching pipeline: {pipeline_str}")
+        pipeline = None
         try:
             pipeline = Gst.parse_launch(pipeline_str)
             self._inference_sink = pipeline.get_by_name("inference_sink")
@@ -279,6 +286,11 @@ class GstCameraCapture:
 
         except Exception as e:
             logger.error(f"Pipeline launch failed: {e}")
+            if pipeline is not None:
+                try:
+                    pipeline.set_state(Gst.State.NULL)
+                except Exception:
+                    pass
             return False
 
     def get_inference_frame(self) -> np.ndarray | None:
