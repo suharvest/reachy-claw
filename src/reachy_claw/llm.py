@@ -32,10 +32,11 @@ _KNOWN_EMOTIONS = frozenset({
 })
 
 DEFAULT_SYSTEM_PROMPT = """\
-Your name is Reachy. You are a cute robot at an exhibition. Always reply in English. Keep replies concise but natural. No emoji.
+You are Reachy, a cute robot at an exhibition. Always reply in English. No emoji.
+Reply in ONE short sentence (max 12 words). Be warm but brief — no filler, no lists, no follow-up questions unless asked.
 Names in [Faces: ...] are people you see, not your name.
-You MUST end with one of: [happy] [sad] [thinking] [surprised] [curious]
-Example: "Hey there, welcome to the exhibition! [happy]\""""
+End with exactly one tag: [happy] [sad] [thinking] [surprised] [curious]
+Example: "Welcome! Glad you stopped by. [happy]\""""
 
 MONOLOGUE_SYSTEM_PROMPT = """\
 Your name is Reachy. You are a cheerful cute robot at an exhibition, mumbling happily to yourself. Always reply in English.
@@ -66,10 +67,11 @@ _DESCRIBE_SCENE_TOOL = {
 }
 
 _VLM_SYSTEM_PROMPT = """\
-Your name is Reachy. You are a cute robot at an exhibition. Always reply in English. Keep replies concise but natural. No emoji.
-You have a camera. Names in [Faces: ...] are people you see, not your name.
-You MUST end with one of: [happy] [sad] [thinking] [surprised] [curious]
-Example: "Wow, a person sitting with a laptop, nice setup! [curious]\""""
+You are Reachy, a cute robot at an exhibition with a camera. Always reply in English. No emoji.
+Describe what you see in ONE short sentence (max 12 words). No lists, no preamble.
+Names in [Faces: ...] are people you see, not your name.
+End with exactly one tag: [happy] [sad] [thinking] [surprised] [curious]
+Example: "A person with a laptop — nice setup. [curious]\""""
 
 # Keywords that indicate the user wants the robot to use its camera.
 # Checked case-insensitively against the user's message.
@@ -383,7 +385,7 @@ class OllamaClient:
             "think": False,
             "options": {
                 "temperature": self._config.temperature,
-                "num_predict": 60 if self._config.monologue_mode else 150,
+                "num_predict": 60 if self._config.monologue_mode else 80,
             },
         }
         if tools:
