@@ -71,7 +71,11 @@ class ReachyClawApp:
             ReachyClawApp._patch_gstreamer_audio()
             logger.debug("Patched SDK GStreamer audio for ALSA")
 
-        _orig = GStreamerCamera.get_video_device
+        # SDK ≥ (post-v1.17 image) removed get_video_device; skip patch silently.
+        _orig = getattr(GStreamerCamera, "get_video_device", None)
+        if _orig is None:
+            logger.debug("SDK has no get_video_device attr; skipping camera patch")
+            return
 
         def _patched(self):
             result = _orig(self)
