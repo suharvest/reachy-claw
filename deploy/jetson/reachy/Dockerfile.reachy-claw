@@ -30,7 +30,9 @@ RUN pip install --no-cache-dir --prefix=/install silero-vad --no-deps
 # Purge heavy transitive deps not needed at runtime:
 # - torch/torchaudio (silero-vad dep, replaced by pure onnxruntime)
 # - jaxlib/jax (mediapipe dep, only needed for training)
-# - matplotlib/fontTools/pillow (mediapipe dep, only for visualization)
+# - unused mediapipe modules (we only use face_detection)
+# Note: matplotlib/pillow are required by mediapipe.python.solutions.__init__
+#       (drawing_utils imports matplotlib.pyplot at import time)
 # Note: scipy is needed by reachy-mini SDK (scipy.spatial.transform.Rotation)
 RUN rm -rf /install/lib/python3.12/site-packages/torch* \
            /install/lib/python3.12/site-packages/nvidia* \
@@ -41,6 +43,10 @@ RUN rm -rf /install/lib/python3.12/site-packages/torch* \
            /install/lib/python3.12/site-packages/ml_dtypes* \
            /install/lib/python3.12/site-packages/opt_einsum* \
            /install/lib/python3.12/site-packages/pip*
+
+# Note: Cannot safely purge mediapipe/modules subdirs — mediapipe.python.solutions.__init__
+# imports all solutions (hands, pose, etc) which depend on modules like objectron.
+# The space savings from tflite assets (~20-30MB) are minimal vs breaking import chain.
 
 # Strip test assets, type stubs, and bytecode from installed packages
 RUN find /install -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true \
