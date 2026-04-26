@@ -232,6 +232,15 @@ def test_validate_rejects_bad_hhmm():
         validate("rest.window_start", "25:00")
     with pytest.raises(ValueError):
         validate("rest.window_start", "9-30")
+    # 24:30 must be rejected — only the exact 24:00 sentinel is allowed.
+    with pytest.raises(ValueError):
+        validate("rest.window_start", "24:30")
+    with pytest.raises(ValueError):
+        validate("rest.window_end", "24:01")
+
+
+def test_validate_accepts_24_00_sentinel():
+    validate("rest.window_end", "24:00")
 
 
 def test_validate_rejects_bad_timezone():
@@ -304,12 +313,17 @@ class SettingSpec:
     extra_validate: Callable[[Any], None] | None = None
 
 
-_HHMM = re.compile(r"^([01]\d|2[0-4]):[0-5]\d$")
+_HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")  # 00:00..23:59
 
 
 def _validate_hhmm(v: Any) -> None:
-    if not isinstance(v, str) or not _HHMM.match(v):
-        raise ValueError(f"expected HH:MM (24h), got {v!r}")
+    """Accept 00:00..23:59 plus the special end-of-day sentinel "24:00"."""
+    if not isinstance(v, str):
+        raise ValueError(f"expected HH:MM (24h), got {type(v).__name__}")
+    if v == "24:00":
+        return
+    if not _HHMM.match(v):
+        raise ValueError(f"expected HH:MM (00:00..23:59 or 24:00), got {v!r}")
 
 
 def _validate_tz(v: Any) -> None:
@@ -737,6 +751,12 @@ class RestPlugin(Plugin):
                 await self._enter_rest()
             elif not should and self._resting:
                 await self._exit_rest()
+            elif self._resting:
+                # Re-emit pause every tick. Defends against the ZMQ slow-joiner
+                # problem: if a vision container restarts mid-rest, its newly
+                # connected SUB will get the next heartbeat within POLL_INTERVAL_S
+                # rather than miss the entire rest window.
+                self._publish_ctrl("pause")
             try:
                 await asyncio.sleep(POLL_INTERVAL_S)
             except asyncio.CancelledError:
@@ -932,7 +952,17 @@ class DiaryGenerateAndPublishTask:
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await proc.communicate()
+        except asyncio.CancelledError:
+            # Hit when RestPlugin's wait_for hard cap fires. Make sure the child
+            # is killed and reaped so it can't keep consuming LLM tokens / NPU.
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+            raise
         if proc.returncode != 0:
             raise RuntimeError(
                 f"{label} failed (rc={proc.returncode}): {stderr.decode(errors='replace')}"
@@ -1105,6 +1135,32 @@ async def test_put_rejects_unknown_key(app_with_dashboard, aiohttp_client):
     client = await aiohttp_client(aio)
     r = await client.put("/api/settings/rest", json={"made_up": 1})
     assert r.status == 400
+
+
+@pytest.mark.asyncio
+async def test_put_rejects_degenerate_window(app_with_dashboard, aiohttp_client):
+    aio, *_ = app_with_dashboard
+    client = await aiohttp_client(aio)
+    r = await client.put(
+        "/api/settings/rest",
+        json={"window_start": "23:00", "window_end": "23:00"},
+    )
+    assert r.status == 400
+
+
+@pytest.mark.asyncio
+async def test_overrides_reload_on_next_startup(app_with_dashboard, aiohttp_client, tmp_path, monkeypatch):
+    """After PUT, a fresh Config load picks up the runtime-overrides.yaml values."""
+    aio, _stub, _ = app_with_dashboard
+    client = await aiohttp_client(aio)
+    r = await client.put("/api/settings/rest", json={"window_start": "21:15"})
+    assert r.status == 200
+
+    # Simulate a fresh process: reload Config from disk in the same DATA_DIR.
+    from reachy_claw.config import load_config
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    fresh = load_config()
+    assert fresh.rest_window_start == "21:15"
 ```
 
 - [ ] **Step 7.2: Add `pytest-aiohttp` if missing**
@@ -1169,6 +1225,18 @@ def _build_settings_handlers(app):
                     {"error": f"invalid value for {qkey}: {e}"}, status=400
                 )
             fields_to_save.append(spec_for(qkey).config_field)
+
+        # Cross-field validation for rest window: degenerate equal start/end
+        # (other than the 24:00 sentinel) means the window is permanently closed.
+        # Reject explicitly so the user can't accidentally disable rest.
+        if ns == "rest":
+            new_start = body.get("window_start", getattr(app.config, "rest_window_start"))
+            new_end = body.get("window_end", getattr(app.config, "rest_window_end"))
+            if new_end != "24:00" and new_start == new_end:
+                return web.json_response(
+                    {"error": "rest.window_start must differ from rest.window_end (unless end is 24:00)"},
+                    status=400,
+                )
 
         # Apply.
         for k, v in body.items():
@@ -1312,6 +1380,45 @@ async def test_generate_kicks_off_subprocess_and_emits_ws(app_with_diary_api, ai
     phases = [m["phase"] for m in stub.ws_emissions if m.get("type") == "diary_job"]
     assert "generating" in phases
     assert "done" in phases or "error" in phases
+
+
+@pytest.mark.asyncio
+async def test_concurrent_generate_returns_409(app_with_diary_api, aiohttp_client):
+    """Second generate for the same date while one is already in flight → 409."""
+    aio, stub, _ = app_with_diary_api
+    client = await aiohttp_client(aio)
+
+    # Make the subprocess hang so the first call holds the per-date lock.
+    hang = asyncio.Event()
+    fake_proc = MagicMock()
+    fake_proc.returncode = 0
+
+    async def slow_communicate():
+        await hang.wait()
+        return (b"ok", b"")
+
+    fake_proc.communicate = slow_communicate
+
+    with patch(
+        "reachy_claw.plugins.dashboard_plugin.asyncio.create_subprocess_exec",
+        AsyncMock(return_value=fake_proc),
+    ):
+        r1 = await client.post(
+            "/api/diary/generate", json={"date": "2026-04-26", "force": True}
+        )
+        assert r1.status == 202
+        # Yield so the background task acquires the lock.
+        await asyncio.sleep(0.01)
+
+        r2 = await client.post(
+            "/api/diary/generate", json={"date": "2026-04-26", "force": True}
+        )
+        assert r2.status == 409
+        body2 = await r2.json()
+        assert body2["status"] == "in-progress"
+
+        hang.set()
+        await asyncio.sleep(0.01)
 ```
 
 - [ ] **Step 8.2: Run; expect failure**
@@ -1377,19 +1484,19 @@ def _build_diary_trigger_handlers(app, broadcast):
         out, err = await proc.communicate()
         return proc.returncode, (err.decode(errors="replace") or out.decode(errors="replace"))
 
-    async def _do_generate(date: str, force: bool, job_id: str):
-        lock = _lock_for(date)
-        async with lock:
+    async def _do_generate(date: str, force: bool, job_id: str, lock: asyncio.Lock):
+        try:
             await broadcast({"type": "diary_job", "job_id": job_id, "phase": "generating", "date": date})
             rc, msg = await _run_script(GEN, date, force)
             if rc != 0:
                 await broadcast({"type": "diary_job", "job_id": job_id, "phase": "error", "date": date, "error": msg})
                 return
             await broadcast({"type": "diary_job", "job_id": job_id, "phase": "done", "date": date})
+        finally:
+            lock.release()
 
-    async def _do_publish(date: str, force: bool, job_id: str):
-        lock = _lock_for(date)
-        async with lock:
+    async def _do_publish(date: str, force: bool, job_id: str, lock: asyncio.Lock):
+        try:
             await broadcast({"type": "diary_job", "job_id": job_id, "phase": "publishing", "date": date})
             env_extra = {
                 "SITE_REPO_URL": app.config.diary_site_repo_url,
@@ -1401,6 +1508,8 @@ def _build_diary_trigger_handlers(app, broadcast):
                 await broadcast({"type": "diary_job", "job_id": job_id, "phase": "error", "date": date, "error": msg})
                 return
             await broadcast({"type": "diary_job", "job_id": job_id, "phase": "done", "date": date})
+        finally:
+            lock.release()
 
     async def generate_handler(request):
         body = await request.json()
@@ -1410,8 +1519,15 @@ def _build_diary_trigger_handlers(app, broadcast):
             return web.json_response({"error": "date required"}, status=400)
         if not force and app.db.get_diary(date) is not None:
             return web.json_response({"date": date, "status": "already-generated"})
+        lock = _lock_for(date)
+        if lock.locked():
+            # Per-date concurrency guard: refuse a second generate while one is in flight.
+            return web.json_response(
+                {"date": date, "status": "in-progress"}, status=409
+            )
+        await lock.acquire()
         job_id = uuid.uuid4().hex[:12]
-        asyncio.create_task(_do_generate(date, force, job_id))
+        asyncio.create_task(_do_generate(date, force, job_id, lock))
         return web.json_response({"job_id": job_id, "date": date}, status=202)
 
     async def publish_handler(request):
@@ -1425,8 +1541,14 @@ def _build_diary_trigger_handlers(app, broadcast):
             return web.json_response({"error": "diary not generated"}, status=404)
         if not force and row.get("published_at"):
             return web.json_response({"date": date, "status": "already-published"})
+        lock = _lock_for(date)
+        if lock.locked():
+            return web.json_response(
+                {"date": date, "status": "in-progress"}, status=409
+            )
+        await lock.acquire()
         job_id = uuid.uuid4().hex[:12]
-        asyncio.create_task(_do_publish(date, force, job_id))
+        asyncio.create_task(_do_publish(date, force, job_id, lock))
         return web.json_response({"job_id": job_id, "date": date}, status=202)
 
     return {"status": status_handler, "generate": generate_handler, "publish": publish_handler}
@@ -1480,7 +1602,7 @@ In `ConversationPlugin.__init__`, add `self._paused = False`. Then in:
 
 - The ASR-final handler: if `self._paused`, log and return early before sending to LLM.
 - The TTS dispatch / playback: if `self._paused`, drop the utterance silently.
-- The LLM call site: same — drop if paused.
+- The LLM call site: same — drop if paused. Additionally, when spawning the LLM coroutine, store the resulting task on `self._active_llm_task` (clear it on completion). This lets `on_rest_start` cancel it cleanly. If the existing code spawns multiple concurrent LLM tasks, track them in `self._active_llm_tasks: set[asyncio.Task]` and cancel each in `on_rest_start`. The exact attribute(s) depend on the existing structure — match what's already there or introduce the tracking minimally.
 
 Then implement the lifecycle hooks:
 
@@ -1488,8 +1610,18 @@ Then implement the lifecycle hooks:
     async def on_rest_start(self) -> None:
         self._paused = True
         logger.info("ConversationPlugin paused for rest")
-        # Drain any in-flight TTS to silence the speaker quickly.
-        # If a `_tts_queue` exists, clear it:
+        # Cancel any in-flight LLM task so its response doesn't reach TTS after
+        # we pause. Track the active task wherever it's spawned (e.g.
+        # `self._active_llm_task = asyncio.create_task(...)`); if no task is
+        # tracked, the variable doesn't exist yet — fall through.
+        active = getattr(self, "_active_llm_task", None)
+        if active is not None and not active.done():
+            active.cancel()
+            try:
+                await active
+            except (asyncio.CancelledError, Exception):
+                pass
+        # Drain any pending TTS to silence the speaker immediately.
         try:
             while not self._tts_queue.empty():
                 self._tts_queue.get_nowait()
@@ -1566,6 +1698,8 @@ git commit -m "feat(conversation): pause ASR/LLM/TTS on rest events"
 - Test: extend `tests/test_plugin_rest_hooks.py`
 
 For each plugin, add a `_paused` flag, gate the hot-loop body on it, and subscribe to `rest_start`/`rest_end`. Pattern is the same as Task 9.
+
+**Acknowledged race**: a frame already dispatched to MediaPipe / a running ZMQ recv at the moment `rest_start` fires will run to completion. We accept this — at most one extra frame per plugin (~30ms of inference, ~1 ZMQ message). No emission downstream because the downstream consumer (ConversationPlugin) is already paused, and any face/vision event arriving after that is harmless to log.
 
 - [ ] **Step 10.1: FaceTrackerPlugin**
 

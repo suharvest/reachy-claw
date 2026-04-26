@@ -112,10 +112,9 @@ The yaml `rest:` section in `reachy-claw.example.yaml`:
 ```yaml
 rest:
   enabled: true
-  window:
-    start: "23:00"
-    end: "24:00"
-    timezone: Asia/Shanghai
+  window_start: "23:00"
+  window_end: "24:00"
+  timezone: Asia/Shanghai
 
 diary:
   auto_publish: true
@@ -388,7 +387,8 @@ Clicking a button:
 - **Restart races** — if a plugin is mid-pause when the rest window ends, resume might race against pause completion. Mitigation: each plugin's pause/resume guarded by an asyncio.Lock; resume awaits the same lock.
 - **Long-running housekeeping** — diary generation with a real LLM might take minutes. Mitigation: the rest window is a soft floor; housekeeping is allowed to overrun by up to 10 minutes (hard cap), at which point it's cancelled and logged.
 - **Settings drift** — `reachy-claw.yaml` defaults vs `runtime-overrides.yaml` overlays. Mitigation: this is the same merge logic already used for `dashboard_volume`; runtime-overrides wins if present, yaml is the fallback. No new mechanism, no new drift surface.
-- **Manual generate during rest** — if the user hits "Generate now" while housekeeping is already running it for the same date, we get two LLM calls. Mitigation: a per-date in-memory lock in the diary trigger handler; second call returns 409.
+- **`runtime-overrides.yaml` non-atomic write (pre-existing)** — `save_runtime_overrides()` opens the file with `"w"` and streams YAML; a crash mid-write corrupts the file and would block next startup. This is a pre-existing risk inherited from the volume-persistence path, not something this branch introduces. Out of scope here — fix as a separate small PR (write to `.tmp` then `os.replace`). Documented as a follow-up.
+- **Manual generate during rest** — if the user hits "Generate now" while housekeeping is already running it for the same date, we get two LLM calls. Mitigation: a per-date `asyncio.Lock` in the diary trigger handler. The second call returns immediately with **HTTP 409** (`{"status": "in-progress"}`) rather than queueing — this avoids stacking duplicate LLM bills if the user clicks the button twice.
 - **Auto-publish without a configured site repo** — would cause every rest cycle to fail loudly. Mitigation: skip the publish step (with a logged warning) when `diary.site_repo_url` is empty; generation still runs.
 
 ## Open Questions / Deferred
