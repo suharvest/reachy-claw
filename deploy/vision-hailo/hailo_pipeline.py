@@ -411,7 +411,12 @@ def init_pipeline() -> HailoPipeline:
     """Initialize pipeline with default HEF paths."""
     import os
 
-    detect_hef = os.environ.get("HEF_DETECT", "/usr/share/hailo-models/scrfd_2.5g_h8l.hef")
-    emotion_hef = os.environ.get("HEF_EMOTION", "/tmp/hsemotion_b0.hef")
+    _models_dir = os.path.join(os.path.dirname(__file__), "models")
+    detect_hef = os.environ.get(
+        "HEF_DETECT", os.path.join(_models_dir, "scrfd_2.5g.hef")
+    )
+    emotion_hef = os.environ.get(
+        "HEF_EMOTION", os.path.join(_models_dir, "hsemotion_b0.hef")
+    )
 
     return HailoPipeline(detect_hef, emotion_hef)

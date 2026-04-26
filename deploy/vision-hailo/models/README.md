@@ -1,50 +1,41 @@
-# HEF 模型说明
+# vision-hailo HEF models
 
-## 已提供的模型
+Both files target HAILO8 (NOT HAILO8L). If your hardware is Hailo-8L, you'll
+get a perf warning but it'll still work; for native h8l, replace with the
+matching `_h8l` variants.
 
-### hsemotion_b0.hef
+## scrfd_2.5g.hef (face detection)
 
-- **来源**: 用户预编译
-- **大小**: 7.9 MB
-- **md5**: `fb155867327611d9a38ae038899463e5`
-- **输入**: NHWC(224×224×3) UINT8
-- **输出**: NC(8) UINT8 (8 类 softmax)
-- **类别**: `Anger, Contempt, Disgust, Fear, Happiness, Neutral, Sadness, Surprise`
+- Source: Hailo Model Zoo official pre-compiled HEF
+- URL: https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/ModelZoo/Compiled/v2.18.0/hailo8/scrfd_2.5g.hef
+- md5: `6b061112668b2738f7f12100b9012be2`
+- Input: 640×640×3 UINT8
+- Outputs: 9 tensors (3 FPN scales × {bbox, score, kps})
+- Reported FPS (pure inference): 1057 on Hailo-8
 
-使用方式：
+To re-download:
 ```bash
-hailortcli parse-hef hsemotion_b0.hef  # 查看模型结构
+wget https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/ModelZoo/Compiled/v2.18.0/hailo8/scrfd_2.5g.hef \
+     -O scrfd_2.5g.hef
 ```
 
-## 系统预装模型 (hailo-models 包)
+## hsemotion_b0.hef (emotion classification)
 
-安装 `hailo-models` 后，以下 HEF 位于 `/usr/share/hailo-models/`：
+- Source: compiled from `enet_b0_8_best_afew.onnx` (HSEmotion EfficientNet-B0)
+  via Hailo Dataflow Compiler 2025-04 (see `convert.py` script kept in WSL2)
+- md5: `fb155867327611d9a38ae038899463e5`
+- Input: 224×224×3 UINT8 (ImageNet normalization baked in)
+- Output: 8 softmax classes — `Anger Contempt Disgust Fear Happiness Neutral Sadness Surprise`
 
-| HEF | 用途 | 输入尺寸 |
-|-----|------|---------|
-| `scrfd_2.5g_h8l.hef` | 人脸检测 + 5 landmarks | 640×640 |
-| `yolov8s_h8l.hef` | 通用目标检测 | 640×640 |
-| `yolov5s_personface_h8l.hef` | 人脸 + 行人 | 640×640 |
-| `yolov8s_pose_h8l.hef` | 姿态估计 | 640×640 |
-
-## 缺失的模型
-
-### ArcFace (人脸特征提取)
-
-本项目未提供 ArcFace HEF，因此：
-- `/api/faces/enroll` 返回 503
-- 无法进行身份识别
-
-如需人脸识别功能，可从 [Hailo Model Zoo](https://github.com/hailo-ai/hailo_model_zoo)
-下载 `arcface_mobilefacenet.hef` 或类似模型。
-
-## 模型搜索
-
+To recompile (on x86 + Hailo SW Suite docker):
 ```bash
-# 在 Hailo Model Zoo 搜索人脸相关模型
-pip install hailomz
-hailomz download scrfd_2.5g
+# In WSL2 → docker → /local/shared_with_docker/
+python convert.py    # outputs hsemotion_b0.hef
 ```
 
-或直接访问 GitHub：
-https://github.com/hailo-ai/hailo_model_zoo/tree/master/models
+## Override at runtime
+
+```bash
+HEF_DETECT=/path/to/your_scrfd.hef HEF_EMOTION=/path/to/your_emotion.hef \
+    python producer.py
+```
