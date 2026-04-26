@@ -116,3 +116,54 @@ def test_events_for_day_filters_by_local_window(tmp_db):
     bundle = tmp_db.events_for_day("2026-04-26")
     asr_texts = [r["text"] for r in bundle["asr_events"]]
     assert asr_texts == [f"t={in_day}"]
+
+
+def test_save_and_get_diary(tmp_db):
+    md = "---\ntitle: hi\n---\n\n# hi"
+    tmp_db.save_diary(
+        date="2026-04-26",
+        markdown=md,
+        llm_model="dashscope/kimi-k2.5",
+        prompt_version="v1",
+    )
+    got = tmp_db.get_diary("2026-04-26")
+    assert got is not None
+    assert got["markdown"] == md
+    assert got["llm_model"] == "dashscope/kimi-k2.5"
+    assert got["published_at"] is None
+
+
+def test_save_diary_replaces_existing(tmp_db):
+    tmp_db.save_diary(
+        date="2026-04-26",
+        markdown="v1",
+        llm_model="m",
+        prompt_version="p",
+    )
+    tmp_db.save_diary(
+        date="2026-04-26",
+        markdown="v2",
+        llm_model="m",
+        prompt_version="p",
+    )
+    got = tmp_db.get_diary("2026-04-26")
+    assert got["markdown"] == "v2"
+
+
+def test_mark_published_sets_timestamp(tmp_db):
+    tmp_db.save_diary(
+        date="2026-04-26",
+        markdown="m",
+        llm_model="m",
+        prompt_version="p",
+    )
+    tmp_db.mark_published("2026-04-26")
+    got = tmp_db.get_diary("2026-04-26")
+    assert got["published_at"] is not None
+    assert isinstance(got["published_at"], int)
+
+
+def test_list_diary_dates_returns_descending(tmp_db):
+    for d in ("2026-04-24", "2026-04-26", "2026-04-25"):
+        tmp_db.save_diary(date=d, markdown="m", llm_model="m", prompt_version="p")
+    assert tmp_db.list_diary_dates() == ["2026-04-26", "2026-04-25", "2026-04-24"]

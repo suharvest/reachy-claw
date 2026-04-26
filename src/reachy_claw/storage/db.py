@@ -127,6 +127,61 @@ class Database:
             out[table] = [dict(zip(keys, row)) for row in rows]
         return out
 
+    def save_diary(
+        self,
+        *,
+        date: str,
+        markdown: str,
+        llm_model: str,
+        prompt_version: str,
+    ) -> None:
+        now = int(time.time())
+        self.conn.execute(
+            """
+            INSERT INTO diaries (date, markdown, generated_at, llm_model, prompt_version)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(date) DO UPDATE SET
+              markdown=excluded.markdown,
+              generated_at=excluded.generated_at,
+              llm_model=excluded.llm_model,
+              prompt_version=excluded.prompt_version,
+              published_at=NULL
+            """,
+            (date, markdown, now, llm_model, prompt_version),
+        )
+
+    def get_diary(self, date: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT date, markdown, generated_at, llm_model, prompt_version, published_at "
+            "FROM diaries WHERE date = ?",
+            (date,),
+        ).fetchone()
+        if row is None:
+            return None
+        keys = [
+            "date",
+            "markdown",
+            "generated_at",
+            "llm_model",
+            "prompt_version",
+            "published_at",
+        ]
+        return dict(zip(keys, row))
+
+    def mark_published(self, date: str) -> None:
+        self.conn.execute(
+            "UPDATE diaries SET published_at = ? WHERE date = ?",
+            (int(time.time()), date),
+        )
+
+    def list_diary_dates(self) -> list[str]:
+        return [
+            row[0]
+            for row in self.conn.execute(
+                "SELECT date FROM diaries ORDER BY date DESC"
+            )
+        ]
+
 
 def open_default() -> Database:
     db = Database(DEFAULT_DB_PATH)
