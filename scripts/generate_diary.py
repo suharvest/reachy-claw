@@ -64,6 +64,26 @@ def _mock_markdown(date: str, events: dict) -> str:
     )
 
 
+MIN_QUOTE_LEN = 20
+
+
+def _verbatim_asr_quotes(markdown: str, asr_user_texts: list[str]) -> list[str]:
+    """Return any user-ASR substrings of length >= MIN_QUOTE_LEN found in markdown."""
+    leaks = []
+    for text in asr_user_texts:
+        text = text.strip()
+        if len(text) < MIN_QUOTE_LEN:
+            continue
+        # Slide a window of MIN_QUOTE_LEN over the user text; if any window
+        # appears verbatim in the markdown body, flag the full text.
+        for i in range(0, len(text) - MIN_QUOTE_LEN + 1):
+            window = text[i : i + MIN_QUOTE_LEN]
+            if window in markdown:
+                leaks.append(text)
+                break
+    return leaks
+
+
 def _call_llm(date: str, events: dict, model: str) -> str:
     """Real LLM call. In production this dispatches to OpenClaw or dashscope.
 
@@ -118,6 +138,17 @@ def main() -> int:
     else:
         md = _call_llm(args.date, events, args.model)
         model = args.model
+
+    user_texts = [r["text"] for r in events.get("asr_events", []) if r["role"] == "user"]
+    leaks = _verbatim_asr_quotes(md, user_texts)
+    if leaks:
+        sys.stderr.write(
+            "ABORT: diary contains verbatim user ASR quotes: "
+            + json.dumps(leaks, ensure_ascii=False)
+            + "\n"
+        )
+        db.close()
+        return 2
 
     db.save_diary(
         date=args.date,

@@ -48,3 +48,57 @@ def test_generate_writes_markdown_to_diaries(tmp_path: Path):
     assert "title:" in md
     assert "date: 2026-04-26" in md
     assert "## 今天的心情" in md
+
+
+def test_diary_aborts_when_user_asr_quoted_verbatim(tmp_path: Path):
+    db_path = tmp_path / "t.db"
+    db = Database(db_path)
+    db.init()
+    ts = int(time.mktime((2026, 4, 26, 10, 0, 0, 0, 0, -1)))
+    long_phrase = "我今天去了城市里那家很难找到的咖啡馆喝咖啡"  # >20 chars (22 chars)
+    db.record_asr(ts=ts, role="user", text=long_phrase, emotion=None)
+    db.close()
+
+    # Mock LLM emits a Markdown that includes the user's verbatim phrase.
+    # Use a temp shell script for cleaner multi-line handling.
+    leak_script = tmp_path / "leak_llm.sh"
+    leak_script.write_text(
+        f'''cat <<'MARKDOWN'
+---
+title: x
+date: 2026-04-26
+stats: {{}}
+captures: []
+meta: {{llm_model: m, prompt_version: v1}}
+---
+
+## 今天的心情
+
+{long_phrase} 然后我就睡了。
+
+## 遇到的人
+
+人。
+## 想到的事
+
+事。
+MARKDOWN
+''',
+        encoding="utf-8",
+    )
+    leak_script.chmod(0o755)
+    env = {**os.environ, "DIARY_LLM_CMD": str(leak_script)}
+
+    res = subprocess.run(
+        [sys.executable, str(SCRIPT), "--date", "2026-04-26", "--db", str(db_path)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert res.returncode != 0
+    assert "verbatim" in (res.stderr + res.stdout).lower()
+
+    db = Database(db_path)
+    db.init()
+    assert db.get_diary("2026-04-26") is None
+    db.close()
