@@ -25,8 +25,9 @@ def test_publish_pushes_markdown_to_bare_repo(tmp_path: Path):
     subprocess.run(
         ["git", "clone", str(bare), str(seed)], check=True
     )
-    (seed / "content").mkdir()
-    (seed / "content" / "diary").mkdir()
+    (seed / "src").mkdir()
+    (seed / "src" / "content").mkdir()
+    (seed / "src" / "content" / "docs").mkdir()
     (seed / "README.md").write_text("seed")
     _git("add", ".", cwd=seed)
     _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-m", "init", cwd=seed)
@@ -37,7 +38,7 @@ def test_publish_pushes_markdown_to_bare_repo(tmp_path: Path):
     db.init()
     db.save_diary(
         date="2026-04-26",
-        markdown="---\ntitle: t\ndate: 2026-04-26\n---\n\nbody",
+        markdown="---\ntitle: t\ndate: \"2026.04.26\"\ncategory: \"机器人日记\"\n---\n\nbody",
         llm_model="m",
         prompt_version="v1",
     )
@@ -48,7 +49,7 @@ def test_publish_pushes_markdown_to_bare_repo(tmp_path: Path):
         **os.environ,
         "SITE_REPO_URL": str(bare),
         "SITE_REPO_DIR": str(work),
-        "SITE_DIARY_PATH": "content/diary",
+        "SITE_DIARY_PATH": "src/content/docs",
         "GIT_AUTHOR_NAME": "t",
         "GIT_AUTHOR_EMAIL": "t@x",
         "GIT_COMMITTER_NAME": "t",
@@ -65,7 +66,7 @@ def test_publish_pushes_markdown_to_bare_repo(tmp_path: Path):
     # Clone bare elsewhere and assert file present.
     verify = tmp_path / "verify"
     subprocess.run(["git", "clone", str(bare), str(verify)], check=True)
-    f = verify / "content" / "diary" / "2026-04-26.md"
+    f = verify / "src" / "content" / "docs" / "2026-04-26-reachy-diary.md"
     assert f.exists()
     assert "body" in f.read_text(encoding="utf-8")
 

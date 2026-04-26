@@ -46,7 +46,11 @@ def test_generate_writes_markdown_to_diaries(tmp_path: Path):
     md = diary["markdown"]
     assert md.startswith("---\n")
     assert "title:" in md
-    assert "date: 2026-04-26" in md
+    assert "title_en:" in md
+    assert "date: \"2026.04.26\"" in md  # Astro format: dots, quoted
+    assert "category: \"机器人日记\"" in md
+    assert "description:" in md
+    assert "description_en:" in md
     assert "## 今天的心情" in md
 
 
@@ -65,11 +69,18 @@ def test_diary_aborts_when_user_asr_quoted_verbatim(tmp_path: Path):
     leak_script.write_text(
         f'''cat <<'MARKDOWN'
 ---
-title: x
-date: 2026-04-26
-stats: {{}}
-captures: []
-meta: {{llm_model: m, prompt_version: v1}}
+title: "机器人 Reachy 的日记 · 4 月 26 日"
+title_en: "Reachy's Diary · April 26"
+date: "2026.04.26"
+category: "机器人日记"
+description: "泄露测试"
+description_en: "Leak test"
+author: "Reachy Mini"
+author_en: "Reachy Mini"
+readTime: "1 分钟"
+readTime_en: "1 min read"
+coverImage: "https://images.unsplash.com/photo-1485827404703-89b55fcc595e"
+tags: ["机器人日记", "Reachy", "AI"]
 ---
 
 ## 今天的心情

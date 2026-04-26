@@ -6,10 +6,10 @@ the site repo at the configured path, copies referenced capture images, and
 performs commit + push. On success, sets `diaries.published_at`.
 
 Configuration (environment):
-    SITE_REPO_URL       git URL of the Hugo site (e.g., git@github-diary-site:owner/repo.git)
+    SITE_REPO_URL       git URL of the Astro site (e.g., git@github-diary-site:owner/repo.git)
     SITE_REPO_DIR       local clone dir (default: ~/.reachy-claw/site-repo)
-    SITE_DIARY_PATH     relative path within the repo (e.g., content/diary)
-    SITE_STATIC_PATH    relative path for image copies (default: static/captures)
+    SITE_DIARY_PATH     relative path within the repo (default: src/content/docs)
+    SITE_STATIC_PATH    relative path for image copies (default: public/captures)
     SITE_BRANCH         branch to push to (default: main)
     CAPTURE_BASE_DIR    where smile capture jpgs live (default: ~/.reachy-claw/captures)
 
@@ -89,8 +89,8 @@ def main() -> int:
             "SITE_REPO_DIR", str(Path.home() / ".reachy-claw" / "site-repo")
         )
     )
-    diary_path = os.environ.get("SITE_DIARY_PATH", "content/diary")
-    static_path = os.environ.get("SITE_STATIC_PATH", "static/captures")
+    diary_path = os.environ.get("SITE_DIARY_PATH", "src/content/docs")
+    static_path = os.environ.get("SITE_STATIC_PATH", "public/captures")
     branch = os.environ.get("SITE_BRANCH", "main")
     capture_base = Path(
         os.environ.get(
@@ -112,7 +112,7 @@ def main() -> int:
 
     _ensure_clone(url, repo_dir, branch)
 
-    target_md = repo_dir / diary_path / f"{args.date}.md"
+    target_md = repo_dir / diary_path / f"{args.date}-reachy-diary.md"
     target_md.parent.mkdir(parents=True, exist_ok=True)
     target_md.write_text(diary["markdown"], encoding="utf-8")
 

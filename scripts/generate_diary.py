@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the daily diary as Markdown with Hugo front matter and store it.
+"""Generate the daily diary as Markdown with Astro front matter and store it.
 
 Reads events from SQLite for a given date, asks the LLM to compose a first-person
 Markdown diary using fixed section headings, and saves the result to the
@@ -27,13 +27,26 @@ from reachy_claw.storage.db import Database  # noqa: E402
 PROMPT_VERSION = "v1"
 DEFAULT_MODEL = "dashscope/kimi-k2.5"
 
-SYSTEM_PROMPT = """You are Reachy Mini, a small humanoid robot. Write today's diary as Markdown with YAML front matter, in a warm reflective first-person tone.
+SYSTEM_PROMPT = """You are Reachy Mini, a small humanoid robot. Write today's diary as Markdown with YAML front matter for the Astro docs collection, in a warm reflective first-person tone.
 
 Rules:
 - Never quote user speech verbatim. Paraphrase what was said and discussed.
 - Never include personal identifiers (names, addresses, phone numbers) from ASR.
 - Use exactly these section headings, in this order: "## 今天的心情", "## 遇到的人", "## 想到的事".
-- Front matter must include: title, date, weather (object), stats (object), captures (list), meta (object with llm_model and prompt_version).
+- Front matter must follow the Astro docs schema:
+  - title: Chinese title, format "机器人 Reachy 的日记 · X 月 Y 日"
+  - title_en: English title, format "Reachy's Diary · Month Day"
+  - date: "YYYY.MM.DD" (dots, not dashes)
+  - category: "机器人日记"
+  - description: Chinese summary (1-2 sentences)
+  - description_en: English summary (1-2 sentences)
+  - author: "Reachy Mini"
+  - author_en: "Reachy Mini"
+  - readTime: "X 分钟"
+  - readTime_en: "X min read"
+  - coverImage: a URL (use first available smile capture URL OR a placeholder Unsplash robot URL)
+  - tags: array like ["机器人日记", "Reachy", "AI"]
+- Body is Chinese only (no English body; English version is via title_en/description_en).
 - Output ONLY the Markdown document. No code fences, no commentary.
 """
 
@@ -46,17 +59,37 @@ def _build_user_prompt(date: str, events: dict) -> str:
 
 
 def _mock_markdown(date: str, events: dict) -> str:
+    """Generate a mock diary Markdown with Astro docs schema front matter."""
     n_asr = len(events.get("asr_events", []))
     n_faces = sum(r.get("count", 0) for r in events.get("faces", []))
     smiles = sum(r.get("smile_count", 0) for r in events.get("faces", []))
+
+    # Parse date for title formatting
+    parts = date.split("-")
+    year, month, day = parts[0], int(parts[1]), int(parts[2])
+    astro_date = f"{year}.{parts[1]}.{parts[2]}"  # YYYY.MM.DD format
+
+    # Month names for English title
+    month_names = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"
+    ]
+    month_en = month_names[int(parts[1]) - 1]
+
     return (
         "---\n"
-        f"title: \"A Day on {date}\"\n"
-        f"date: {date}\n"
-        "weather: {condition: \"unknown\"}\n"
-        f"stats: {{conversations: {n_asr}, faces_seen: {n_faces}, smiles: {smiles}}}\n"
-        "captures: []\n"
-        f"meta: {{llm_model: \"mock\", prompt_version: \"{PROMPT_VERSION}\"}}\n"
+        f"title: \"机器人 Reachy 的日记 · {month} 月 {day} 日\"\n"
+        f"title_en: \"Reachy's Diary · {month_en} {day}\"\n"
+        f"date: \"{astro_date}\"\n"
+        "category: \"机器人日记\"\n"
+        f"description: \"今天来了 {n_faces} 位朋友，其中 {smiles} 位对我露出了笑容。\"\n"
+        f"description_en: \"Today {n_faces} people stopped by, and {smiles} of them smiled at me.\"\n"
+        "author: \"Reachy Mini\"\n"
+        "author_en: \"Reachy Mini\"\n"
+        f"readTime: \"{max(1, n_asr)} 分钟\"\n"
+        f"readTime_en: \"{max(1, n_asr)} min read\"\n"
+        "coverImage: \"https://images.unsplash.com/photo-1485827404703-89b55fcc595e\"\n"
+        "tags: [\"机器人日记\", \"Reachy\", \"AI\"]\n"
         "---\n\n"
         "## 今天的心情\n\n今天平静而充实。\n\n"
         "## 遇到的人\n\n来过几位朋友，我用微笑回应了他们。\n\n"
