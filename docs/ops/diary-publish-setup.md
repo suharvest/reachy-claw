@@ -46,3 +46,12 @@ If the clone succeeds and the push lands, you're done.
 
 To rotate: generate a new key, add it to GitHub deploy keys, swap the
 `IdentityFile` path, then remove the old key from GitHub.
+
+## 6. OpenClaw skill
+
+The `daily-diary` OpenClaw skill (in `~/project/openclaw/extensions/desktop-robot/src/`) is responsible for triggering generation + publish at 23:00 daily. Skill flow:
+
+1. `uv run python scripts/generate_diary.py --date $(date +%F)` — fail-fast on non-zero
+2. `uv run python scripts/publish_diary.py --date $(date +%F)` — fail-fast on non-zero
+
+The skill definition and cron trigger live in the OpenClaw repo and are committed there separately.
