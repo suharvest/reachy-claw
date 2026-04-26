@@ -164,69 +164,75 @@ class SCRFDPostprocessor:
             if bbox_name not in outputs:
                 continue
 
-            bbox_data = outputs[bbox_name]  # FCR(grid, grid, 20)
-            conf_data = outputs[conf_name]  # NHWC(grid, grid, 2)
-            lm_data = outputs[lm_name]  # NHWC(grid, grid, 8)
+            bbox_data = outputs[bbox_name]  # FCR(grid, grid, num_anchors*4)
+            conf_data = outputs[conf_name]  # NHWC(grid, grid, num_anchors)
+            lm_data = outputs[lm_name]      # NHWC(grid, grid, num_anchors*10)
 
-            # Process each grid cell
-            for y in range(grid_size):
-                for x in range(grid_size):
-                    # SCRFD has 2 anchors per cell at fine scales
-                    num_anchors = min(2, conf_data.shape[2] if len(conf_data.shape) == 3 else 1)
+            # Vectorized: threshold all anchors at once (was 8400+ Python iterations per scale)
+            num_anchors = min(2, conf_data.shape[2] if len(conf_data.shape) == 3 else 1)
+            scores_flat = conf_data.reshape(-1)
+            mask = scores_flat > self.conf_threshold
+            if not mask.any():
+                continue
 
-                    for a in range(num_anchors):
-                        if len(conf_data.shape) == 3:
-                            score = float(conf_data[y, x, a])
-                        else:
-                            score = float(conf_data[y, x, 0])
+            passing = np.where(mask)[0]
+            n = len(passing)
 
-                        if score < self.conf_threshold:
-                            continue
+            # Decode flat index → (y, x, anchor)
+            if len(conf_data.shape) == 3:
+                y_grid = passing // (grid_size * num_anchors)
+                rem = passing % (grid_size * num_anchors)
+                x_grid = rem // num_anchors
+                anchor_idx = rem % num_anchors
+            else:
+                y_grid = passing // grid_size
+                x_grid = passing % grid_size
+                anchor_idx = np.zeros(n, dtype=int)
 
-                        # Decode bbox (SCRFD anchor-based: dx, dy, dw, dh)
-                        if len(bbox_data.shape) == 3:
-                            idx = a * 4
-                            # Anchor position at grid cell center
-                            anchor_x = (x + 0.5) * stride
-                            anchor_y = (y + 0.5) * stride
-                            # bbox values are deltas after dequantization
-                            dx = float(bbox_data[y, x, idx])
-                            dy = float(bbox_data[y, x, idx + 1])
-                            dw = float(bbox_data[y, x, idx + 2])
-                            dh = float(bbox_data[y, x, idx + 3])
-                            # Clamp dw/dh to prevent exp overflow (values typically in [-2, 2])
-                            dw = max(-2.0, min(2.0, dw))
-                            dh = max(-2.0, min(2.0, dh))
-                            # Decode: cx/cy = anchor + delta, w/h = exp(delta) * anchor_size
-                            cx = anchor_x + dx * stride
-                            cy = anchor_y + dy * stride
-                            # anchor size typically 4x stride for SCRFD 2.5g
-                            bw = np.exp(dw) * stride * 4
-                            bh = np.exp(dh) * stride * 4
-                        else:
-                            cx = (x + 0.5) * stride
-                            cy = (y + 0.5) * stride
-                            bw = stride * 4
-                            bh = stride * 4
+            # Anchor centers
+            anchor_x = (x_grid.astype(np.float32) + 0.5) * stride
+            anchor_y = (y_grid.astype(np.float32) + 0.5) * stride
 
-                        # Normalize to [0, 1]
-                        x1 = max(0, min(1, (cx - bw/2) / model_size))
-                        y1 = max(0, min(1, (cy - bh/2) / model_size))
-                        x2 = max(0, min(1, (cx + bw/2) / model_size))
-                        y2 = max(0, min(1, (cy + bh/2) / model_size))
+            if len(bbox_data.shape) == 3:
+                cell_idx = passing // num_anchors
+                base = anchor_idx * 4
+                bbox_flat = bbox_data.reshape(grid_size * grid_size, -1)
+                dx = bbox_flat[cell_idx, base].astype(np.float32)
+                dy = bbox_flat[cell_idx, base + 1].astype(np.float32)
+                dw = np.clip(bbox_flat[cell_idx, base + 2].astype(np.float32), -2.0, 2.0)
+                dh = np.clip(bbox_flat[cell_idx, base + 3].astype(np.float32), -2.0, 2.0)
+                cx = anchor_x + dx * stride
+                cy = anchor_y + dy * stride
+                bw = np.exp(dw) * stride * 4
+                bh = np.exp(dh) * stride * 4
+            else:
+                cx, cy = anchor_x, anchor_y
+                bw = bh = np.full(n, stride * 4, dtype=np.float32)
 
-                        all_bboxes.append([x1, y1, x2, y2])
-                        all_scores.append(score)
+            x1 = np.clip((cx - bw / 2) / model_size, 0.0, 1.0)
+            y1 = np.clip((cy - bh / 2) / model_size, 0.0, 1.0)
+            x2 = np.clip((cx + bw / 2) / model_size, 0.0, 1.0)
+            y2 = np.clip((cy + bh / 2) / model_size, 0.0, 1.0)
 
-                        # Decode landmarks (5 points)
-                        landmarks = []
-                        if len(lm_data.shape) >= 2 and lm_data.shape[2] >= 10:
-                            lm_idx = a * 10
-                            for j in range(5):
-                                lx = float(lm_data[y, x, lm_idx + j*2]) * stride / model_size
-                                ly = float(lm_data[y, x, lm_idx + j*2 + 1]) * stride / model_size
-                                landmarks.append([lx, ly])
-                        all_landmarks.append(landmarks)
+            all_bboxes.extend(
+                [[float(a), float(b), float(c), float(d)]
+                 for a, b, c, d in zip(x1, y1, x2, y2)]
+            )
+            all_scores.extend(scores_flat[passing].tolist())
+
+            # Landmarks — keep scalar inner loop (small n after threshold; layout tricky to vectorize safely)
+            if len(lm_data.shape) >= 2 and lm_data.shape[2] >= 10:
+                for i in range(n):
+                    yi, xi, ai = int(y_grid[i]), int(x_grid[i]), int(anchor_idx[i])
+                    lm_idx = ai * 10
+                    pts = []
+                    for j in range(5):
+                        lx = float(lm_data[yi, xi, lm_idx + j * 2]) * stride / model_size
+                        ly = float(lm_data[yi, xi, lm_idx + j * 2 + 1]) * stride / model_size
+                        pts.append([lx, ly])
+                    all_landmarks.append(pts)
+            else:
+                all_landmarks.extend([[] for _ in range(n)])
 
         if not all_bboxes:
             return []
