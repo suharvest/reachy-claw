@@ -46,3 +46,12 @@ class Plugin(ABC):
     async def stop(self) -> None:
         """Signal the plugin to shut down gracefully."""
         self._running = False
+
+    async def on_rest_start(self) -> None:
+        """Called when the system enters its rest window.
+
+        Override to pause expensive work (ASR/TTS/LLM/Vision). Default: no-op.
+        """
+
+    async def on_rest_end(self) -> None:
+        """Called when the rest window ends. Override to resume work. Default: no-op."""
