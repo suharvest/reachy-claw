@@ -8,7 +8,7 @@
 
 1. **Rest window** — pause TTS / ASR / LLM / Vision processing during a configurable daily window so the system can run "housekeeping" tasks (diary generation + publish, future: DB vacuum, cover image generation, index rebuilds) without resource contention.
 2. **Settings panel on the dashboard** — a new `SETTINGS` top-level tab with extensible sections, first iteration covering the rest window and diary publishing, including manual diary generate/publish triggers for missed days.
-3. **Settings persistence** — rest window and diary preferences stored in SQLite so the dashboard is the source of truth and changes are durable across restarts.
+3. **Settings persistence** — rest window and diary preferences stored via the existing `runtime-overrides.yaml` mechanism (same as `dashboard_volume`), so dashboard is the source of truth and changes are durable across restarts.
 
 ## Non-Goals
 
@@ -23,14 +23,16 @@
 ```
 ┌────────────────────────── Jetson (clawd-reachy-mini) ──────────────────────────┐
 │                                                                                │
-│  Settings (SQLite)  ◄── written by Dashboard PUT /api/settings/<ns>           │
-│  ├─ rest.window         {start: "23:00", end: "24:00", tz: "Asia/Shanghai"}   │
-│  ├─ rest.enabled        true                                                   │
-│  ├─ diary.auto_publish  true                                                   │
+│  Settings (runtime-overrides.yaml)  ◄── PUT /api/settings/<ns> updates this   │
+│  ├─ rest_window_start    "23:00"                                               │
+│  ├─ rest_window_end      "24:00"                                               │
+│  ├─ rest_enabled         true                                                  │
+│  ├─ diary_auto_publish   true                                                  │
 │  └─ ...                                                                        │
+│  (Same mechanism the dashboard already uses for `dashboard_volume`.)           │
 │                                                                                │
 │  RestPlugin                                                                    │
-│   ├─ reads rest.window every minute                                            │
+│   ├─ reads app.config.rest_window_* every minute                               │
 │   ├─ at start: events.publish("rest_start") → all plugins gate                │
 │   ├─ during:  runs registered HousekeepingTasks (diary gen+publish, ...)      │
 │   └─ at end:  events.publish("rest_end") → all plugins resume                 │
@@ -70,42 +72,67 @@
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Data Layer
+## Settings Persistence
 
-### New SQLite table (schema v2 migration)
+**Reuse the existing `runtime-overrides.yaml` mechanism** (already used by the dashboard for things like `dashboard_volume`). No new SQLite table; no schema migration. This keeps a single, consistent runtime-config story across all dashboard-tunable settings.
 
-```sql
-CREATE TABLE settings (
-  key TEXT PRIMARY KEY,         -- namespaced, e.g. "rest.window", "diary.auto_publish"
-  value TEXT NOT NULL,          -- JSON-serialized value
-  updated_at INTEGER NOT NULL
-);
+How it works (already implemented in the codebase):
+
+```
+On startup:
+  reachy-claw.yaml        → bootstrap defaults (deploy-time, immutable in container)
+  runtime-overrides.yaml  → user-tunable values written by the dashboard
+  Merged into app.config
+
+Dashboard changes a setting:
+  self.app.config.rest_window_start = "23:00"        # immediate, in-process
+  save_runtime_overrides(["rest_window_start", ...])  # persists to runtime-overrides.yaml
 ```
 
-### Default values (seeded on first migration)
+`save_runtime_overrides()` already exists in `src/reachy_claw/config.py`. It writes to `~/.reachy-claw/runtime-overrides.yaml` (or `$DATA_DIR/runtime-overrides.yaml`), which is on the persistent volume.
 
-| Key | Default value | Type |
-|-----|--------------|------|
-| `rest.enabled` | `true` | bool |
-| `rest.window` | `{"start": "23:00", "end": "24:00", "tz": "Asia/Shanghai"}` | object |
-| `diary.auto_publish` | `true` | bool |
-| `diary.privacy_linter` | `true` | bool |
-| `diary.site_repo_url` | `""` | string (empty until configured) |
-| `diary.site_diary_path` | `"src/content/docs"` | string |
-| `diary.site_branch` | `"main"` | string |
+### New config fields (added to ReachyClawConfig dataclass)
 
-### Storage API
+| Field | Default | Type | Persists in runtime-overrides? |
+|-------|---------|------|----|
+| `rest_enabled` | `True` | bool | yes |
+| `rest_window_start` | `"23:00"` | str (HH:MM) | yes |
+| `rest_window_end` | `"24:00"` | str (HH:MM) | yes |
+| `rest_timezone` | `"Asia/Shanghai"` | str (IANA tz name) | yes |
+| `diary_auto_publish` | `True` | bool | yes |
+| `diary_privacy_linter` | `True` | bool | yes |
+| `diary_site_repo_url` | `""` | str | yes |
+| `diary_site_diary_path` | `"src/content/docs"` | str | yes |
+| `diary_site_branch` | `"main"` | str | yes |
 
-Add to `src/reachy_claw/storage/db.py`:
+These appear in `reachy-claw.yaml` (as bootstrap defaults under a new `rest:` and `diary:` section, mapped via the existing key-flattening logic in `config.py`) AND can be overridden at runtime via the dashboard.
 
-```python
-def get_setting(self, key: str, default=None) -> Any: ...
-def set_setting(self, key: str, value: Any) -> None: ...
-def get_settings_namespace(self, namespace: str) -> dict[str, Any]: ...
-def set_settings_namespace(self, namespace: str, values: dict[str, Any]) -> None: ...
+The yaml `rest:` section in `reachy-claw.example.yaml`:
+
+```yaml
+rest:
+  enabled: true
+  window:
+    start: "23:00"
+    end: "24:00"
+    timezone: Asia/Shanghai
+
+diary:
+  auto_publish: true
+  privacy_linter: true
+  site_repo_url: ""           # required for publishing; e.g. git@github.com:org/site.git
+  site_diary_path: src/content/docs
+  site_branch: main
 ```
 
-`namespace` is the prefix before the first `.`, e.g. `rest` or `diary`. Values are JSON-encoded on write, decoded on read.
+The existing `KEY_MAP` in `config.py` (currently maps `("audio", "volume") → "audio_volume"`) is extended with the new mappings.
+
+### Settings schema registry
+
+For dashboard validation only, a new module `src/reachy_claw/settings_schema.py` enumerates the known settings with their types, validators, and namespace grouping. This is the single source of truth for "which settings are tunable from the dashboard, and what shape are their values". Used by the settings API to:
+- enumerate keys per namespace (for GET)
+- validate values (for PUT)
+- map dashboard namespace+key (e.g. `rest.window.start`) → flat config field name (`rest_window_start`)
 
 ## RestPlugin
 
@@ -161,7 +188,7 @@ Tasks run **sequentially**, each wrapped in try/except so one failure doesn't bl
 
 ### Settings reload
 
-RestPlugin polls `settings` every 30 seconds (the same loop tick) so dashboard changes apply within a minute without restart.
+RestPlugin reads from `app.config` every loop tick (30s). Dashboard updates mutate `app.config` in-process AND write `runtime-overrides.yaml`, so changes apply within a minute without restart.
 
 ## Plugin Pause/Resume
 
@@ -209,12 +236,13 @@ PUT  /api/settings/<namespace>
   → 400 if any key is unknown / value type mismatches expected
 ```
 
-Allowed namespaces in v1: `rest`, `diary`. Unknown namespace → 404. Validation:
-- `rest.window` must have keys `start` (HH:MM), `end` (HH:MM), `tz` (IANA tz name).
+Allowed namespaces in v1: `rest`, `diary`. Unknown namespace → 404. Validation rules (from `settings_schema.py`):
+- `rest.window_start`, `rest.window_end` must match `HH:MM` (24-hour).
+- `rest.timezone` must be a valid IANA tz name.
 - `rest.enabled`, `diary.auto_publish`, `diary.privacy_linter` must be bool.
 - `diary.site_repo_url`, `diary.site_diary_path`, `diary.site_branch` must be strings.
 
-Validation is centralized in a `SettingsSchema` registry (one entry per known key). Unknown keys are rejected — this keeps the schema explicit and catches typos.
+The settings API maps the dashboard's namespace+key (e.g. `rest.window_start`) to the flat config field name (`rest_window_start`). On PUT it validates, sets `app.config.<field>`, and calls `save_runtime_overrides([...])`. Unknown keys are rejected — keeps the schema explicit and catches typos.
 
 ### Diary trigger endpoints
 
@@ -293,18 +321,18 @@ Clicking a button:
 
 - `src/reachy_claw/plugins/rest_plugin.py` — schedule poller + housekeeping registry
 - `src/reachy_claw/plugins/housekeeping_tasks.py` — `DiaryGenerateAndPublishTask`, base `HousekeepingTask` protocol
-- `src/reachy_claw/storage/settings_schema.py` — known-key registry, validators, defaults
+- `src/reachy_claw/settings_schema.py` — known-key registry, validators, dashboard↔config field mapping
 - `src/reachy_claw/plugins/dashboard_static/settings.js`
 - `src/reachy_claw/plugins/dashboard_static/settings.css`
 - `tests/test_rest_plugin.py`
-- `tests/test_settings_storage.py`
-- `tests/test_settings_api.py`
+- `tests/test_settings_schema.py` — registry validation rules
+- `tests/test_settings_api.py` — GET/PUT endpoint behavior + persistence
 - `tests/test_diary_trigger_api.py`
 
 ### Modified
 
-- `src/reachy_claw/storage/migrations.py` — add v2 migration creating `settings` table + seeded defaults
-- `src/reachy_claw/storage/db.py` — add settings get/set/get_namespace/set_namespace helpers
+- `src/reachy_claw/config.py` — add new fields to `ReachyClawConfig` dataclass + `KEY_MAP` entries for `rest:` and `diary:` yaml sections
+- `reachy-claw.example.yaml` — document the new `rest:` and `diary:` sections
 - `src/reachy_claw/plugin.py` — add `on_rest_start` / `on_rest_end` no-op base hooks
 - `src/reachy_claw/plugins/conversation_plugin.py` — implement pause/resume
 - `src/reachy_claw/plugins/face_tracker_plugin.py` — implement pause/resume
@@ -317,8 +345,8 @@ Clicking a button:
 
 ## Implementation Order
 
-1. **Settings table + storage helpers + schema registry** — pure unit-testable.
-2. **Settings API endpoints** — GET/PUT, with validation.
+1. **Config fields + settings_schema registry** — add new fields to `ReachyClawConfig`, write the schema registry, extend `KEY_MAP` for the new yaml sections. Unit-testable.
+2. **Settings API endpoints** — GET/PUT backed by `app.config` + `save_runtime_overrides()`, with validation via the schema registry.
 3. **`Plugin.on_rest_start/end` base hooks** — no-op defaults; tests confirm subscription wiring.
 4. **RestPlugin shell** — schedule loop, event emission. No housekeeping yet.
 5. **Per-plugin pause/resume** — one plugin at a time, each with its own integration test.
@@ -330,8 +358,9 @@ Clicking a button:
 
 ## Testing
 
-- `settings` storage: unit tests for round-trip, type coercion, namespace queries.
-- Settings API: integration tests for GET/PUT, validation rejection.
+- Settings schema registry: unit tests for validators (HH:MM format, IANA tz, bool coercion).
+- Settings API: integration tests for GET/PUT, validation rejection, and that PUT both mutates `app.config` and writes `runtime-overrides.yaml`.
+- Config loading: round-trip test that yaml `rest:` / `diary:` sections map to the new dataclass fields and that `runtime-overrides.yaml` overlays them on startup.
 - RestPlugin: unit tests with a frozen-time clock, asserting event emission.
 - Per-plugin pause/resume: integration tests publishing fake `rest_start/end` events and asserting plugin state.
 - Housekeeping task: subprocess mocking; verify it runs `generate_diary.py` then `publish_diary.py` only when `diary.auto_publish=true`.
@@ -342,7 +371,7 @@ Clicking a button:
 
 - **Restart races** — if a plugin is mid-pause when the rest window ends, resume might race against pause completion. Mitigation: each plugin's pause/resume guarded by an asyncio.Lock; resume awaits the same lock.
 - **Long-running housekeeping** — diary generation with a real LLM might take minutes. Mitigation: the rest window is a soft floor; housekeeping is allowed to overrun by up to 10 minutes (hard cap), at which point it's cancelled and logged.
-- **Settings drift** — yaml defaults vs SQLite stored values. Mitigation: only SQLite is consulted at runtime; the schema's default value is used only if the key is absent (first run).
+- **Settings drift** — `reachy-claw.yaml` defaults vs `runtime-overrides.yaml` overlays. Mitigation: this is the same merge logic already used for `dashboard_volume`; runtime-overrides wins if present, yaml is the fallback. No new mechanism, no new drift surface.
 - **Manual generate during rest** — if the user hits "Generate now" while housekeeping is already running it for the same date, we get two LLM calls. Mitigation: a per-date in-memory lock in the diary trigger handler; second call returns 409.
 - **Auto-publish without a configured site repo** — would cause every rest cycle to fail loudly. Mitigation: skip the publish step (with a logged warning) when `diary.site_repo_url` is empty; generation still runs.
 
