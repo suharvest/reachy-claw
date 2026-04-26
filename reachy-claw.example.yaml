@@ -89,3 +89,19 @@ vision:
 plugins:
   face_tracker: true
   motion: true
+
+# ── Rest window ─────────────────────────────────────────────────
+rest:
+  enabled: true
+  window_start: "23:00"
+  window_end: "24:00"
+  timezone: Asia/Shanghai
+  control_port: 18791            # ZMQ PUB port for remote vision-container rest signals
+
+# ── Diary publishing ────────────────────────────────────────────
+diary:
+  auto_publish: true
+  privacy_linter: true
+  site_repo_url: ""              # required for publishing; e.g. git@github.com:org/site.git
+  site_diary_path: src/content/docs
+  site_branch: main

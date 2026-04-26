@@ -245,3 +245,17 @@ def test_env_overrides_runtime_overrides(tmp_path, monkeypatch):
     monkeypatch.setenv("STT_BACKEND", "openai")
     config2 = load_config(cfg_file)
     assert config2.stt_backend == "openai"  # env wins
+
+
+def test_rest_diary_defaults():
+    from reachy_claw.config import Config
+    c = Config()
+    assert c.rest_enabled is True
+    assert c.rest_window_start == "23:00"
+    assert c.rest_window_end == "24:00"
+    assert c.rest_timezone == "Asia/Shanghai"
+    assert c.diary_auto_publish is True
+    assert c.diary_privacy_linter is True
+    assert c.diary_site_repo_url == ""
+    assert c.diary_site_diary_path == "src/content/docs"
+    assert c.diary_site_branch == "main"

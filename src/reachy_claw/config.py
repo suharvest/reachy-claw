@@ -72,6 +72,20 @@ class Config:
     # Audio settings
     audio_device: str | None = None
     audio_volume: float = 1.0  # playback gain multiplier (e.g. 2.0 = double volume)
+
+    # ── Rest window ─────────────────────────────────────────────
+    rest_enabled: bool = True
+    rest_window_start: str = "23:00"   # HH:MM
+    rest_window_end: str = "24:00"     # HH:MM
+    rest_timezone: str = "Asia/Shanghai"
+    rest_control_port: int = 18791     # ZMQ PUB port for vision-container rest control
+
+    # ── Diary publishing ────────────────────────────────────────
+    diary_auto_publish: bool = True
+    diary_privacy_linter: bool = True
+    diary_site_repo_url: str = ""
+    diary_site_diary_path: str = "src/content/docs"
+    diary_site_branch: str = "main"
     sample_rate: int = 16000
     silence_threshold: float = 0.01
     silence_duration: float = 0.7
@@ -273,6 +287,16 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("dashboard", "port"): "dashboard_port",
     ("plugins", "face_tracker"): "enable_face_tracker",
     ("plugins", "motion"): "enable_motion",
+    ("rest", "enabled"): "rest_enabled",
+    ("rest", "window_start"): "rest_window_start",
+    ("rest", "window_end"): "rest_window_end",
+    ("rest", "timezone"): "rest_timezone",
+    ("rest", "control_port"): "rest_control_port",
+    ("diary", "auto_publish"): "diary_auto_publish",
+    ("diary", "privacy_linter"): "diary_privacy_linter",
+    ("diary", "site_repo_url"): "diary_site_repo_url",
+    ("diary", "site_diary_path"): "diary_site_diary_path",
+    ("diary", "site_branch"): "diary_site_branch",
 }
 
 # Environment variable → Config field name
