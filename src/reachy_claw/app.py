@@ -13,6 +13,7 @@ from .event_bus import EventBus
 from .motion.emotion_mapper import EmotionMapper
 from .motion.head_target import HeadTargetBus
 from .plugin import Plugin
+from .storage.db import Database, open_default
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class ReachyClawApp:
         self.emotions = EmotionMapper(
             intensity=config.motion_emotion_intensity,
         )
+        self.db: Database | None = None  # SQLite storage, set by main.py or init_db()
 
         # Shared flags for inter-plugin coordination
         self.is_speaking = False
@@ -300,6 +302,12 @@ class ReachyClawApp:
                 self.reachy = None
                 return
 
+    def init_db(self) -> None:
+        """Initialize the SQLite database for event logging."""
+        if self.db is None:
+            self.db = open_default()
+            logger.info(f"Database initialized at {self.db.path}")
+
     def _ensure_daemon(self, serialport: str = "auto") -> None:
         """Start Reachy Mini daemon if not already running."""
         import socket
@@ -473,4 +481,13 @@ class ReachyClawApp:
             self.reachy = None
 
         self._plugins.clear()
+
+        if self.db:
+            try:
+                self.db.close()
+                logger.debug("Database closed")
+            except Exception as e:
+                logger.warning(f"Error closing database: {e}")
+            self.db = None
+
         logger.info("Shutdown complete")

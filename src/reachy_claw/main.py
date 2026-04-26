@@ -293,6 +293,9 @@ async def async_main(config: Config) -> int:
     # Connect robot
     app.connect_robot()
 
+    # Initialize SQLite database for event logging
+    app.init_db()
+
     # Register plugins in order: motion -> face tracker -> conversation
     from reachy_claw.plugins.motion_plugin import MotionPlugin
 
