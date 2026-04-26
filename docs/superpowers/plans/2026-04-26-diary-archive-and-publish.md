@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace jsonl daily logs with SQLite, generate Markdown diaries, and publish them to an existing Hugo site repo via deploy key + GitHub Actions.
+**Goal:** Replace jsonl daily logs with SQLite, generate Markdown diaries, and publish them to an existing Astro site repo via deploy key + Cloudflare Workers.
 
-**Architecture:** A new `storage/db.py` provides SQLite read/write APIs. `DailyLogPlugin` and other event-producing plugins call `db.record_*` instead of writing jsonl. The diary OpenClaw skill queries SQLite, has the LLM emit Markdown with Hugo front matter, stores it in the `diaries` table, and `scripts/publish_diary.py` clones the site repo, drops the file in, and pushes via deploy key. GitHub Actions on the site side handles Hugo build + Pages deploy.
+**Architecture:** A new `storage/db.py` provides SQLite read/write APIs. `DailyLogPlugin` and other event-producing plugins call `db.record_*` instead of writing jsonl. The diary OpenClaw skill queries SQLite, has the LLM emit Markdown with Astro front matter (docs collection schema), stores it in the `diaries` table, and `scripts/publish_diary.py` clones the site repo, drops the file in, and pushes via deploy key. Cloudflare Workers on the site side handles Astro build + deploy.
 
-**Tech Stack:** Python 3.10+, sqlite3 (stdlib, WAL mode), pyyaml, pytest, git CLI, ssh deploy key, Hugo (in site repo, out of tree).
+**Tech Stack:** Python 3.10+, sqlite3 (stdlib, WAL mode), pyyaml, pytest, git CLI, ssh deploy key, Astro (in site repo, out of tree).
 
 **Spec:** `docs/superpowers/specs/2026-04-26-diary-archive-and-publish-design.md`
 
@@ -22,7 +22,7 @@
 | `src/reachy_claw/storage/db.py` | sqlite connection, schema init, read/write helpers |
 | `src/reachy_claw/storage/migrations.py` | schema versioning via `PRAGMA user_version` |
 | `scripts/migrate_jsonl_to_sqlite.py` | one-time import of existing jsonl/JSON |
-| `scripts/publish_diary.py` | push generated Markdown to site repo |
+| `scripts/publish_diary.py` | push generated Markdown to Astro site repo |
 | `tests/test_storage_db.py` | unit tests for db.py |
 | `tests/test_storage_migrations.py` | unit tests for schema versioning |
 | `tests/test_migrate_jsonl.py` | unit tests for migration script |
@@ -38,13 +38,13 @@
 | `src/reachy_claw/plugins/conversation_plugin.py` | optional: tighter ASR row recording (event remains primary path) |
 | `src/reachy_claw/plugins/face_tracker_plugin.py` | record `smile_count` and `capture_path` to faces table |
 | `scripts/collect_daily_data.py` | read SQLite (replacing jsonl) |
-| `scripts/generate_diary.py` | emit Markdown w/ front matter, save to `diaries` table |
+| `scripts/generate_diary.py` | emit Markdown w/ Astro docs schema front matter, save to `diaries` table |
 | `pyproject.toml` | add `pyyaml` (already present, verify) |
 
 ### Out of tree (handled in the site repo, not this plan)
 
-- Hugo template that renders diary front matter (gallery, stats, weather)
-- GitHub Actions Hugo workflow adjustment (if existing one doesn't cover diary path)
+- Astro `docs` collection / new category 机器人日记 — DONE in chaihuo-mcv-site branch feat/reachy-diary-section
+- Cloudflare Workers deployment configuration (existing wrangler.jsonc)
 
 ---
 
@@ -1372,7 +1372,7 @@ git commit -m "feat(scripts): collect_daily_data reads SQLite (replaces jsonl)"
 - Modify: `scripts/generate_diary.py`
 - Create: `tests/test_generate_diary.py`
 
-The script wraps the LLM call. The LLM response is mocked in tests; the contract is that we get Markdown with Hugo front matter and store it via `db.save_diary`.
+The script wraps the LLM call. The LLM response is mocked in tests; the contract is that we get Markdown with Astro docs schema front matter and store it via `db.save_diary`.
 
 - [ ] **Step 8.1: Read current generator**
 
@@ -1430,7 +1430,11 @@ def test_generate_writes_markdown_to_diaries(tmp_path: Path):
     md = diary["markdown"]
     assert md.startswith("---\n")
     assert "title:" in md
-    assert "date: 2026-04-26" in md
+    assert "title_en:" in md
+    assert "date: \"2026.04.26\"" in md  # Astro format: dots, quoted
+    assert "category: \"机器人日记\"" in md
+    assert "description:" in md
+    assert "description_en:" in md
     assert "## 今天的心情" in md
 ```
 
@@ -1446,7 +1450,7 @@ Replace its contents with:
 
 ```python
 #!/usr/bin/env python3
-"""Generate the daily diary as Markdown with Hugo front matter and store it.
+"""Generate the daily diary as Markdown with Astro front matter and store it.
 
 Reads events from SQLite for a given date, asks the LLM to compose a first-person
 Markdown diary using fixed section headings, and saves the result to the
@@ -1474,13 +1478,26 @@ from reachy_claw.storage.db import Database  # noqa: E402
 PROMPT_VERSION = "v1"
 DEFAULT_MODEL = "dashscope/kimi-k2.5"
 
-SYSTEM_PROMPT = """You are Reachy Mini, a small humanoid robot. Write today's diary as Markdown with YAML front matter, in a warm reflective first-person tone.
+SYSTEM_PROMPT = """You are Reachy Mini, a small humanoid robot. Write today's diary as Markdown with YAML front matter for the Astro docs collection, in a warm reflective first-person tone.
 
 Rules:
 - Never quote user speech verbatim. Paraphrase what was said and discussed.
 - Never include personal identifiers (names, addresses, phone numbers) from ASR.
 - Use exactly these section headings, in this order: "## 今天的心情", "## 遇到的人", "## 想到的事".
-- Front matter must include: title, date, weather (object), stats (object), captures (list), meta (object with llm_model and prompt_version).
+- Front matter must follow the Astro docs schema:
+  - title: Chinese title, format "机器人 Reachy 的日记 · X 月 Y 日"
+  - title_en: English title, format "Reachy's Diary · Month Day"
+  - date: "YYYY.MM.DD" (dots, not dashes)
+  - category: "机器人日记"
+  - description: Chinese summary (1-2 sentences)
+  - description_en: English summary (1-2 sentences)
+  - author: "Reachy Mini"
+  - author_en: "Reachy Mini"
+  - readTime: "X 分钟"
+  - readTime_en: "X min read"
+  - coverImage: a URL (use first available smile capture URL OR a placeholder Unsplash robot URL)
+  - tags: array like ["机器人日记", "Reachy", "AI"]
+- Body is Chinese only (no English body; English version is via title_en/description_en).
 - Output ONLY the Markdown document. No code fences, no commentary.
 """
 
@@ -1493,17 +1510,37 @@ def _build_user_prompt(date: str, events: dict) -> str:
 
 
 def _mock_markdown(date: str, events: dict) -> str:
+    """Generate a mock diary Markdown with Astro docs schema front matter."""
     n_asr = len(events.get("asr_events", []))
     n_faces = sum(r.get("count", 0) for r in events.get("faces", []))
     smiles = sum(r.get("smile_count", 0) for r in events.get("faces", []))
+
+    # Parse date for title formatting
+    parts = date.split("-")
+    year, month, day = parts[0], int(parts[1]), int(parts[2])
+    astro_date = f"{year}.{parts[1]}.{parts[2]}"  # YYYY.MM.DD format
+
+    # Month names for English title
+    month_names = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"
+    ]
+    month_en = month_names[int(parts[1]) - 1]
+
     return (
         "---\n"
-        f"title: \"A Day on {date}\"\n"
-        f"date: {date}\n"
-        "weather: {condition: \"unknown\"}\n"
-        f"stats: {{conversations: {n_asr}, faces_seen: {n_faces}, smiles: {smiles}}}\n"
-        "captures: []\n"
-        f"meta: {{llm_model: \"mock\", prompt_version: \"{PROMPT_VERSION}\"}}\n"
+        f"title: \"机器人 Reachy 的日记 · {month} 月 {day} 日\"\n"
+        f"title_en: \"Reachy's Diary · {month_en} {day}\"\n"
+        f"date: \"{astro_date}\"\n"
+        "category: \"机器人日记\"\n"
+        f"description: \"今天来了 {n_faces} 位朋友，其中 {smiles} 位对我露出了笑容。\"\n"
+        f"description_en: \"Today {n_faces} people stopped by, and {smiles} of them smiled at me.\"\n"
+        "author: \"Reachy Mini\"\n"
+        "author_en: \"Reachy Mini\"\n"
+        f"readTime: \"{max(1, n_asr)} 分钟\"\n"
+        f"readTime_en: \"{max(1, n_asr)} min read\"\n"
+        "coverImage: \"https://images.unsplash.com/photo-1485827404703-89b55fcc595e\"\n"
+        "tags: [\"机器人日记\", \"Reachy\", \"AI\"]\n"
         "---\n\n"
         "## 今天的心情\n\n今天平静而充实。\n\n"
         "## 遇到的人\n\n来过几位朋友，我用微笑回应了他们。\n\n"
@@ -1609,23 +1646,51 @@ A safeguard: after the LLM produces Markdown, scan the body for verbatim user-AS
 Append to `tests/test_generate_diary.py`:
 
 ```python
-def test_diary_aborts_when_user_asr_quoted_verbatim(tmp_path: Path, monkeypatch):
+def test_diary_aborts_when_user_asr_quoted_verbatim(tmp_path: Path):
     db_path = tmp_path / "t.db"
     db = Database(db_path)
     db.init()
     ts = int(time.mktime((2026, 4, 26, 10, 0, 0, 0, 0, -1)))
-    long_phrase = "我今天去了城市里那家很难找到的咖啡馆"  # >20 chars
+    long_phrase = "我今天去了城市里那家很难找到的咖啡馆喝咖啡"  # >20 chars (22 chars)
     db.record_asr(ts=ts, role="user", text=long_phrase, emotion=None)
     db.close()
 
     # Mock LLM emits a Markdown that includes the user's verbatim phrase.
-    leak_script = (
-        f'echo \'---\ntitle: x\ndate: 2026-04-26\nstats: {{}}\ncaptures: []\n'
-        f'meta: {{llm_model: m, prompt_version: v1}}\n---\n\n'
-        f'## 今天的心情\n\n{long_phrase} 然后我就睡了。\n'
-        f'## 遇到的人\n\n人。\n## 想到的事\n\n事。\n\''
+    # Use a temp shell script for cleaner multi-line handling.
+    leak_script = tmp_path / "leak_llm.sh"
+    leak_script.write_text(
+        f'''cat <<'MARKDOWN'
+---
+title: "机器人 Reachy 的日记 · 4 月 26 日"
+title_en: "Reachy's Diary · April 26"
+date: "2026.04.26"
+category: "机器人日记"
+description: "泄露测试"
+description_en: "Leak test"
+author: "Reachy Mini"
+author_en: "Reachy Mini"
+readTime: "1 分钟"
+readTime_en: "1 min read"
+coverImage: "https://images.unsplash.com/photo-1485827404703-89b55fcc595e"
+tags: ["机器人日记", "Reachy", "AI"]
+---
+
+## 今天的心情
+
+{long_phrase} 然后我就睡了。
+
+## 遇到的人
+
+人。
+## 想到的事
+
+事。
+MARKDOWN
+''',
+        encoding="utf-8",
     )
-    env = {**os.environ, "DIARY_LLM_CMD": leak_script}
+    leak_script.chmod(0o755)
+    env = {**os.environ, "DIARY_LLM_CMD": str(leak_script)}
 
     res = subprocess.run(
         [sys.executable, str(SCRIPT), "--date", "2026-04-26", "--db", str(db_path)],
@@ -1893,8 +1958,9 @@ def test_publish_pushes_markdown_to_bare_repo(tmp_path: Path):
     subprocess.run(
         ["git", "clone", str(bare), str(seed)], check=True
     )
-    (seed / "content").mkdir()
-    (seed / "content" / "diary").mkdir()
+    (seed / "src").mkdir()
+    (seed / "src" / "content").mkdir()
+    (seed / "src" / "content" / "docs").mkdir()
     (seed / "README.md").write_text("seed")
     _git("add", ".", cwd=seed)
     _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-m", "init", cwd=seed)
@@ -1905,7 +1971,7 @@ def test_publish_pushes_markdown_to_bare_repo(tmp_path: Path):
     db.init()
     db.save_diary(
         date="2026-04-26",
-        markdown="---\ntitle: t\ndate: 2026-04-26\n---\n\nbody",
+        markdown="---\ntitle: t\ndate: \"2026.04.26\"\ncategory: \"机器人日记\"\n---\n\nbody",
         llm_model="m",
         prompt_version="v1",
     )
@@ -1916,7 +1982,7 @@ def test_publish_pushes_markdown_to_bare_repo(tmp_path: Path):
         **os.environ,
         "SITE_REPO_URL": str(bare),
         "SITE_REPO_DIR": str(work),
-        "SITE_DIARY_PATH": "content/diary",
+        "SITE_DIARY_PATH": "src/content/docs",
         "GIT_AUTHOR_NAME": "t",
         "GIT_AUTHOR_EMAIL": "t@x",
         "GIT_COMMITTER_NAME": "t",
@@ -1933,7 +1999,7 @@ def test_publish_pushes_markdown_to_bare_repo(tmp_path: Path):
     # Clone bare elsewhere and assert file present.
     verify = tmp_path / "verify"
     subprocess.run(["git", "clone", str(bare), str(verify)], check=True)
-    f = verify / "content" / "diary" / "2026-04-26.md"
+    f = verify / "src" / "content" / "docs" / "2026-04-26-reachy-diary.md"
     assert f.exists()
     assert "body" in f.read_text(encoding="utf-8")
 
@@ -1961,10 +2027,10 @@ the site repo at the configured path, copies referenced capture images, and
 performs commit + push. On success, sets `diaries.published_at`.
 
 Configuration (environment):
-    SITE_REPO_URL       git URL of the Hugo site (e.g., git@github-diary-site:owner/repo.git)
+    SITE_REPO_URL       git URL of the Astro site (e.g., git@github-diary-site:owner/repo.git)
     SITE_REPO_DIR       local clone dir (default: ~/.reachy-claw/site-repo)
-    SITE_DIARY_PATH     relative path within the repo (e.g., content/diary)
-    SITE_STATIC_PATH    relative path for image copies (default: static/captures)
+    SITE_DIARY_PATH     relative path within the repo (default: src/content/docs)
+    SITE_STATIC_PATH    relative path for image copies (default: public/captures)
     SITE_BRANCH         branch to push to (default: main)
     CAPTURE_BASE_DIR    where smile capture jpgs live (default: ~/.reachy-claw/captures)
 
@@ -2044,8 +2110,8 @@ def main() -> int:
             "SITE_REPO_DIR", str(Path.home() / ".reachy-claw" / "site-repo")
         )
     )
-    diary_path = os.environ.get("SITE_DIARY_PATH", "content/diary")
-    static_path = os.environ.get("SITE_STATIC_PATH", "static/captures")
+    diary_path = os.environ.get("SITE_DIARY_PATH", "src/content/docs")
+    static_path = os.environ.get("SITE_STATIC_PATH", "public/captures")
     branch = os.environ.get("SITE_BRANCH", "main")
     capture_base = Path(
         os.environ.get(
@@ -2067,7 +2133,7 @@ def main() -> int:
 
     _ensure_clone(url, repo_dir, branch)
 
-    target_md = repo_dir / diary_path / f"{args.date}.md"
+    target_md = repo_dir / diary_path / f"{args.date}-reachy-diary.md"
     target_md.parent.mkdir(parents=True, exist_ok=True)
     target_md.write_text(diary["markdown"], encoding="utf-8")
 
@@ -2262,7 +2328,7 @@ This is an environment configuration step, performed by the OpenClaw skill in pr
 - OpenClaw skill integration → Task 12 ✓
 - Manual E2E → Task 13 ✓
 - Sensor ingestion (HA pull + config panel) → **deferred to follow-up branch**, called out in spec
-- Site-repo Hugo template + Actions tweak → out of tree, called out in spec and Task 12
+- Site-repo Astro template + Cloudflare Workers deployment → out of tree, called out in spec and Task 12
 
 **Placeholder scan:** No "TBD"/"TODO"/"add appropriate error handling" remains in plan steps. The two values explicitly marked as values-at-implementation (site repo URL, diary content path) are configured via environment variables (`SITE_REPO_URL`, `SITE_DIARY_PATH`), not embedded in code, so no code-level placeholder.
 

@@ -8,14 +8,14 @@
 
 1. **Persist daily interaction data** (ASR transcripts with timestamps, emotions, faces/smiles, thoughts, weather) in a queryable, long-term-friendly store so the daily diary generator can use richer history.
 2. **Generate a daily diary as a Markdown document** that is suitable for both the local dashboard and external publishing.
-3. **Publish each day's diary to an existing public Hugo site** via GitHub + GitHub Actions, with content frozen on a per-day basis and form (templates/CSS) iterated independently.
+3. **Publish each day's diary to an existing public Astro site** via GitHub + Cloudflare Workers, with content frozen on a per-day basis and form (templates/CSS) iterated independently.
 
 ## Non-Goals
 
 - Recording or archiving raw audio waveforms. Only ASR transcripts + timestamps are persisted.
 - Re-generating historical diaries when templates change. Each day's Markdown is immutable once published.
 - Backfilling diaries for days before this feature ships.
-- Search, tagging, or RSS in the first iteration (Hugo can add later without changing source format).
+- Search, tagging, or RSS in the first iteration (Astro can add later without changing source format).
 
 ## Architecture
 
@@ -36,13 +36,13 @@
 └────────────────────────────────────────────────────────────────────────────────┘
                                       │
                                       ▼
-┌──────────────────── GitHub: <TBD: site repo> ─────────────────────────────────┐
-│  content/<TBD: diary section path>/2026-04-26.md                              │
-│  static/captures/2026-04-26/*.jpg                                             │
+┌──────────────────── GitHub: chaihuo-mcv-site ─────────────────────────────────┐
+│  src/content/docs/2026-04-26-reachy-diary.md                                  │
+│  public/captures/2026-04-26/*.jpg                                             │
 │                                                                               │
-│  GitHub Actions (on push to that path):                                       │
-│   - hugo --minify                                                             │
-│   - deploy to gh-pages → GitHub Pages                                         │
+│  Cloudflare Workers deployment (automatic on push to main):                   │
+│   - Astro Content Collection ingest                                           │
+│   - Deploy to Cloudflare Workers via wrangler                                 │
 └───────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -168,7 +168,7 @@ OpenClaw skill `daily-diary` runs at 23:00 local time daily (existing scheduler)
 1. Read all rows from SQLite where `ts` falls in the target day's local-time window.
 2. Build a structured JSON blob (the same shape as the prior spec's `sections`, but consumed directly by the LLM rather than stored).
 3. Call LLM (`dashscope/kimi-k2.5` via OpenClaw) with the diary prompt + structured data.
-4. LLM returns **Markdown with Hugo front matter** (not JSON — Markdown is the storage and publish format).
+4. LLM returns **Markdown with Astro front matter** (not JSON — Markdown is the storage and publish format).
 5. Save the Markdown to `diaries.markdown`. Set `generated_at`, `llm_model`, `prompt_version`.
 6. Hand off to `publish_diary.py` (next section).
 
@@ -176,25 +176,18 @@ OpenClaw skill `daily-diary` runs at 23:00 local time daily (existing scheduler)
 
 ```markdown
 ---
-title: "A Day of Many Smiles"
-date: 2026-04-26
-weather:
-  condition: "sunny"
-  temp_c: 24.5
-  humidity: 60
-  location: "Shenzhen"
-stats:
-  faces_seen: 42
-  smiles: 15
-  conversations: 8
-captures:
-  - path: "captures/2026-04-26/001.jpg"
-    time: "10:15"
-  - path: "captures/2026-04-26/002.jpg"
-    time: "14:22"
-meta:
-  llm_model: "dashscope/kimi-k2.5"
-  prompt_version: "v1"
+title: "机器人 Reachy 的日记 · 4 月 26 日"
+title_en: "Reachy's Diary · April 26"
+date: "2026.04.26"
+category: "机器人日记"
+description: "今天来了 42 位朋友，其中 15 位对我露出了笑容。"
+description_en: "Today 42 people stopped by, and 15 of them smiled at me."
+author: "Reachy Mini"
+author_en: "Reachy Mini"
+readTime: "2 分钟"
+readTime_en: "2 min read"
+coverImage: "https://images.unsplash.com/photo-1485827404703-89b55fcc595e"
+tags: ["机器人日记", "Reachy", "AI"]
 ---
 
 ## 今天的心情
@@ -210,7 +203,9 @@ meta:
 ……
 ```
 
-Front matter carries structured data (renderable by Hugo templates as cards/widgets). Body is the LLM's first-person narrative. Section headings are fixed (`今天的心情` / `遇到的人` / `想到的事` and any future additions); the LLM is instructed to use these exact headings so templates can rely on them.
+Front matter follows the Astro `docs` Content Collection Zod schema. Body is the LLM's first-person narrative in Chinese only (English version is provided via `title_en` and `description_en`). Section headings are fixed (`今天的心情` / `遇到的人` / `想到的事`); the LLM is instructed to use these exact headings so templates can rely on them.
+
+Diary articles share the `docs` collection with other documentation; they're distinguished only by `category: 机器人日记` and the `-reachy-diary.md` filename suffix.
 
 ### Privacy / Content Rules
 
@@ -226,18 +221,18 @@ Raw ASR transcripts remain in `asr_events` on the Jetson and are never sent to t
 
 - Once `diaries.published_at IS NOT NULL`, the row is treated as frozen. Re-runs of the skill for the same date are skipped by default.
 - Manual override: `--force` flag deletes the row and pushes a fresh Markdown (used only for fixing errors).
-- Template/CSS changes affect rendering but never re-generate historical Markdown. New front-matter fields appear only in newer diaries; templates use Hugo's `with` to skip when absent.
+- Template/CSS changes affect rendering but never re-generate historical Markdown. New front-matter fields appear only in newer diaries; templates use Astro's optional field handling.
 
 ## Publishing Pipeline
 
 ### Site Repo
 
-The site is an existing Hugo project on GitHub. Final values to be filled in at implementation time:
+The site is an existing Astro project on GitHub (chaihuo-mcv-site):
 
-- **Site repo URL:** `<TBD: provided by user>`
-- **Content path for diary section:** `<TBD: provided by user>` (e.g., `content/diary/`)
-- **Static asset path for captures:** `static/captures/` (default; adjust if site convention differs)
-- **GitHub Actions branch for Pages deploy:** typically `gh-pages` (defer to existing site convention)
+- **Site repo URL:** `git@github.com:Chaihuo-Makerspace/chaihuo-mcv-site.git`
+- **Content path for diary section:** `src/content/docs`
+- **Static asset path for captures:** `public/captures`
+- **Deploy mechanism:** Cloudflare Workers, automatic on push to main (existing CI via `wrangler.jsonc`)
 
 These are the only project-specific values; everything else in the design is generic.
 
@@ -264,21 +259,21 @@ Inputs: `--date YYYY-MM-DD` (default: today). Behavior:
 
 1. Read `diaries.markdown` for the date from SQLite. If `published_at` is set and `--force` not passed, exit cleanly with "already published".
 2. Ensure local clone exists at `~/.reachy-claw/site-repo/`. Clone on first run; otherwise `git pull --rebase`.
-3. Write Markdown to `<repo>/<diary content path>/YYYY-MM-DD.md`.
-4. Copy referenced capture images from `~/.reachy-claw/captures/YYYY-MM-DD/` to `<repo>/static/captures/YYYY-MM-DD/`.
+3. Write Markdown to `<repo>/src/content/docs/YYYY-MM-DD-reachy-diary.md`.
+4. Copy referenced capture images from `~/.reachy-claw/captures/YYYY-MM-DD/` to `<repo>/public/captures/YYYY-MM-DD/`.
 5. `git add` the new files, `git commit -m "diary: 2026-04-26"`, `git push`.
 6. On success, set `diaries.published_at = now()`.
 7. On failure (network, push rejection, etc.), log error and exit non-zero. Diary row in SQLite stays unpublished — the next daily run, or a manual retry, will try again. Do **not** roll back the Markdown row; only retry the push.
 
 The script is invoked as the last step of the `daily-diary` OpenClaw skill. It can also be run manually for backfill of a specific day.
 
-### GitHub Actions
+### Cloudflare Workers Deployment
 
-The site repo's existing Hugo build workflow handles deployment. **No new workflow file is created in this spec** — we rely on the site repo's current setup. Implementation step will verify:
+The site repo's existing Astro + Cloudflare setup handles deployment. **No new workflow file is created in this spec** — we rely on the site repo's current `wrangler.jsonc` configuration. Implementation step will verify:
 
-- Workflow triggers on push to the diary content path (or to `main`).
-- Builds with Hugo and deploys to Pages.
-- If the existing workflow does not cover the diary path or needs adjustment, it is updated in the site repo (out of clawd-reachy-mini's tree).
+- Cloudflare Workers deployment triggers on push to `main`.
+- Astro Content Collection correctly ingests the diary Markdown.
+- If the existing setup needs adjustment, it is updated in the site repo (out of clawd-reachy-mini's tree).
 
 ## Dashboard Impact
 
@@ -319,7 +314,7 @@ Narration mode (from prior spec) continues to work: it reads diary content from 
 5. **Diary skill: Markdown output** — adapt LLM prompt to emit Markdown + front matter; save to `diaries`.
 6. **`publish_diary.py`** — develop against a throwaway test repo first, then point at the real site repo.
 7. **OpenClaw skill integration** — chain generate + publish in the daily skill.
-8. **Site repo template** — add a Hugo template that renders the diary front matter (stats card, capture gallery, weather widget) — this work happens in the site repo, not clawd-reachy-mini.
+8. **Site repo template** — add Astro template that renders the diary front matter (stats card, capture gallery) — this work happens in the site repo, not clawd-reachy-mini.
 
 ## Testing
 
@@ -332,11 +327,11 @@ Narration mode (from prior spec) continues to work: it reads diary content from 
 
 ## Open Questions / TBD
 
-These are documented as values to provide at implementation kickoff, not blockers for the design:
+These have been resolved during implementation:
 
-1. **Site repo URL** — to be supplied by user.
-2. **Diary content path within the site** — e.g., `content/diary/`, `content/journal/`, etc. — to be supplied by user.
-3. **Whether the existing site Hugo workflow needs adjustment** — verify at integration step.
+1. **Site repo URL** — `git@github.com:Chaihuo-Makerspace/chaihuo-mcv-site.git`
+2. **Diary content path within the site** — `src/content/docs`
+3. **Deploy mechanism** — Cloudflare Workers, automatic on push to main (existing CI)
 
 ## Risks
 
