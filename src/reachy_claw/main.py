@@ -326,6 +326,14 @@ async def async_main(config: Config) -> int:
 
     app.register(DailyLogPlugin(app))
 
+    # Rest window orchestrator (registered last so other plugins are alive when rest_start fires)
+    from reachy_claw.plugins.rest_plugin import RestPlugin
+    from reachy_claw.plugins.housekeeping_tasks import DiaryGenerateAndPublishTask
+
+    rest = RestPlugin(app)
+    rest.register_task(DiaryGenerateAndPublishTask())
+    app.register(rest)
+
     # Handle shutdown signals (first = graceful, second = force)
     loop = asyncio.get_running_loop()
     shutdown_event = asyncio.Event()
