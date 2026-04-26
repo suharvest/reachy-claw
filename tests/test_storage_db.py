@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from reachy_claw.storage import db as db_mod
 from reachy_claw.storage.migrations import CURRENT_VERSION, get_version
+
+
+def _epoch(dt_str: str) -> int:
+    return int(datetime.fromisoformat(dt_str).timestamp())
 
 
 @pytest.fixture
@@ -98,3 +103,16 @@ def test_record_sensor_text(tmp_db):
         )
     )
     assert rows == [("ha", "weather.condition", None, "sunny")]
+
+
+def test_events_for_day_filters_by_local_window(tmp_db):
+    in_day = _epoch("2026-04-26T10:00:00")
+    out_before = _epoch("2026-04-25T23:59:59")
+    out_after = _epoch("2026-04-27T00:00:01")
+
+    for ts in (in_day, out_before, out_after):
+        tmp_db.record_asr(ts=ts, role="user", text=f"t={ts}", emotion=None)
+
+    bundle = tmp_db.events_for_day("2026-04-26")
+    asr_texts = [r["text"] for r in bundle["asr_events"]]
+    assert asr_texts == [f"t={in_day}"]

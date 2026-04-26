@@ -6,10 +6,18 @@ import os
 import sqlite3
 import time
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from .migrations import migrate
+
+
+def day_window(date_str: str) -> tuple[int, int]:
+    """Return [start, end) unix-epoch seconds for the given local-time YYYY-MM-DD."""
+    start = datetime.fromisoformat(date_str)
+    end = start + timedelta(days=1)
+    return int(start.timestamp()), int(end.timestamp())
 
 
 def _default_path() -> Path:
@@ -100,6 +108,24 @@ class Database:
             "VALUES (?, ?, ?, ?, ?)",
             (ts, source, key, value_num, value_text),
         )
+
+    def events_for_day(self, date: str) -> dict[str, list[dict[str, Any]]]:
+        start, end = day_window(date)
+        out: dict[str, list[dict[str, Any]]] = {}
+        for table, cols in (
+            ("asr_events", "ts, role, text, emotion"),
+            ("emotions", "ts, value, label"),
+            ("faces", "ts, count, smile_count, capture_path"),
+            ("thoughts", "ts, text, emotion"),
+            ("sensors", "ts, source, key, value_num, value_text"),
+        ):
+            rows = self.conn.execute(
+                f"SELECT {cols} FROM {table} WHERE ts >= ? AND ts < ? ORDER BY ts ASC",
+                (start, end),
+            ).fetchall()
+            keys = [c.strip() for c in cols.split(",")]
+            out[table] = [dict(zip(keys, row)) for row in rows]
+        return out
 
 
 def open_default() -> Database:
