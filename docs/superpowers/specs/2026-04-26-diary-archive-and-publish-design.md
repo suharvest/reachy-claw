@@ -93,15 +93,20 @@ CREATE TABLE thoughts (
 );
 CREATE INDEX idx_thoughts_ts ON thoughts(ts);
 
-CREATE TABLE weather (
+-- Generic sensor stream. Home Assistant (or any other producer) writes here.
+-- Examples: source='ha', key='weather.temp_c', value_num=24.5
+--           source='ha', key='weather.condition', value_text='sunny'
+--           source='ha', key='living_room.lux', value_num=320
+CREATE TABLE sensors (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER NOT NULL,
-  temp_c REAL,
-  humidity REAL,
-  condition TEXT,                -- 'sunny', 'cloudy', etc.
-  location TEXT
+  source TEXT NOT NULL,          -- producer id, e.g. 'ha', 'esp32-wb-1'
+  key TEXT NOT NULL,              -- dotted name, e.g. 'weather.temp_c'
+  value_num REAL,                 -- numeric value (NULL if not numeric)
+  value_text TEXT                 -- text value (NULL if numeric)
 );
-CREATE INDEX idx_weather_ts ON weather(ts);
+CREATE INDEX idx_sensors_ts ON sensors(ts);
+CREATE INDEX idx_sensors_key_ts ON sensors(key, ts);
 
 CREATE TABLE diaries (
   date TEXT PRIMARY KEY,         -- 'YYYY-MM-DD'
@@ -132,11 +137,17 @@ Same strategy as prior spec, now applied to SQLite inserts:
 - `faces`: insert at most once per minute, or when a new face appears or a smile is captured.
 - `asr_events`: insert every event (low volume, full fidelity needed for diary).
 - `thoughts`: insert every event.
-- `weather`: insert every poll (e.g., hourly from Home Assistant or external API).
+- `sensors`: ingestion mechanism deferred to a follow-up branch (see "Sensor ingestion (deferred)" below). Schema is in place; table starts empty.
 
 ### Plugin changes
 
 `DailyLogPlugin` is rewritten to write SQLite via `storage/db.py` instead of jsonl files. The existing event subscriptions stay the same. Other plugins (`conversation_plugin`, `face_tracker_plugin`, `motion_plugin`) gain a small hook to call `db.record_*` at appropriate points — no behavioral changes, just an additional sink.
+
+### Sensor ingestion (deferred)
+
+The `sensors` table schema is provisioned now so the diary generator can already query it. **The ingestion mechanism (Home Assistant pull + dashboard configuration panel for selecting which entities to sync) is out of scope for this spec** and will be designed and implemented on a separate feature branch.
+
+Until that ships, the `sensors` table stays empty and the diary generator simply omits any sensor-derived sections. Diaries are still produced from ASR, emotions, faces, and thoughts.
 
 The dashboard's existing diary endpoints are updated to read from the `diaries` SQLite table instead of `~/.reachy-claw/diaries/*.json`. The dashboard front-end (diary.js / diary.css) stays as-is — only the data source changes. The on-disk JSON files from the prior design are deprecated; a one-time migration script imports any existing files into the `diaries` table.
 

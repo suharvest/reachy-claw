@@ -21,7 +21,6 @@
 | `src/reachy_claw/storage/__init__.py` | package marker, re-export public API |
 | `src/reachy_claw/storage/db.py` | sqlite connection, schema init, read/write helpers |
 | `src/reachy_claw/storage/migrations.py` | schema versioning via `PRAGMA user_version` |
-| `src/reachy_claw/plugins/weather_plugin.py` | poll weather hourly, write to SQLite |
 | `scripts/migrate_jsonl_to_sqlite.py` | one-time import of existing jsonl/JSON |
 | `scripts/publish_diary.py` | push generated Markdown to site repo |
 | `tests/test_storage_db.py` | unit tests for db.py |
@@ -38,7 +37,6 @@
 | `src/reachy_claw/plugins/dashboard_plugin.py` | diary endpoints query SQLite |
 | `src/reachy_claw/plugins/conversation_plugin.py` | optional: tighter ASR row recording (event remains primary path) |
 | `src/reachy_claw/plugins/face_tracker_plugin.py` | record `smile_count` and `capture_path` to faces table |
-| `src/reachy_claw/app.py` | register WeatherPlugin |
 | `scripts/collect_daily_data.py` | read SQLite (replacing jsonl) |
 | `scripts/generate_diary.py` | emit Markdown w/ front matter, save to `diaries` table |
 | `pyproject.toml` | add `pyyaml` (already present, verify) |
@@ -125,15 +123,16 @@ MIGRATIONS: dict[int, str] = {
     );
     CREATE INDEX idx_thoughts_ts ON thoughts(ts);
 
-    CREATE TABLE weather (
+    CREATE TABLE sensors (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ts INTEGER NOT NULL,
-        temp_c REAL,
-        humidity REAL,
-        condition TEXT,
-        location TEXT
+        source TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value_num REAL,
+        value_text TEXT
     );
-    CREATE INDEX idx_weather_ts ON weather(ts);
+    CREATE INDEX idx_sensors_ts ON sensors(ts);
+    CREATE INDEX idx_sensors_key_ts ON sensors(key, ts);
 
     CREATE TABLE diaries (
         date TEXT PRIMARY KEY,
@@ -211,7 +210,7 @@ def test_init_creates_schema(tmp_path):
         "emotions",
         "faces",
         "thoughts",
-        "weather",
+        "sensors",
         "diaries",
     }.issubset(tables)
 ```
@@ -345,17 +344,28 @@ def test_record_thought_inserts_row(tmp_db):
     assert rows == [(ts, "I wonder...", "contemplative")]
 
 
-def test_record_weather_inserts_row(tmp_db):
+def test_record_sensor_numeric(tmp_db):
     ts = int(time.time())
-    tmp_db.record_weather(
-        ts=ts, temp_c=24.5, humidity=60.0, condition="sunny", location="Shenzhen"
+    tmp_db.record_sensor(ts=ts, source="ha", key="weather.temp_c", value_num=24.5)
+    rows = list(
+        tmp_db.conn.execute(
+            "SELECT ts, source, key, value_num, value_text FROM sensors"
+        )
+    )
+    assert rows == [(ts, "ha", "weather.temp_c", 24.5, None)]
+
+
+def test_record_sensor_text(tmp_db):
+    ts = int(time.time())
+    tmp_db.record_sensor(
+        ts=ts, source="ha", key="weather.condition", value_text="sunny"
     )
     rows = list(
         tmp_db.conn.execute(
-            "SELECT ts, temp_c, humidity, condition, location FROM weather"
+            "SELECT source, key, value_num, value_text FROM sensors"
         )
     )
-    assert rows == [(ts, 24.5, 60.0, "sunny", "Shenzhen")]
+    assert rows == [("ha", "weather.condition", None, "sunny")]
 ```
 
 - [ ] **Step 2.2: Run; expect failures (no methods)**
@@ -409,19 +419,19 @@ In `src/reachy_claw/storage/db.py`, add inside class `Database`:
             (ts, text, emotion),
         )
 
-    def record_weather(
+    def record_sensor(
         self,
         *,
         ts: int,
-        temp_c: float | None = None,
-        humidity: float | None = None,
-        condition: str | None = None,
-        location: str | None = None,
+        source: str,
+        key: str,
+        value_num: float | None = None,
+        value_text: str | None = None,
     ) -> None:
         self.conn.execute(
-            "INSERT INTO weather (ts, temp_c, humidity, condition, location) "
+            "INSERT INTO sensors (ts, source, key, value_num, value_text) "
             "VALUES (?, ?, ?, ?, ?)",
-            (ts, temp_c, humidity, condition, location),
+            (ts, source, key, value_num, value_text),
         )
 ```
 
@@ -1843,165 +1853,8 @@ git commit -m "feat(dashboard): diary endpoints read SQLite + parse Markdown fro
 
 ---
 
-## Task 11: WeatherPlugin
 
-**Files:**
-- Create: `src/reachy_claw/plugins/weather_plugin.py`
-- Modify: `src/reachy_claw/app.py`
-- Create: `tests/test_weather_plugin.py`
-
-A minimal plugin polls weather hourly and writes one row per poll. Source is configurable via env var (`WEATHER_API_URL`); if absent, the plugin no-ops (graceful degradation).
-
-- [ ] **Step 11.1: Write failing test (mock HTTP)**
-
-```python
-# tests/test_weather_plugin.py
-from __future__ import annotations
-
-import asyncio
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
-
-import pytest
-
-from reachy_claw.event_bus import EventBus
-from reachy_claw.plugins.weather_plugin import WeatherPlugin
-from reachy_claw.storage.db import Database
-
-
-class _StubApp:
-    def __init__(self, db: Database):
-        self.events = EventBus()
-        self.db = db
-
-
-@pytest.mark.asyncio
-async def test_weather_plugin_records_one_poll(tmp_path: Path, monkeypatch):
-    db = Database(tmp_path / "t.db")
-    db.init()
-    app = _StubApp(db)
-
-    monkeypatch.setenv("WEATHER_API_URL", "http://example.invalid/x")
-
-    async def fake_fetch(self):
-        return {
-            "temp_c": 24.5,
-            "humidity": 60.0,
-            "condition": "sunny",
-            "location": "Shenzhen",
-        }
-
-    plugin = WeatherPlugin(app)
-    plugin.setup()
-    plugin.POLL_INTERVAL = 0.05
-    with patch.object(WeatherPlugin, "_fetch", new=fake_fetch):
-        task = asyncio.create_task(plugin.start())
-        await asyncio.sleep(0.15)
-        plugin._running = False
-        await plugin.stop()
-        task.cancel()
-
-    rows = list(db.conn.execute("SELECT temp_c, humidity, condition, location FROM weather"))
-    assert (24.5, 60.0, "sunny", "Shenzhen") in rows
-    db.close()
-```
-
-- [ ] **Step 11.2: Run; expect failure**
-
-```
-uv run pytest tests/test_weather_plugin.py -v
-```
-
-- [ ] **Step 11.3: Implement WeatherPlugin**
-
-```python
-# src/reachy_claw/plugins/weather_plugin.py
-"""WeatherPlugin — hourly poll of an external API, writes to SQLite."""
-
-from __future__ import annotations
-
-import asyncio
-import logging
-import os
-import time
-
-import httpx
-
-from ..plugin import Plugin
-from ..storage.db import Database
-
-logger = logging.getLogger(__name__)
-
-
-class WeatherPlugin(Plugin):
-    name = "weather"
-    POLL_INTERVAL = 3600  # 1 hour
-
-    def __init__(self, app) -> None:
-        super().__init__(app)
-        self._db: Database = app.db
-        self._url = os.environ.get("WEATHER_API_URL")
-
-    def setup(self) -> bool:
-        if not self._url:
-            logger.info("WeatherPlugin disabled: WEATHER_API_URL not set")
-        return True
-
-    async def _fetch(self) -> dict | None:
-        if not self._url:
-            return None
-        try:
-            async with httpx.AsyncClient(timeout=10) as c:
-                r = await c.get(self._url)
-                r.raise_for_status()
-                return r.json()
-        except Exception as e:
-            logger.warning("WeatherPlugin fetch failed: %s", e)
-            return None
-
-    async def start(self) -> None:
-        while self._running:
-            data = await self._fetch()
-            if data:
-                self._db.record_weather(
-                    ts=int(time.time()),
-                    temp_c=data.get("temp_c"),
-                    humidity=data.get("humidity"),
-                    condition=data.get("condition"),
-                    location=data.get("location"),
-                )
-            try:
-                await asyncio.sleep(self.POLL_INTERVAL)
-            except asyncio.CancelledError:
-                return
-```
-
-- [ ] **Step 11.4: Register the plugin in `app.py`**
-
-Find the plugin registration block and add `WeatherPlugin`:
-
-```python
-from .plugins.weather_plugin import WeatherPlugin
-# ...
-self.plugins.append(WeatherPlugin(self))
-```
-
-- [ ] **Step 11.5: Run tests, expect PASS**
-
-```
-uv run pytest tests/test_weather_plugin.py -v
-```
-
-- [ ] **Step 11.6: Commit**
-
-```bash
-git add src/reachy_claw/plugins/weather_plugin.py src/reachy_claw/app.py tests/test_weather_plugin.py
-git commit -m "feat(weather): hourly weather plugin writing to SQLite"
-```
-
----
-
-## Task 12: `publish_diary.py` (push to site repo)
+## Task 11: `publish_diary.py` (push to site repo)
 
 **Files:**
 - Create: `scripts/publish_diary.py`
@@ -2010,7 +1863,7 @@ git commit -m "feat(weather): hourly weather plugin writing to SQLite"
 
 Test plan: spin up a local **bare** git repo (no network needed), point the publish script at it via `SITE_REPO_URL=file:///path`, run the script, then clone the bare repo elsewhere to verify the file appeared.
 
-- [ ] **Step 12.1: Write failing integration test**
+- [ ] **Step 11.1: Write failing integration test**
 
 ```python
 # tests/test_publish_diary.py
@@ -2091,13 +1944,13 @@ def test_publish_pushes_markdown_to_bare_repo(tmp_path: Path):
     db.close()
 ```
 
-- [ ] **Step 12.2: Run; expect failure**
+- [ ] **Step 11.2: Run; expect failure**
 
 ```
 uv run pytest tests/test_publish_diary.py -v
 ```
 
-- [ ] **Step 12.3: Implement `publish_diary.py`**
+- [ ] **Step 11.3: Implement `publish_diary.py`**
 
 ```python
 #!/usr/bin/env python3
@@ -2248,13 +2101,13 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-- [ ] **Step 12.4: Run; expect PASS**
+- [ ] **Step 11.4: Run; expect PASS**
 
 ```
 uv run pytest tests/test_publish_diary.py -v
 ```
 
-- [ ] **Step 12.5: Write ops doc**
+- [ ] **Step 11.5: Write ops doc**
 
 ```markdown
 <!-- docs/ops/diary-publish-setup.md -->
@@ -2308,7 +2161,7 @@ To rotate: generate a new key, add it to GitHub deploy keys, swap the
 `IdentityFile` path, then remove the old key from GitHub.
 ```
 
-- [ ] **Step 12.6: Commit**
+- [ ] **Step 11.6: Commit**
 
 ```bash
 git add scripts/publish_diary.py tests/test_publish_diary.py docs/ops/diary-publish-setup.md
@@ -2317,14 +2170,14 @@ git commit -m "feat(publish): publish_diary.py pushes Markdown to site repo via 
 
 ---
 
-## Task 13: OpenClaw skill chains generate + publish
+## Task 12: OpenClaw skill chains generate + publish
 
 **Files:**
 - (Out of this repo's tree — lives in OpenClaw extensions.)
 
 The OpenClaw `daily-diary` skill is updated to invoke the two scripts in sequence. This task documents the integration but the actual change is in the OpenClaw repo. Implementer should:
 
-- [ ] **Step 13.1: Locate the existing skill**
+- [ ] **Step 12.1: Locate the existing skill**
 
 ```bash
 ls ~/project/openclaw/extensions/desktop-robot/src/ 2>/dev/null | grep -i diary || true
@@ -2332,7 +2185,7 @@ ls ~/project/openclaw/extensions/desktop-robot/src/ 2>/dev/null | grep -i diary 
 
 If the skill exists, modify it. Otherwise note the path and create a tracking issue/note.
 
-- [ ] **Step 13.2: Update the skill flow**
+- [ ] **Step 12.2: Update the skill flow**
 
 The skill, when triggered (cron 23:00 or manual), should:
 
@@ -2342,7 +2195,7 @@ The skill, when triggered (cron 23:00 or manual), should:
 
 The exact OpenClaw skill DSL is out of this plan's scope; commit the change in the OpenClaw repo separately.
 
-- [ ] **Step 13.3: Commit a brief note in this repo**
+- [ ] **Step 12.3: Commit a brief note in this repo**
 
 Append to `docs/ops/diary-publish-setup.md`:
 
@@ -2361,9 +2214,9 @@ git commit -m "docs(ops): note OpenClaw skill responsibility for daily trigger"
 
 ---
 
-## Task 14: Final integration + manual smoke test
+## Task 13: Final integration + manual smoke test
 
-- [ ] **Step 14.1: Run the full test suite**
+- [ ] **Step 13.1: Run the full test suite**
 
 ```
 uv run pytest -x
@@ -2371,7 +2224,7 @@ uv run pytest -x
 
 Expected: all green. Any pre-existing tests that asserted jsonl files on disk should have been removed in earlier tasks.
 
-- [ ] **Step 14.2: Manual end-to-end on Jetson (dispatch via claude-rescue)**
+- [ ] **Step 13.2: Manual end-to-end on Jetson (dispatch via claude-rescue)**
 
 Per the project's operations playbook, this step is dispatched to a remote agent rather than run from the main thread. Suggested prompt:
 
@@ -2390,7 +2243,7 @@ git log of the site repo showing the publish commit.
 Forbidden: rm -rf, sudo rm, recreating containers (only restart), modifying Dockerfile/compose.
 ```
 
-- [ ] **Step 14.3: When real (non-mock) LLM works in production, set `DIARY_LLM_CMD` and re-run**
+- [ ] **Step 13.3: When real (non-mock) LLM works in production, set `DIARY_LLM_CMD` and re-run**
 
 This is an environment configuration step, performed by the OpenClaw skill in production.
 
@@ -2399,17 +2252,17 @@ This is an environment configuration step, performed by the OpenClaw skill in pr
 ## Self-Review
 
 **Spec coverage:**
-- SQLite schema → Tasks 1, 2, 3, 4 ✓
+- SQLite schema (incl. empty `sensors` table) → Tasks 1, 2, 3, 4 ✓
 - DailyLogPlugin migration → Task 5 ✓
 - One-time migration script → Task 6 ✓
 - Markdown diary generation → Task 8 ✓
 - Privacy linter (substring guard) → Task 9 ✓
 - Dashboard endpoints over SQLite → Task 10 ✓
-- Weather plugin → Task 11 ✓
-- Publish script + deploy key + ops doc → Task 12 ✓
-- OpenClaw skill integration → Task 13 ✓
-- Manual E2E → Task 14 ✓
-- Site-repo Hugo template + Actions tweak → out of tree, called out in spec and Task 13
+- Publish script + deploy key + ops doc → Task 11 ✓
+- OpenClaw skill integration → Task 12 ✓
+- Manual E2E → Task 13 ✓
+- Sensor ingestion (HA pull + config panel) → **deferred to follow-up branch**, called out in spec
+- Site-repo Hugo template + Actions tweak → out of tree, called out in spec and Task 12
 
 **Placeholder scan:** No "TBD"/"TODO"/"add appropriate error handling" remains in plan steps. The two values explicitly marked as values-at-implementation (site repo URL, diary content path) are configured via environment variables (`SITE_REPO_URL`, `SITE_DIARY_PATH`), not embedded in code, so no code-level placeholder.
 
