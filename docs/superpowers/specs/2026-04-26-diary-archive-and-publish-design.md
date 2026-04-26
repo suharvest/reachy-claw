@@ -176,10 +176,10 @@ OpenClaw skill `daily-diary` runs at 23:00 local time daily (existing scheduler)
 
 ```markdown
 ---
-title: "机器人 Reachy 的日记 · 4 月 26 日"
+title: "Reachy 的日记 · 4 月 26 日"
 title_en: "Reachy's Diary · April 26"
 date: "2026.04.26"
-category: "机器人日记"
+category: "Reachy 日记"
 description: "今天来了 42 位朋友，其中 15 位对我露出了笑容。"
 description_en: "Today 42 people stopped by, and 15 of them smiled at me."
 author: "Reachy Mini"
@@ -187,7 +187,7 @@ author_en: "Reachy Mini"
 readTime: "2 分钟"
 readTime_en: "2 min read"
 coverImage: "https://images.unsplash.com/photo-1485827404703-89b55fcc595e"
-tags: ["机器人日记", "Reachy", "AI"]
+tags: ["Reachy 日记", "Reachy", "AI"]
 ---
 
 ## 今天的心情
@@ -205,7 +205,7 @@ tags: ["机器人日记", "Reachy", "AI"]
 
 Front matter follows the Astro `docs` Content Collection Zod schema. Body is the LLM's first-person narrative in Chinese only (English version is provided via `title_en` and `description_en`). Section headings are fixed (`今天的心情` / `遇到的人` / `想到的事`); the LLM is instructed to use these exact headings so templates can rely on them.
 
-Diary articles share the `docs` collection with other documentation; they're distinguished only by `category: 机器人日记` and the `-reachy-diary.md` filename suffix.
+Diary articles share the `docs` collection with other documentation; they're distinguished only by `category: Reachy 日记` and the `-reachy-diary.md` filename suffix.
 
 ### Privacy / Content Rules
 

@@ -38,7 +38,7 @@ def test_publish_pushes_markdown_to_bare_repo(tmp_path: Path):
     db.init()
     db.save_diary(
         date="2026-04-26",
-        markdown="---\ntitle: t\ndate: \"2026.04.26\"\ncategory: \"机器人日记\"\n---\n\nbody",
+        markdown="---\ntitle: t\ndate: \"2026.04.26\"\ncategory: \"Reachy 日记\"\n---\n\nbody",
         llm_model="m",
         prompt_version="v1",
     )

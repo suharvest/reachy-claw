@@ -43,7 +43,7 @@
 
 ### Out of tree (handled in the site repo, not this plan)
 
-- Astro `docs` collection / new category 机器人日记 — DONE in chaihuo-mcv-site branch feat/reachy-diary-section
+- Astro `docs` collection / new category Reachy 日记 — DONE in chaihuo-mcv-site branch feat/reachy-diary-section
 - Cloudflare Workers deployment configuration (existing wrangler.jsonc)
 
 ---
@@ -1432,7 +1432,7 @@ def test_generate_writes_markdown_to_diaries(tmp_path: Path):
     assert "title:" in md
     assert "title_en:" in md
     assert "date: \"2026.04.26\"" in md  # Astro format: dots, quoted
-    assert "category: \"机器人日记\"" in md
+    assert "category: \"Reachy 日记\"" in md
     assert "description:" in md
     assert "description_en:" in md
     assert "## 今天的心情" in md
@@ -1485,10 +1485,10 @@ Rules:
 - Never include personal identifiers (names, addresses, phone numbers) from ASR.
 - Use exactly these section headings, in this order: "## 今天的心情", "## 遇到的人", "## 想到的事".
 - Front matter must follow the Astro docs schema:
-  - title: Chinese title, format "机器人 Reachy 的日记 · X 月 Y 日"
+  - title: Chinese title, format "Reachy 的日记 · X 月 Y 日"
   - title_en: English title, format "Reachy's Diary · Month Day"
   - date: "YYYY.MM.DD" (dots, not dashes)
-  - category: "机器人日记"
+  - category: "Reachy 日记"
   - description: Chinese summary (1-2 sentences)
   - description_en: English summary (1-2 sentences)
   - author: "Reachy Mini"
@@ -1496,7 +1496,7 @@ Rules:
   - readTime: "X 分钟"
   - readTime_en: "X min read"
   - coverImage: a URL (use first available smile capture URL OR a placeholder Unsplash robot URL)
-  - tags: array like ["机器人日记", "Reachy", "AI"]
+  - tags: array like ["Reachy 日记", "Reachy", "AI"]
 - Body is Chinese only (no English body; English version is via title_en/description_en).
 - Output ONLY the Markdown document. No code fences, no commentary.
 """
@@ -1529,10 +1529,10 @@ def _mock_markdown(date: str, events: dict) -> str:
 
     return (
         "---\n"
-        f"title: \"机器人 Reachy 的日记 · {month} 月 {day} 日\"\n"
+        f"title: \"Reachy 的日记 · {month} 月 {day} 日\"\n"
         f"title_en: \"Reachy's Diary · {month_en} {day}\"\n"
         f"date: \"{astro_date}\"\n"
-        "category: \"机器人日记\"\n"
+        "category: \"Reachy 日记\"\n"
         f"description: \"今天来了 {n_faces} 位朋友，其中 {smiles} 位对我露出了笑容。\"\n"
         f"description_en: \"Today {n_faces} people stopped by, and {smiles} of them smiled at me.\"\n"
         "author: \"Reachy Mini\"\n"
@@ -1540,7 +1540,7 @@ def _mock_markdown(date: str, events: dict) -> str:
         f"readTime: \"{max(1, n_asr)} 分钟\"\n"
         f"readTime_en: \"{max(1, n_asr)} min read\"\n"
         "coverImage: \"https://images.unsplash.com/photo-1485827404703-89b55fcc595e\"\n"
-        "tags: [\"机器人日记\", \"Reachy\", \"AI\"]\n"
+        "tags: [\"Reachy 日记\", \"Reachy\", \"AI\"]\n"
         "---\n\n"
         "## 今天的心情\n\n今天平静而充实。\n\n"
         "## 遇到的人\n\n来过几位朋友，我用微笑回应了他们。\n\n"
@@ -1661,10 +1661,10 @@ def test_diary_aborts_when_user_asr_quoted_verbatim(tmp_path: Path):
     leak_script.write_text(
         f'''cat <<'MARKDOWN'
 ---
-title: "机器人 Reachy 的日记 · 4 月 26 日"
+title: "Reachy 的日记 · 4 月 26 日"
 title_en: "Reachy's Diary · April 26"
 date: "2026.04.26"
-category: "机器人日记"
+category: "Reachy 日记"
 description: "泄露测试"
 description_en: "Leak test"
 author: "Reachy Mini"
@@ -1672,7 +1672,7 @@ author_en: "Reachy Mini"
 readTime: "1 分钟"
 readTime_en: "1 min read"
 coverImage: "https://images.unsplash.com/photo-1485827404703-89b55fcc595e"
-tags: ["机器人日记", "Reachy", "AI"]
+tags: ["Reachy 日记", "Reachy", "AI"]
 ---
 
 ## 今天的心情
@@ -1971,7 +1971,7 @@ def test_publish_pushes_markdown_to_bare_repo(tmp_path: Path):
     db.init()
     db.save_diary(
         date="2026-04-26",
-        markdown="---\ntitle: t\ndate: \"2026.04.26\"\ncategory: \"机器人日记\"\n---\n\nbody",
+        markdown="---\ntitle: t\ndate: \"2026.04.26\"\ncategory: \"Reachy 日记\"\n---\n\nbody",
         llm_model="m",
         prompt_version="v1",
     )

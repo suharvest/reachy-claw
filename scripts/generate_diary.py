@@ -34,10 +34,10 @@ Rules:
 - Never include personal identifiers (names, addresses, phone numbers) from ASR.
 - Use exactly these section headings, in this order: "## 今天的心情", "## 遇到的人", "## 想到的事".
 - Front matter must follow the Astro docs schema:
-  - title: Chinese title, format "机器人 Reachy 的日记 · X 月 Y 日"
+  - title: Chinese title, format "Reachy 的日记 · X 月 Y 日"
   - title_en: English title, format "Reachy's Diary · Month Day"
   - date: "YYYY.MM.DD" (dots, not dashes)
-  - category: "机器人日记"
+  - category: "Reachy 日记"
   - description: Chinese summary (1-2 sentences)
   - description_en: English summary (1-2 sentences)
   - author: "Reachy Mini"
@@ -45,7 +45,7 @@ Rules:
   - readTime: "X 分钟"
   - readTime_en: "X min read"
   - coverImage: a URL (use first available smile capture URL OR a placeholder Unsplash robot URL)
-  - tags: array like ["机器人日记", "Reachy", "AI"]
+  - tags: array like ["Reachy 日记", "Reachy", "AI"]
 - Body is Chinese only (no English body; English version is via title_en/description_en).
 - Output ONLY the Markdown document. No code fences, no commentary.
 """
@@ -78,10 +78,10 @@ def _mock_markdown(date: str, events: dict) -> str:
 
     return (
         "---\n"
-        f"title: \"机器人 Reachy 的日记 · {month} 月 {day} 日\"\n"
+        f"title: \"Reachy 的日记 · {month} 月 {day} 日\"\n"
         f"title_en: \"Reachy's Diary · {month_en} {day}\"\n"
         f"date: \"{astro_date}\"\n"
-        "category: \"机器人日记\"\n"
+        "category: \"Reachy 日记\"\n"
         f"description: \"今天来了 {n_faces} 位朋友，其中 {smiles} 位对我露出了笑容。\"\n"
         f"description_en: \"Today {n_faces} people stopped by, and {smiles} of them smiled at me.\"\n"
         "author: \"Reachy Mini\"\n"
@@ -89,7 +89,7 @@ def _mock_markdown(date: str, events: dict) -> str:
         f"readTime: \"{max(1, n_asr)} 分钟\"\n"
         f"readTime_en: \"{max(1, n_asr)} min read\"\n"
         "coverImage: \"https://images.unsplash.com/photo-1485827404703-89b55fcc595e\"\n"
-        "tags: [\"机器人日记\", \"Reachy\", \"AI\"]\n"
+        "tags: [\"Reachy 日记\", \"Reachy\", \"AI\"]\n"
         "---\n\n"
         "## 今天的心情\n\n今天平静而充实。\n\n"
         "## 遇到的人\n\n来过几位朋友，我用微笑回应了他们。\n\n"
