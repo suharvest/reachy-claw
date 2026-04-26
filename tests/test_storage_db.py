@@ -42,3 +42,59 @@ def test_init_creates_schema(tmp_path):
         "sensors",
         "diaries",
     }.issubset(tables)
+
+
+def test_record_asr_inserts_row(tmp_db):
+    ts = int(time.time())
+    tmp_db.record_asr(ts=ts, role="user", text="hello", emotion="happy")
+    rows = list(tmp_db.conn.execute("SELECT ts, role, text, emotion FROM asr_events"))
+    assert rows == [(ts, "user", "hello", "happy")]
+
+
+def test_record_emotion_inserts_row(tmp_db):
+    ts = int(time.time())
+    tmp_db.record_emotion(ts=ts, value=0.7, label="curious")
+    rows = list(tmp_db.conn.execute("SELECT ts, value, label FROM emotions"))
+    assert rows == [(ts, 0.7, "curious")]
+
+
+def test_record_face_inserts_row(tmp_db):
+    ts = int(time.time())
+    tmp_db.record_face(ts=ts, count=3, smile_count=1, capture_path="captures/x.jpg")
+    rows = list(
+        tmp_db.conn.execute(
+            "SELECT ts, count, smile_count, capture_path FROM faces"
+        )
+    )
+    assert rows == [(ts, 3, 1, "captures/x.jpg")]
+
+
+def test_record_thought_inserts_row(tmp_db):
+    ts = int(time.time())
+    tmp_db.record_thought(ts=ts, text="I wonder...", emotion="contemplative")
+    rows = list(tmp_db.conn.execute("SELECT ts, text, emotion FROM thoughts"))
+    assert rows == [(ts, "I wonder...", "contemplative")]
+
+
+def test_record_sensor_numeric(tmp_db):
+    ts = int(time.time())
+    tmp_db.record_sensor(ts=ts, source="ha", key="weather.temp_c", value_num=24.5)
+    rows = list(
+        tmp_db.conn.execute(
+            "SELECT ts, source, key, value_num, value_text FROM sensors"
+        )
+    )
+    assert rows == [(ts, "ha", "weather.temp_c", 24.5, None)]
+
+
+def test_record_sensor_text(tmp_db):
+    ts = int(time.time())
+    tmp_db.record_sensor(
+        ts=ts, source="ha", key="weather.condition", value_text="sunny"
+    )
+    rows = list(
+        tmp_db.conn.execute(
+            "SELECT source, key, value_num, value_text FROM sensors"
+        )
+    )
+    assert rows == [("ha", "weather.condition", None, "sunny")]

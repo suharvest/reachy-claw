@@ -48,6 +48,59 @@ class Database:
             raise RuntimeError("Database not initialized; call init() first")
         return self._conn
 
+    def record_asr(
+        self, *, ts: int, role: str, text: str, emotion: str | None = None
+    ) -> None:
+        self.conn.execute(
+            "INSERT INTO asr_events (ts, role, text, emotion) VALUES (?, ?, ?, ?)",
+            (ts, role, text, emotion),
+        )
+
+    def record_emotion(
+        self, *, ts: int, value: float | None = None, label: str | None = None
+    ) -> None:
+        self.conn.execute(
+            "INSERT INTO emotions (ts, value, label) VALUES (?, ?, ?)",
+            (ts, value, label),
+        )
+
+    def record_face(
+        self,
+        *,
+        ts: int,
+        count: int,
+        smile_count: int = 0,
+        capture_path: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            "INSERT INTO faces (ts, count, smile_count, capture_path) "
+            "VALUES (?, ?, ?, ?)",
+            (ts, count, smile_count, capture_path),
+        )
+
+    def record_thought(
+        self, *, ts: int, text: str, emotion: str | None = None
+    ) -> None:
+        self.conn.execute(
+            "INSERT INTO thoughts (ts, text, emotion) VALUES (?, ?, ?)",
+            (ts, text, emotion),
+        )
+
+    def record_sensor(
+        self,
+        *,
+        ts: int,
+        source: str,
+        key: str,
+        value_num: float | None = None,
+        value_text: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            "INSERT INTO sensors (ts, source, key, value_num, value_text) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (ts, source, key, value_num, value_text),
+        )
+
 
 def open_default() -> Database:
     db = Database(DEFAULT_DB_PATH)
