@@ -90,6 +90,7 @@ In `src/reachy_claw/config.py`, locate the `@dataclass class Config:` block (aro
     rest_window_start: str = "23:00"   # HH:MM
     rest_window_end: str = "24:00"     # HH:MM
     rest_timezone: str = "Asia/Shanghai"
+    rest_control_port: int = 18791     # ZMQ PUB port for vision-container rest control
 
     # ── Diary publishing ────────────────────────────────────────
     diary_auto_publish: bool = True
@@ -108,6 +109,7 @@ In `src/reachy_claw/config.py`, find the `KEY_MAP` dict (around line 215-230). A
     ("rest", "window_start"): "rest_window_start",
     ("rest", "window_end"): "rest_window_end",
     ("rest", "timezone"): "rest_timezone",
+    ("rest", "control_port"): "rest_control_port",
     ("diary", "auto_publish"): "diary_auto_publish",
     ("diary", "privacy_linter"): "diary_privacy_linter",
     ("diary", "site_repo_url"): "diary_site_repo_url",
@@ -127,6 +129,7 @@ rest:
   window_start: "23:00"
   window_end: "24:00"
   timezone: Asia/Shanghai
+  control_port: 18791            # ZMQ PUB port for remote vision-container rest signals
 
 # ── Diary publishing ────────────────────────────────────────────
 diary:
@@ -539,22 +542,25 @@ def test_is_in_window_24_means_end_of_day():
 
 
 @pytest.mark.asyncio
-async def test_emits_rest_start_and_rest_end():
+async def test_emits_rest_start_and_rest_end(monkeypatch):
     app = _StubApp()
     received = []
-
-    def handler(data):
-        received.append(data)
 
     app.events.subscribe("rest_start", lambda d: received.append(("start", d)))
     app.events.subscribe("rest_end", lambda d: received.append(("end", d)))
 
     plugin = RestPlugin(app)  # type: ignore[arg-type]
+    # Stub out the ZMQ control publisher so the test doesn't bind a port.
+    sent: list[str] = []
+    plugin._publish_ctrl = lambda cmd: sent.append(cmd)
+    plugin._ensure_ctrl_pub = lambda: None
+
     await plugin._enter_rest()
     await plugin._exit_rest()
 
     kinds = [r[0] for r in received]
     assert kinds == ["start", "end"]
+    assert sent == ["pause", "resume"]
 
 
 @pytest.mark.asyncio
@@ -636,6 +642,8 @@ class RestPlugin(Plugin):
         super().__init__(app)
         self._resting = False
         self._tasks: list[HousekeepingTask] = []
+        self._zmq_ctx = None
+        self._ctrl_pub = None
 
     def register_task(self, task: "HousekeepingTask") -> None:
         self._tasks.append(task)
@@ -660,11 +668,36 @@ class RestPlugin(Plugin):
             tz = ZoneInfo("UTC")
         return datetime.now(tz=tz)
 
+    def _ensure_ctrl_pub(self):
+        """Lazy-init the ZMQ PUB socket used to signal remote vision containers."""
+        if self._ctrl_pub is not None:
+            return
+        try:
+            import zmq
+        except ImportError:
+            logger.info("zmq not available; remote vision rest control disabled")
+            return
+        port = getattr(self.app.config, "rest_control_port", 18791)
+        self._zmq_ctx = zmq.Context.instance()
+        self._ctrl_pub = self._zmq_ctx.socket(zmq.PUB)
+        self._ctrl_pub.bind(f"tcp://0.0.0.0:{port}")
+        logger.info("Rest control PUB bound on tcp://0.0.0.0:%d", port)
+
+    def _publish_ctrl(self, cmd: str) -> None:
+        if self._ctrl_pub is None:
+            return
+        try:
+            self._ctrl_pub.send_json({"cmd": cmd})
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to publish ctrl %s: %s", cmd, e)
+
     async def _enter_rest(self) -> None:
         if self._resting:
             return
         self._resting = True
         logger.info("Entering rest window")
+        self._ensure_ctrl_pub()
+        self._publish_ctrl("pause")
         self.app.events.emit("rest_start", {"started_at": int(time.time())})
         # Run housekeeping tasks sequentially in the background.
         asyncio.create_task(self._run_housekeeping())
@@ -674,6 +707,7 @@ class RestPlugin(Plugin):
             return
         self._resting = False
         logger.info("Exiting rest window")
+        self._publish_ctrl("resume")
         self.app.events.emit("rest_end", {"ended_at": int(time.time())})
 
     async def _run_housekeeping(self) -> None:
@@ -1613,7 +1647,110 @@ git commit -m "feat(plugins): pause/resume vision + motion on rest events"
 
 ---
 
-## Task 11: Dashboard SETTINGS tab — UI
+## Task 11: Vision containers — ZMQ control subscriber
+
+**Files:**
+- Modify: `deploy/vision-hailo/producer.py`
+- Modify: `deploy/vision-hailo/docker-compose.yml`
+- Modify: `deploy/vision-stub/producer.py`
+- Modify: `deploy/vision-stub/docker-compose.yml`
+
+Each vision producer opens a `SUB` socket connecting to `tcp://<reachy_host>:18791` (env `REST_CTRL_URL`), polls non-blocking each iteration, and gates the camera-read + inference body on a `paused` flag.
+
+These changes ship in the deploy/ directory and apply when the vision containers are next rebuilt + redeployed. They are **not** exercised by clawd-reachy-mini's pytest suite (they run in a different container), so verification is via the manual E2E in Task 12.
+
+- [ ] **Step 11.1: Patch `deploy/vision-hailo/producer.py`**
+
+Find the imports near the top (around `import zmq`) and add a small helper. Then in `_capture_loop`, add a control SUB socket and a `paused` flag.
+
+In the imports section, no new imports needed (zmq already imported).
+
+After the existing `pub = ctx.socket(zmq.PUB)` / `pub.bind(...)` block, add:
+
+```python
+    # Optional rest-control subscriber: when Reachy emits {"cmd":"pause"} we stop
+    # camera reads + inference and emit nothing. {"cmd":"resume"} re-enables.
+    rest_ctrl_url = os.environ.get("REST_CTRL_URL", "").strip()
+    ctrl_sub = None
+    poller = None
+    if rest_ctrl_url:
+        ctrl_sub = ctx.socket(zmq.SUB)
+        ctrl_sub.connect(rest_ctrl_url)
+        ctrl_sub.setsockopt(zmq.SUBSCRIBE, b"")
+        poller = zmq.Poller()
+        poller.register(ctrl_sub, zmq.POLLIN)
+        logger.info(f"Rest control SUB connected to {rest_ctrl_url}")
+
+    paused = False
+```
+
+Inside the `while True:` body, at the very top (before `cap.read()`), add:
+
+```python
+            # Drain any pending control messages.
+            if poller is not None:
+                while True:
+                    socks = dict(poller.poll(timeout=0))
+                    if ctrl_sub not in socks:
+                        break
+                    try:
+                        msg = ctrl_sub.recv_json(flags=zmq.NOBLOCK)
+                    except zmq.Again:
+                        break
+                    cmd = msg.get("cmd")
+                    if cmd == "pause":
+                        if not paused:
+                            logger.info("REST: pausing inference")
+                        paused = True
+                    elif cmd == "resume":
+                        if paused:
+                            logger.info("REST: resuming inference")
+                        paused = False
+
+            if paused:
+                time.sleep(0.5)
+                continue
+```
+
+- [ ] **Step 11.2: Add env var to `deploy/vision-hailo/docker-compose.yml`**
+
+In the `environment:` block of the producer service, add:
+
+```yaml
+      REST_CTRL_URL: tcp://reachy:18791
+```
+
+(`reachy` is the Docker service / host name where clawd-reachy-mini runs. If your network configures it differently, set this env to the actual host:port reachable from inside the vision container.)
+
+- [ ] **Step 11.3: Same patch on `deploy/vision-stub/producer.py`**
+
+Apply the identical changes to vision-stub's `producer.py`. (vision-stub is the simpler placeholder producer used when no real camera/NPU is connected; it should respect the same protocol so dashboards behave consistently.)
+
+If vision-stub's producer is structurally different, adapt: the contract is "if `REST_CTRL_URL` is set, open a SUB, gate the main loop on `paused`, log entry/exit".
+
+- [ ] **Step 11.4: Same env in `deploy/vision-stub/docker-compose.yml`**
+
+Same `REST_CTRL_URL: tcp://reachy:18791` line.
+
+- [ ] **Step 11.5: Smoke test — producers parse**
+
+```bash
+python -c "import ast; ast.parse(open('deploy/vision-hailo/producer.py').read())" && echo OK
+python -c "import ast; ast.parse(open('deploy/vision-stub/producer.py').read())" && echo OK
+```
+
+Expected: both `OK`. (Producers don't run on the host normally; runtime verification is in Task 13's manual E2E.)
+
+- [ ] **Step 11.6: Commit**
+
+```bash
+git add deploy/vision-hailo/producer.py deploy/vision-hailo/docker-compose.yml deploy/vision-stub/producer.py deploy/vision-stub/docker-compose.yml
+git commit -m "feat(vision): subscribe to rest control via ZMQ; pause inference during rest"
+```
+
+---
+
+## Task 12: Dashboard SETTINGS tab — UI
 
 **Files:**
 - Modify: `src/reachy_claw/plugins/dashboard_static/index.html`
@@ -1621,7 +1758,7 @@ git commit -m "feat(plugins): pause/resume vision + motion on rest events"
 - Create: `src/reachy_claw/plugins/dashboard_static/settings.js`
 - Create: `src/reachy_claw/plugins/dashboard_static/settings.css`
 
-- [ ] **Step 11.1: Read existing tab structure**
+- [ ] **Step 12.1: Read existing tab structure**
 
 ```bash
 grep -n "tab\|LIVE\|DIARY" src/reachy_claw/plugins/dashboard_static/index.html | head
@@ -1630,7 +1767,7 @@ grep -n "tab\|setActiveTab" src/reachy_claw/plugins/dashboard_static/app.js | he
 
 Note the existing tab markup pattern + click handler.
 
-- [ ] **Step 11.2: Add SETTINGS tab to index.html**
+- [ ] **Step 12.2: Add SETTINGS tab to index.html**
 
 In `index.html`, find the tab nav block (where LIVE / DIARY are defined). Add a third button:
 
@@ -1648,7 +1785,7 @@ Find the tab container area and add:
 
 Also add `<link rel="stylesheet" href="settings.css">` and `<script type="module" src="settings.js"></script>` near the existing CSS/JS includes.
 
-- [ ] **Step 11.3: Wire tab switching in app.js**
+- [ ] **Step 12.3: Wire tab switching in app.js**
 
 Find the existing tab switch logic (likely a `setActiveTab(name)` function or a click handler). Extend it so `data-tab="settings"` shows `#settings-page` and triggers `window.renderSettings(document.getElementById('settings-root'))` once on first activation. Pattern (adapt to existing code):
 
@@ -1660,7 +1797,7 @@ if (tab === 'settings' && !window._settingsRendered) {
 }
 ```
 
-- [ ] **Step 11.4: Implement settings.js with section registry**
+- [ ] **Step 12.4: Implement settings.js with section registry**
 
 ```js
 // src/reachy_claw/plugins/dashboard_static/settings.js
@@ -1811,7 +1948,7 @@ window.renderSettings = function(root) {
 };
 ```
 
-- [ ] **Step 11.5: Implement settings.css**
+- [ ] **Step 12.5: Implement settings.css**
 
 ```css
 /* src/reachy_claw/plugins/dashboard_static/settings.css */
@@ -1857,7 +1994,7 @@ window.renderSettings = function(root) {
 .diary-history button:disabled { opacity: 0.5; cursor: wait; }
 ```
 
-- [ ] **Step 11.6: Manual smoke check**
+- [ ] **Step 12.6: Manual smoke check**
 
 There are no automated tests for static UI in this project — verify manually:
 
@@ -1878,7 +2015,7 @@ ls -la src/reachy_claw/plugins/dashboard_static/settings.{js,css}
 grep -c "settings.js\|settings.css" src/reachy_claw/plugins/dashboard_static/index.html  # expect 2
 ```
 
-- [ ] **Step 11.7: Commit**
+- [ ] **Step 12.7: Commit**
 
 ```bash
 git add src/reachy_claw/plugins/dashboard_static/settings.js src/reachy_claw/plugins/dashboard_static/settings.css src/reachy_claw/plugins/dashboard_static/index.html src/reachy_claw/plugins/dashboard_static/app.js
@@ -1887,9 +2024,9 @@ git commit -m "feat(dashboard): SETTINGS tab with rest + diary sections + histor
 
 ---
 
-## Task 12: Final integration + manual end-to-end
+## Task 13: Final integration + manual end-to-end
 
-- [ ] **Step 12.1: Run the full test suite**
+- [ ] **Step 13.1: Run the full test suite**
 
 ```
 uv run pytest -x --ignore=tests/test_vision_client_plugin.py
@@ -1897,7 +2034,7 @@ uv run pytest -x --ignore=tests/test_vision_client_plugin.py
 
 Expected: green (the zmq-related skip stays as before).
 
-- [ ] **Step 12.2: Manual end-to-end on a developer machine**
+- [ ] **Step 13.2: Manual end-to-end on a developer machine**
 
 This step is dispatched to a remote agent or run manually — not from the main dev thread:
 
@@ -1925,9 +2062,10 @@ EVIDENCE: dashboard screenshot of SETTINGS tab; backend log excerpt showing rest
 - Settings persistence via runtime-overrides → Tasks 1, 2, 7 ✓
 - Settings API → Task 7 ✓
 - Diary trigger API + WS events → Task 8 ✓
-- Dashboard SETTINGS tab + section registry + history UI → Task 11 ✓
+- Vision-container rest gating via ZMQ control → Task 11 ✓
+- Dashboard SETTINGS tab + section registry + history UI → Task 12 ✓
 - App wiring (RestPlugin registered, task registered) → Task 6 ✓
-- Manual E2E → Task 12 ✓
+- Manual E2E → Task 13 ✓
 
 **Placeholder scan:** No "TBD" / "implement later" / "add appropriate error handling" remains.
 

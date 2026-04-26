@@ -222,6 +222,18 @@ class Plugin:
 **DailyLogPlugin / DashboardPlugin**:
 - No-op. They keep working — dashboard still serves UI, daily log still records the rest event itself.
 
+### Remote vision containers (vision-hailo, vision-stub)
+
+The vision producers run in separate Docker containers (different process, different host possibly) and can't share the in-process EventBus. They subscribe to a **ZMQ control topic** that mirrors the local rest events:
+
+- **RestPlugin opens a ZMQ PUB socket** on `tcp://0.0.0.0:18791` (configurable via `app.config.rest_control_port`, default `18791`).
+- On `_enter_rest()` / `_exit_rest()`, it sends a JSON message: `{"cmd": "pause"}` / `{"cmd": "resume"}`.
+- Each vision producer's main loop opens a `SUB` socket connecting to `tcp://<reachy_host>:18791` (env `REST_CTRL_URL`), polls non-blocking each iteration; if `pause` received, the producer skips camera read + inference and emits no detections until `resume`.
+
+This makes vision containers symmetric with in-process plugins ("subscribe to rest events, gate the hot loop"). Frees the NPU during housekeeping (relevant for future cover-image generation tasks). Container code change is small (~30 lines per producer) and isolated.
+
+A new config field `rest_control_port` (default `18791`) is added to `Config` and to the `rest:` yaml section. Producers default to `tcp://reachy:18791` (or whatever the producer container's network resolves to); operationally configured via `REST_CTRL_URL` env in `docker-compose.yml`.
+
 ## Dashboard API
 
 ### Settings endpoints
@@ -342,6 +354,10 @@ Clicking a button:
 - `src/reachy_claw/plugins/dashboard_static/index.html` — SETTINGS tab
 - `src/reachy_claw/plugins/dashboard_static/app.js` — tab switching wiring
 - `src/reachy_claw/app.py` — register `RestPlugin` and add `DiaryGenerateAndPublishTask`
+- `deploy/vision-hailo/producer.py` — ZMQ SUB control + paused flag gating the main loop
+- `deploy/vision-hailo/docker-compose.yml` — add `REST_CTRL_URL` env
+- `deploy/vision-stub/producer.py` — same ZMQ SUB control
+- `deploy/vision-stub/docker-compose.yml` — same env
 
 ## Implementation Order
 
