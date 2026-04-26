@@ -49,6 +49,23 @@ class HailoSharedInference:
         for model in self.models.values():
             model.set_batch_size(batch_size)
 
+        # Cache output buffers and quantization info per HEF (one-time allocation)
+        self._output_buffers = {}
+        self._quant_info = {}
+        for path, hef in self.hefs.items():
+            model = self.models[path]
+            self._output_buffers[path] = {}
+            self._quant_info[path] = {}
+            for info in hef.get_output_vstream_infos():
+                # Pre-allocate UINT8 output buffer (Hailo quantized outputs)
+                self._output_buffers[path][info.name] = np.empty(
+                    model.output(info.name).shape, dtype=np.uint8
+                )
+                # Cache quantization parameters for dequantization
+                qi_list = model.output(info.name).quant_infos
+                if qi_list:
+                    self._quant_info[path][info.name] = qi_list[0]
+
         logger.info(f"Loaded {len(hef_paths)} HEFs on shared VDevice")
         for path, hef in self.hefs.items():
             shape = hef.get_input_vstream_infos()[0].shape
@@ -65,31 +82,35 @@ class HailoSharedInference:
             frame: Preprocessed input frame (matches HEF input shape).
 
         Returns:
-            Dict of output_name -> numpy array.
+            Dict of output_name -> dequantized float32 numpy array.
         """
         model = self.models[hef_path]
-        hef = self.hefs[hef_path]
 
         with model.configure() as configured_model:
-            # Create output buffers
-            output_buffers = {}
-            for info in hef.get_output_vstream_infos():
-                dtype_str = str(info.format.type).split(".")[-1].lower()
-                dtype = getattr(np, dtype_str)
-                output_buffers[info.name] = np.empty(
-                    model.output(info.name).shape, dtype=dtype
-                )
-
-            bindings = configured_model.create_bindings(output_buffers=output_buffers)
+            # Bind pre-allocated output buffers (filled in-place by SDK)
+            bindings = configured_model.create_bindings(
+                output_buffers=self._output_buffers[hef_path]
+            )
             bindings.input().set_buffer(frame)
 
+            # Real callback signals completion (fixes 5s timeout bug)
+            done = {"info": None}
+            def callback(completion_info=None):
+                done["info"] = completion_info
+
             configured_model.wait_for_async_ready(timeout_ms=5000)
-            job = configured_model.run_async([bindings], lambda c, b, _: None)
+            job = configured_model.run_async([bindings], callback)
             job.wait(5000)
 
+            # Dequantize UINT8 outputs to float32
             results = {}
-            for name in bindings._output_names:
-                results[name] = bindings.output(name).get_buffer()
+            for name, raw in self._output_buffers[hef_path].items():
+                qi = self._quant_info[hef_path].get(name)
+                if qi is not None:
+                    results[name] = (raw.astype(np.float32) - qi.qp_zp) * qi.qp_scale
+                else:
+                    # No quant info (unlikely for quantized HEF) — return raw
+                    results[name] = raw.astype(np.float32)
 
             return results
 
@@ -148,13 +169,26 @@ class SCRFDPostprocessor:
                         if score < self.conf_threshold:
                             continue
 
-                        # Decode bbox
+                        # Decode bbox (SCRFD anchor-based: dx, dy, dw, dh)
                         if len(bbox_data.shape) == 3:
                             idx = a * 4
-                            cx = (x * stride + float(bbox_data[y, x, idx])) * stride
-                            cy = (y * stride + float(bbox_data[y, x, idx + 1])) * stride
-                            bw = float(bbox_data[y, x, idx + 2]) * stride * 4
-                            bh = float(bbox_data[y, x, idx + 3]) * stride * 4
+                            # Anchor position at grid cell center
+                            anchor_x = (x + 0.5) * stride
+                            anchor_y = (y + 0.5) * stride
+                            # bbox values are deltas after dequantization
+                            dx = float(bbox_data[y, x, idx])
+                            dy = float(bbox_data[y, x, idx + 1])
+                            dw = float(bbox_data[y, x, idx + 2])
+                            dh = float(bbox_data[y, x, idx + 3])
+                            # Clamp dw/dh to prevent exp overflow (values typically in [-2, 2])
+                            dw = max(-2.0, min(2.0, dw))
+                            dh = max(-2.0, min(2.0, dh))
+                            # Decode: cx/cy = anchor + delta, w/h = exp(delta) * anchor_size
+                            cx = anchor_x + dx * stride
+                            cy = anchor_y + dy * stride
+                            # anchor size typically 4x stride for SCRFD 2.5g
+                            bw = np.exp(dw) * stride * 4
+                            bh = np.exp(dh) * stride * 4
                         else:
                             cx = (x + 0.5) * stride
                             cy = (y + 0.5) * stride
@@ -247,8 +281,11 @@ class EmotionClassifier:
         self.classes = classes
 
     def classify(self, output: np.ndarray) -> tuple[str, float]:
-        """Return (emotion, confidence) from UINT8 softmax output."""
-        probs = output.flatten().astype(np.float32) / 255.0
+        """Return (emotion, confidence) from dequantized softmax output."""
+        probs = output.flatten().astype(np.float32)
+        # After dequantization, values are already in valid range
+        # Clamp to [0, 1] for safety
+        probs = np.clip(probs, 0.0, 1.0)
         idx = int(np.argmax(probs))
         return self.classes[idx], float(probs[idx])
 
