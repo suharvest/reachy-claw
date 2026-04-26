@@ -49,6 +49,15 @@ class HailoSharedInference:
         for model in self.models.values():
             model.set_batch_size(batch_size)
 
+        # Configure each model ONCE at init (not per-frame) — major perf win
+        self._configured_models = {}
+        self._configure_ctxs = {}
+        for path, model in self.models.items():
+            ctx = model.configure()
+            configured = ctx.__enter__()
+            self._configured_models[path] = configured
+            self._configure_ctxs[path] = ctx
+
         # Cache output buffers and quantization info per HEF (one-time allocation)
         self._output_buffers = {}
         self._quant_info = {}
@@ -84,37 +93,42 @@ class HailoSharedInference:
         Returns:
             Dict of output_name -> dequantized float32 numpy array.
         """
-        model = self.models[hef_path]
+        configured_model = self._configured_models[hef_path]
 
-        with model.configure() as configured_model:
-            # Bind pre-allocated output buffers (filled in-place by SDK)
-            bindings = configured_model.create_bindings(
-                output_buffers=self._output_buffers[hef_path]
-            )
-            bindings.input().set_buffer(frame)
+        # Bind pre-allocated output buffers (filled in-place by SDK)
+        bindings = configured_model.create_bindings(
+            output_buffers=self._output_buffers[hef_path]
+        )
+        bindings.input().set_buffer(frame)
 
-            # Real callback signals completion (fixes 5s timeout bug)
-            done = {"info": None}
-            def callback(completion_info=None):
-                done["info"] = completion_info
+        # Real callback signals completion (fixes 5s timeout bug)
+        done = {"info": None}
+        def callback(completion_info=None):
+            done["info"] = completion_info
 
-            configured_model.wait_for_async_ready(timeout_ms=5000)
-            job = configured_model.run_async([bindings], callback)
-            job.wait(5000)
+        configured_model.wait_for_async_ready(timeout_ms=5000)
+        job = configured_model.run_async([bindings], callback)
+        job.wait(5000)
 
-            # Dequantize UINT8 outputs to float32
-            results = {}
-            for name, raw in self._output_buffers[hef_path].items():
-                qi = self._quant_info[hef_path].get(name)
-                if qi is not None:
-                    results[name] = (raw.astype(np.float32) - qi.qp_zp) * qi.qp_scale
-                else:
-                    # No quant info (unlikely for quantized HEF) — return raw
-                    results[name] = raw.astype(np.float32)
+        # Dequantize UINT8 outputs to float32
+        results = {}
+        for name, raw in self._output_buffers[hef_path].items():
+            qi = self._quant_info[hef_path].get(name)
+            if qi is not None:
+                results[name] = (raw.astype(np.float32) - qi.qp_zp) * qi.qp_scale
+            else:
+                # No quant info (unlikely for quantized HEF) — return raw
+                results[name] = raw.astype(np.float32)
 
-            return results
+        return results
 
     def shutdown(self) -> None:
+        # Exit configure contexts first (clean resource release)
+        for path, ctx in self._configure_ctxs.items():
+            try:
+                ctx.__exit__(None, None, None)
+            except Exception:
+                pass
         self.target.release()
 
 
