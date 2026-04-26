@@ -5,14 +5,97 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from ..plugin import Plugin
 
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "dashboard_static"
+
+# ── Markdown Diary Parser ─────────────────────────────────────────────────────
+
+_FRONT_MATTER_RE = re.compile(r"^---\n(.*?)\n---\n(.*)$", re.DOTALL)
+
+# Map Chinese headings to front-end section IDs
+_HEADING_TO_ID = {
+    "今天的心情": "mood_curve",
+    "遇到的人": "faces",
+    "想到的事": "thoughts",
+    "summary": "summary",
+    "mood_curve": "mood_curve",
+    "conversations": "conversations",
+    "faces": "faces",
+    "thoughts": "thoughts",
+    "environment": "environment",
+}
+
+
+def _parse_diary_markdown(md: str) -> dict:
+    """Parse Markdown diary with YAML front matter into JSON shape for front-end.
+
+    Front-end expects:
+        {
+          "title": str,
+          "date": str,
+          "sections": [{"id": str, "type": str, "content": str, "heading": str}]
+        }
+
+    Sections are extracted from ## headings in the body.
+    """
+    m = _FRONT_MATTER_RE.match(md)
+    if not m:
+        return {"title": "", "date": "", "sections": []}
+    front = yaml.safe_load(m.group(1)) or {}
+    body = m.group(2)
+
+    # Split on '## ' headings
+    sections = []
+    current_content = []
+    current_heading = ""
+    for line in body.splitlines():
+        if line.startswith("## "):
+            # Save previous section if it has content
+            if current_heading or current_content:
+                content_text = "\n".join(current_content).strip()
+                heading_text = current_heading[3:].strip() if current_heading.startswith("## ") else current_heading.strip()
+                # Map heading to ID, default to heading text lowercased
+                section_id = _HEADING_TO_ID.get(heading_text, heading_text.lower().replace(" ", "_"))
+                sections.append({
+                    "id": section_id,
+                    "heading": heading_text,
+                    "type": "narrative",
+                    "content": content_text,
+                })
+            current_heading = line
+            current_content = []
+        else:
+            current_content.append(line)
+
+    # Final section
+    if current_heading or current_content:
+        content_text = "\n".join(current_content).strip()
+        heading_text = current_heading[3:].strip() if current_heading.startswith("## ") else current_heading.strip()
+        section_id = _HEADING_TO_ID.get(heading_text, heading_text.lower().replace(" ", "_"))
+        sections.append({
+            "id": section_id,
+            "heading": heading_text,
+            "type": "narrative",
+            "content": content_text,
+        })
+
+    return {
+        "title": front.get("title", ""),
+        "date": front.get("date", ""),
+        "weather": front.get("weather"),
+        "stats": front.get("stats"),
+        "captures": front.get("captures", []),
+        "sections": sections,
+    }
 
 
 class DashboardPlugin(Plugin):
@@ -199,42 +282,24 @@ class DashboardPlugin(Plugin):
         return web.FileResponse(index_path)
 
     async def _handle_diary_list(self, request):
-        """Return list of available diary dates, sorted descending."""
+        """Return list of available diary dates from SQLite, sorted descending."""
         from aiohttp import web
 
-        diary_dir = self._diary_dir()
-        if not diary_dir.exists():
-            return web.json_response({"dates": []})
-
-        dates = sorted(
-            [f.stem for f in diary_dir.glob("*.json") if f.stem[:4].isdigit()],
-            reverse=True,
-        )
+        dates = self.app.db.list_diary_dates()
         return web.json_response({"dates": dates})
 
     async def _handle_diary_get(self, request):
-        """Return diary JSON for a specific date."""
+        """Return diary parsed from Markdown in SQLite for a specific date."""
         from aiohttp import web
 
         date = request.match_info["date"]
-        diary_dir = self._diary_dir()
-
-        if date == "latest":
-            files = sorted(diary_dir.glob("*.json"), reverse=True) if diary_dir.exists() else []
-            if not files:
-                return web.json_response({"error": "No diaries found"}, status=404)
-            filepath = files[0]
-        else:
-            filepath = diary_dir / f"{date}.json"
-
-        if not filepath.exists():
+        row = self.app.db.get_diary(date)
+        if row is None:
             return web.json_response({"error": f"No diary for {date}"}, status=404)
-
-        try:
-            data = json.loads(filepath.read_text(encoding="utf-8"))
-            return web.json_response(data)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        parsed = _parse_diary_markdown(row["markdown"])
+        parsed["date"] = date
+        parsed["generated_at"] = row["generated_at"]
+        return web.json_response(parsed)
 
     async def _handle_ws(self, request):
         from aiohttp import web

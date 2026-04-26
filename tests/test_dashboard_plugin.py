@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from reachy_claw.app import ReachyClawApp
 from reachy_claw.config import Config
 from reachy_claw.event_bus import EventBus
+from reachy_claw.storage.db import Database
 
 
 @pytest.fixture
@@ -170,3 +172,122 @@ async def test_broadcast_removes_dead_clients(dashboard_app):
 
     assert dead_ws not in plugin._ws_clients
     assert good_ws in plugin._ws_clients
+
+
+# ── Diary SQLite Endpoints Tests ─────────────────────────────────────────────
+
+
+@pytest.fixture
+def diary_db(tmp_path: Path):
+    """Create a temp DB with a diary row for testing."""
+    from reachy_claw.storage.db import Database
+
+    db = Database(tmp_path / "diary_test.db")
+    db.init()
+    db.save_diary(
+        date="2026-04-26",
+        markdown=(
+            "---\n"
+            "title: \"A Day of Interactions\"\n"
+            "date: 2026-04-26\n"
+            "stats: {conversations: 3, faces_seen: 5, smiles: 2}\n"
+            "captures: []\n"
+            "meta: {llm_model: mock, prompt_version: v1}\n"
+            "---\n\n"
+            "## 今天的心情\n\n今天平静而充实。\n\n"
+            "## 遇到的人\n\n来过几位朋友。\n\n"
+            "## 想到的事\n\n我想了一下世界的样子。\n"
+        ),
+        llm_model="mock",
+        prompt_version="v1",
+    )
+    yield db
+    db.close()
+
+
+@pytest.fixture
+def diary_dashboard_app(diary_db: Database, mock_reachy):
+    """Create a ReachyClawApp with diary DB attached."""
+    config = Config(
+        standalone_mode=True,
+        dashboard_enabled=True,
+        dashboard_port=0,
+        enable_face_tracker=False,
+        enable_motion=False,
+        tts_backend="none",
+        stt_backend="whisper",
+    )
+    app = ReachyClawApp(config)
+    app.reachy = mock_reachy
+    app.db = diary_db
+    return app
+
+
+@pytest.mark.asyncio
+async def test_diary_endpoint_returns_sqlite_diary(diary_dashboard_app, diary_db):
+    """Test that diary endpoint reads from SQLite and parses Markdown correctly."""
+    from aiohttp import web
+    from aiohttp.test_utils import AioHTTPTestCase, unittest_run_loop
+    from reachy_claw.plugins.dashboard_plugin import DashboardPlugin
+
+    # Create plugin and spin up a test server
+    plugin = DashboardPlugin(diary_dashboard_app)
+
+    # Build a minimal aiohttp app with just the diary handlers
+    test_app = web.Application()
+    test_app.router.add_get("/api/diaries", plugin._handle_diary_list)
+    test_app.router.add_get("/api/diary/{date}", plugin._handle_diary_get)
+
+    # Use aiohttp test client
+    from aiohttp.test_utils import TestClient, TestServer
+
+    server = TestServer(test_app)
+    client = TestClient(server)
+
+    await client.start_server()
+    try:
+        # Test list endpoint
+        resp = await client.get("/api/diaries")
+        assert resp.status == 200
+        data = await resp.json()
+        assert "dates" in data
+        assert "2026-04-26" in data["dates"]
+
+        # Test get endpoint
+        resp = await client.get("/api/diary/2026-04-26")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["date"] == "2026-04-26"
+        assert body["title"] == "A Day of Interactions"
+        # Front-end expects sections with 'id' field mapped from heading
+        sections = body.get("sections", [])
+        assert len(sections) >= 1
+        # Check that Chinese heading content is preserved
+        found_mood = any("今天的心情" in s.get("content", "") or "今天的心情" in s.get("heading", "") for s in sections)
+        assert found_mood, "Parser should preserve section content from '## 今天的心情'"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_diary_endpoint_404_for_missing_date(diary_dashboard_app):
+    """Test that missing diary returns 404."""
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+    from reachy_claw.plugins.dashboard_plugin import DashboardPlugin
+
+    plugin = DashboardPlugin(diary_dashboard_app)
+    test_app = web.Application()
+    test_app.router.add_get("/api/diary/{date}", plugin._handle_diary_get)
+
+    server = TestServer(test_app)
+    client = TestClient(server)
+
+    await client.start_server()
+    try:
+        resp = await client.get("/api/diary/2026-04-25")
+        assert resp.status == 404
+        body = await resp.json()
+        assert "error" in body
+    finally:
+        await client.close()
