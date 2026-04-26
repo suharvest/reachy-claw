@@ -1,310 +1,134 @@
 #!/usr/bin/env python3
-"""Generate a daily diary from interaction logs using LLM.
+"""Generate the daily diary as Markdown with Hugo front matter and store it.
 
-Collects the day's data via collect_daily_data.py, sends it to an LLM
-with a diary generation prompt, and saves the result as a JSON file.
+Reads events from SQLite for a given date, asks the LLM to compose a first-person
+Markdown diary using fixed section headings, and saves the result to the
+`diaries` table. A mock mode (DIARY_LLM_MOCK=1) returns a deterministic Markdown
+shell — used in tests and dry runs.
 
 Usage:
-    python generate_diary.py [--date YYYY-MM-DD] [--gateway-url URL]
+    uv run python scripts/generate_diary.py --date 2026-04-26 [--db PATH] [--force]
 """
+
+from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
-# Add parent dir to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
-from collect_daily_data import collect
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
 
+from reachy_claw.storage.db import Database  # noqa: E402
 
-DEFAULT_DIARY_PROMPT = """\
-You are Reachy Mini, a small humanoid robot. Write your daily diary based on \
-the interaction data provided below.
+PROMPT_VERSION = "v1"
+DEFAULT_MODEL = "dashscope/kimi-k2.5"
 
-Structure your response as a JSON object with the following schema:
-{{
-  "title": "A short, evocative title for the day (5-8 words)",
-  "sections": [
-    {{
-      "id": "summary",
-      "type": "narrative",
-      "content": "2-3 sentence overview of the day, first person, warm tone"
-    }},
-    {{
-      "id": "mood_curve",
-      "type": "chart",
-      "content": "Reflect on your emotional journey today in 1-2 sentences",
-      "data": [chart data from input, pass through as-is]
-    }},
-    {{
-      "id": "conversations",
-      "type": "highlights",
-      "content": "Brief intro to your conversations",
-      "items": [pick 2-3 most interesting conversations from the data]
-    }},
-    {{
-      "id": "faces",
-      "type": "stats",
-      "content": "Reflect on the people you met, 1-2 sentences",
-      "data": [face stats from input, pass through]
-    }},
-    {{
-      "id": "thoughts",
-      "type": "highlights",
-      "content": "Brief intro to your deeper thoughts",
-      "items": [pick 2-3 most interesting thoughts/observations]
-    }}
-  ]
-}}
+SYSTEM_PROMPT = """You are Reachy Mini, a small humanoid robot. Write today's diary as Markdown with YAML front matter, in a warm reflective first-person tone.
 
-Guidelines:
-- Write in first person as Reachy Mini
-- Be warm, reflective, and slightly philosophical
-- Reference specific data points naturally (don't just list numbers)
-- If there's little data, write a shorter, more introspective diary
-- Keep each section's content to 1-3 sentences
-- Output ONLY valid JSON, no markdown fences
-
-Today's interaction data:
-{data}
+Rules:
+- Never quote user speech verbatim. Paraphrase what was said and discussed.
+- Never include personal identifiers (names, addresses, phone numbers) from ASR.
+- Use exactly these section headings, in this order: "## 今天的心情", "## 遇到的人", "## 想到的事".
+- Front matter must include: title, date, weather (object), stats (object), captures (list), meta (object with llm_model and prompt_version).
+- Output ONLY the Markdown document. No code fences, no commentary.
 """
 
 
-async def generate_diary_via_gateway(
-    collected_data: dict,
-    gateway_url: str = "ws://127.0.0.1:18790/desktop-robot",
-    prompt_template: str = DEFAULT_DIARY_PROMPT,
-) -> dict:
-    """Generate diary by sending data to OpenClaw gateway."""
-    import aiohttp
-
-    data_str = json.dumps(collected_data, ensure_ascii=False, indent=2)
-    prompt = prompt_template.format(data=data_str)
-
-    # Simple WebSocket request to gateway
-    async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(gateway_url) as ws:
-            # Send as a chat message
-            await ws.send_json({
-                "type": "chat",
-                "message": prompt,
-                "options": {"temperature": 0.7},
-            })
-
-            # Collect streaming response
-            full_text = ""
-            async for msg in ws:
-                if msg.type == aiohttp.WSMsgType.TEXT:
-                    data = json.loads(msg.data)
-                    if data.get("type") == "delta":
-                        full_text += data.get("text", "")
-                    elif data.get("type") == "end":
-                        full_text = data.get("full_text", full_text)
-                        break
-                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                    break
-
-    return _parse_diary_response(full_text, collected_data)
+def _build_user_prompt(date: str, events: dict) -> str:
+    return (
+        f"Date: {date}\n"
+        f"Events as JSON (paraphrase only, never quote):\n{json.dumps(events, ensure_ascii=False)}\n"
+    )
 
 
-async def generate_diary_via_ollama(
-    collected_data: dict,
-    base_url: str = "http://localhost:11434",
-    model: str = "qwen3.5:4b",
-    prompt_template: str = DEFAULT_DIARY_PROMPT,
-) -> dict:
-    """Generate diary using local Ollama API."""
-    import aiohttp
-
-    data_str = json.dumps(collected_data, ensure_ascii=False, indent=2)
-    prompt = prompt_template.format(data=data_str)
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            f"{base_url}/api/generate",
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.7},
-            },
-            timeout=aiohttp.ClientTimeout(total=120),
-        ) as resp:
-            result = await resp.json()
-            text = result.get("response", "")
-
-    return _parse_diary_response(text, collected_data)
+def _mock_markdown(date: str, events: dict) -> str:
+    n_asr = len(events.get("asr_events", []))
+    n_faces = sum(r.get("count", 0) for r in events.get("faces", []))
+    smiles = sum(r.get("smile_count", 0) for r in events.get("faces", []))
+    return (
+        "---\n"
+        f"title: \"A Day on {date}\"\n"
+        f"date: {date}\n"
+        "weather: {condition: \"unknown\"}\n"
+        f"stats: {{conversations: {n_asr}, faces_seen: {n_faces}, smiles: {smiles}}}\n"
+        "captures: []\n"
+        f"meta: {{llm_model: \"mock\", prompt_version: \"{PROMPT_VERSION}\"}}\n"
+        "---\n\n"
+        "## 今天的心情\n\n今天平静而充实。\n\n"
+        "## 遇到的人\n\n来过几位朋友，我用微笑回应了他们。\n\n"
+        "## 想到的事\n\n我想了一下世界的样子。\n"
+    )
 
 
-def _parse_diary_response(text: str, collected_data: dict) -> dict:
-    """Parse LLM response into diary JSON structure."""
-    # Try to extract JSON from response
-    text = text.strip()
+def _call_llm(date: str, events: dict, model: str) -> str:
+    """Real LLM call. In production this dispatches to OpenClaw or dashscope.
 
-    # Remove markdown fences if present
-    if text.startswith("```"):
-        lines = text.split("\n")
-        # Remove first and last fence lines
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        text = "\n".join(lines)
-
-    try:
-        diary = json.loads(text)
-    except json.JSONDecodeError:
-        # Try to find JSON object in the text
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start >= 0 and end > start:
-            try:
-                diary = json.loads(text[start:end])
-            except json.JSONDecodeError:
-                # Fallback: create minimal diary
-                diary = {
-                    "title": f"Day of {collected_data['date']}",
-                    "sections": [
-                        {
-                            "id": "summary",
-                            "type": "narrative",
-                            "content": text[:500] if text else "A quiet day with little to report.",
-                        }
-                    ],
-                }
-        else:
-            diary = {
-                "title": f"Day of {collected_data['date']}",
-                "sections": [
-                    {
-                        "id": "summary",
-                        "type": "narrative",
-                        "content": text[:500] if text else "A quiet day with little to report.",
-                    }
-                ],
-            }
-
-    # Ensure required fields
-    date = collected_data["date"]
-    diary.setdefault("version", 1)
-    diary["date"] = date
-    diary["generated_at"] = datetime.now().isoformat(timespec="seconds")
-    diary.setdefault("title", f"Day of {date}")
-    diary.setdefault("sections", [])
-
-    # Inject mood curve data if LLM didn't include it
-    mood_data = collected_data.get("mood_curve", [])
-    if mood_data:
-        has_mood = any(s.get("id") == "mood_curve" for s in diary["sections"])
-        if has_mood:
-            for s in diary["sections"]:
-                if s.get("id") == "mood_curve" and "data" not in s:
-                    s["data"] = mood_data
-        else:
-            diary["sections"].insert(1, {
-                "id": "mood_curve",
-                "type": "chart",
-                "content": "Here's how my emotions changed throughout the day.",
-                "data": mood_data,
-            })
-
-    # Inject face stats if LLM didn't include them
-    face_data = collected_data.get("faces", {})
-    if face_data.get("faces_seen", 0) > 0:
-        has_faces = any(s.get("id") == "faces" for s in diary["sections"])
-        if has_faces:
-            for s in diary["sections"]:
-                if s.get("id") == "faces" and "data" not in s:
-                    s["data"] = face_data
-        else:
-            diary["sections"].append({
-                "id": "faces",
-                "type": "stats",
-                "content": f"I saw {face_data['faces_seen']} people today.",
-                "data": face_data,
-            })
-
-    diary["meta"] = {
-        "data_sources": [
-            k for k, v in collected_data.get("raw_counts", {}).items() if v > 0
-        ],
-        "prompt_version": "v1",
-    }
-
-    return diary
-
-
-async def main_async(args):
-    collected = collect(args.date, args.log_dir)
-
-    if not collected["has_data"]:
-        print(f"No data for {args.date}, skipping diary generation.", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"Collected data for {args.date}:", file=sys.stderr)
-    print(f"  Emotions: {collected['raw_counts']['emotion_samples']}", file=sys.stderr)
-    print(f"  Conversations: {collected['raw_counts']['conversation_turns']}", file=sys.stderr)
-    print(f"  Face samples: {collected['raw_counts']['face_samples']}", file=sys.stderr)
-    print(f"  Thoughts: {collected['raw_counts']['thought_entries']}", file=sys.stderr)
-
-    if args.backend == "ollama":
-        diary = await generate_diary_via_ollama(
-            collected,
-            base_url=args.ollama_url,
-            model=args.model,
+    Implementation note: the OpenClaw CLI is invoked from the daily-diary skill
+    in production. This script supports a direct CLI bridge via the
+    DIARY_LLM_CMD env var (a shell command that reads JSON from stdin and writes
+    Markdown to stdout). This keeps the script testable and allows different
+    backends without code change.
+    """
+    cmd = os.environ.get("DIARY_LLM_CMD")
+    if not cmd:
+        raise RuntimeError(
+            "No LLM available: set DIARY_LLM_CMD or DIARY_LLM_MOCK=1"
         )
+    import subprocess
+
+    payload = json.dumps(
+        {"system": SYSTEM_PROMPT, "user": _build_user_prompt(date, events), "model": model}
+    )
+    res = subprocess.run(
+        cmd, input=payload, shell=True, capture_output=True, text=True, check=True
+    )
+    return res.stdout
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"))
+    p.add_argument(
+        "--db",
+        default=os.environ.get("DATA_DIR")
+        and str(Path(os.environ["DATA_DIR"]) / "reachy.db")
+        or str(Path.home() / ".reachy-claw" / "reachy.db"),
+    )
+    p.add_argument("--model", default=DEFAULT_MODEL)
+    p.add_argument("--force", action="store_true")
+    args = p.parse_args()
+
+    db = Database(args.db)
+    db.init()
+
+    existing = db.get_diary(args.date)
+    if existing and existing["published_at"] is not None and not args.force:
+        print(f"Already published: {args.date} (use --force to regenerate)")
+        db.close()
+        return 0
+
+    events = db.events_for_day(args.date)
+    if os.environ.get("DIARY_LLM_MOCK") == "1":
+        md = _mock_markdown(args.date, events)
+        model = "mock"
     else:
-        diary = await generate_diary_via_gateway(
-            collected,
-            gateway_url=args.gateway_url,
-        )
+        md = _call_llm(args.date, events, args.model)
+        model = args.model
 
-    # Save to diaries directory
-    diary_dir = Path.home() / ".reachy-claw" / "diaries"
-    diary_dir.mkdir(parents=True, exist_ok=True)
-    output_path = diary_dir / f"{args.date}.json"
-    output_path.write_text(
-        json.dumps(diary, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    db.save_diary(
+        date=args.date,
+        markdown=md,
+        llm_model=model,
+        prompt_version=PROMPT_VERSION,
     )
-    print(f"Diary saved to {output_path}", file=sys.stderr)
-
-    # Also output to stdout
-    json.dump(diary, sys.stdout, ensure_ascii=False, indent=2)
-    print()
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Generate daily diary via LLM")
-    parser.add_argument(
-        "--date", default=datetime.now().strftime("%Y-%m-%d"),
-        help="Date to generate diary for (YYYY-MM-DD, default: today)",
-    )
-    parser.add_argument(
-        "--log-dir", type=Path,
-        default=Path.home() / ".reachy-claw" / "daily-logs",
-        help="Daily logs directory",
-    )
-    parser.add_argument(
-        "--backend", choices=["gateway", "ollama"], default="gateway",
-        help="LLM backend to use",
-    )
-    parser.add_argument(
-        "--gateway-url", default="ws://127.0.0.1:18790/desktop-robot",
-        help="OpenClaw gateway WebSocket URL",
-    )
-    parser.add_argument(
-        "--ollama-url", default="http://localhost:11434",
-        help="Ollama API base URL",
-    )
-    parser.add_argument(
-        "--model", default="qwen3.5:4b",
-        help="Ollama model name",
-    )
-    args = parser.parse_args()
-
-    import asyncio
-    asyncio.run(main_async(args))
+    db.close()
+    print(f"Generated diary for {args.date} ({len(md)} chars)")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
