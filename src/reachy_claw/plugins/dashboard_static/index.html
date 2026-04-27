@@ -123,6 +123,7 @@
             <button class="settings-tab" data-tab="detail">Details</button>
             <button class="settings-tab" data-tab="prompt">Prompt</button>
             <button class="settings-tab" data-tab="diary">Diary</button>
+            <button class="settings-tab" data-tab="ha">HA Sensors</button>
         </div>
         <div class="settings-content">
             <div class="tab-pane active" id="tab-mode">
@@ -481,6 +482,40 @@
                     <h3>History (last 14 days)</h3>
                     <div class="face-list" id="diary-history"><div class="face-empty">Loading...</div></div>
                 </div>
+                <div class="detail-section">
+                    <h3>HA Sensors</h3>
+                    <div id="ha-entities-chips" class="ha-chips" hidden></div>
+                </div>
+            </div>
+            <div class="tab-pane" id="tab-ha">
+                <div class="detail-section">
+                    <h4>Connection</h4>
+                    <div class="setting-row">
+                        <label for="ha-url">URL</label>
+                        <input id="ha-url" type="text" placeholder="http://homeassistant.local:8123">
+                    </div>
+                    <div class="setting-row">
+                        <label for="ha-token">Token</label>
+                        <input id="ha-token" type="password" autocomplete="off">
+                        <button id="ha-token-toggle" type="button" class="btn-icon" title="Show/Hide">👁</button>
+                    </div>
+                    <div class="setting-row">
+                        <button id="ha-test-btn" type="button" class="btn">Test Connection</button>
+                        <span id="ha-test-result" class="ha-result"></span>
+                    </div>
+                </div>
+
+                <div class="detail-section">
+                    <h4>Entities</h4>
+                    <div class="setting-row">
+                        <button id="ha-refresh-btn" type="button" class="btn">Refresh List</button>
+                        <span id="ha-selection-count">0 selected of 0</span>
+                    </div>
+                    <div id="ha-entities-tree" class="ha-tree"></div>
+                    <div class="setting-row">
+                        <button id="ha-save-btn" type="button" class="btn btn-primary">Save Selection</button>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -531,5 +566,6 @@
 <script src="/static/app.js?v=10"></script>
 <script src="/static/diary.js?v=3"></script>
 <script src="/static/settings.js?v=4"></script>
+<script src="/static/ha_settings.js"></script>
 </body>
 </html>

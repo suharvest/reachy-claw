@@ -926,7 +926,9 @@ function initSettings() {
             if (tab.dataset.tab === 'prompt') loadPrompts();
             if (tab.dataset.tab === 'diary' && window.bindDiarySettings) {
                 window.bindDiarySettings();
+                renderDiaryHAChips();
             }
+            if (tab.dataset.tab === 'ha') activateHATab();
         };
     });
 
@@ -2181,6 +2183,34 @@ function initSmileGallery() {
             }
         }
     });
+}
+
+// ── HA Sensors Tab ────────────────────────────────────────────────────
+let haBound = false;
+
+async function activateHATab() {
+    if (!haBound) {
+        await window.bindHASettings();
+        haBound = true;
+    }
+    await window.refreshHAEntities();
+    await renderDiaryHAChips();
+}
+
+async function renderDiaryHAChips() {
+    const el = document.getElementById("ha-entities-chips");
+    if (!el) return;
+    try {
+        const r = await fetch("/api/settings/ha");
+        if (!r.ok) { el.hidden = true; return; }
+        const j = await r.json();
+        const ents = j.entities || [];
+        if (ents.length === 0) { el.hidden = true; return; }
+        el.hidden = false;
+        const shown = ents.slice(0, 10).map(e => `<span class="chip">${e}</span>`).join("");
+        const extra = ents.length > 10 ? ` <span class="chip-more">… (+${ents.length - 10} more)</span>` : "";
+        el.innerHTML = `<div class="ha-chips-label">Available HA entities:</div>${shown}${extra}`;
+    } catch (e) { el.hidden = true; }
 }
 
 // ── Init ────────────────────────────────────────────────────────────

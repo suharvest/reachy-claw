@@ -72,3 +72,19 @@
     border-color: var(--green);
     color: var(--green);
 }
+
+/* HA Sensors settings */
+.ha-tree { max-height: 320px; overflow-y: auto; border: 1px solid #444;
+  border-radius: 4px; padding: 8px; background: rgba(0,0,0,0.2); }
+.ha-tree details { margin: 4px 0; }
+.ha-tree summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+.ha-entity-list { padding-left: 16px; display: flex; flex-direction: column; gap: 2px; }
+.ha-entity-row { display: flex; align-items: center; gap: 6px; cursor: pointer;
+  font-family: monospace; font-size: 12px; }
+.ha-result { margin-left: 8px; font-size: 12px; }
+.ha-chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.ha-chips-label { width: 100%; font-size: 12px; opacity: 0.7; }
+.ha-chips .chip { background: rgba(255,255,255,0.1); padding: 2px 8px;
+  border-radius: 12px; font-family: monospace; font-size: 11px; }
+.ha-chips .chip-more { font-size: 11px; opacity: 0.6; }
+.btn-icon { background: none; border: none; cursor: pointer; padding: 0 4px; }
