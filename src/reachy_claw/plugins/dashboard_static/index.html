@@ -482,39 +482,54 @@
                     <h3>History (last 14 days)</h3>
                     <div class="face-list" id="diary-history"><div class="face-empty">Loading...</div></div>
                 </div>
-                <div class="detail-section">
-                    <h3>HA Sensors</h3>
-                    <div id="ha-entities-chips" class="ha-chips" hidden></div>
+                <div class="detail-section" id="ha-chips-section" hidden>
+                    <h3>HA Sensors in scope</h3>
+                    <div class="ha-chips-hint">These sensor entities will be available to the diary prompt. Configure them in the HA Sensors tab.</div>
+                    <div id="ha-entities-chips" class="ha-chips"></div>
                 </div>
             </div>
             <div class="tab-pane" id="tab-ha">
                 <div class="detail-section">
-                    <h4>Connection</h4>
-                    <div class="setting-row">
-                        <label for="ha-url">URL</label>
-                        <input id="ha-url" type="text" placeholder="http://homeassistant.local:8123">
-                    </div>
-                    <div class="setting-row">
-                        <label for="ha-token">Token</label>
-                        <input id="ha-token" type="password" autocomplete="off">
-                        <button id="ha-token-toggle" type="button" class="btn-icon" title="Show/Hide">👁</button>
-                    </div>
-                    <div class="setting-row">
-                        <button id="ha-test-btn" type="button" class="btn">Test Connection</button>
-                        <span id="ha-test-result" class="ha-result"></span>
+                    <h3>How it works</h3>
+                    <div class="ha-help">
+                        Reachy pulls sensor history from Home Assistant once per day,
+                        when the diary is generated. Selected entities (weather, room
+                        temperature, motion sensors, etc.) become context for the LLM
+                        — the diary prompt decides how to weave them in.
+                        <ol>
+                            <li>Paste your HA URL + a long-lived access token below.<br>
+                                <span class="ha-help-note">In HA: Profile → Security → Long-Lived Access Tokens → Create Token.</span></li>
+                            <li>Click <b>Test Connection</b> to verify.</li>
+                            <li>Click <b>Refresh List</b>, check the entities you want
+                                Reachy to know about, then <b>Save Selection</b>.</li>
+                            <li>That's it — they show up in tonight's diary automatically.</li>
+                        </ol>
                     </div>
                 </div>
-
                 <div class="detail-section">
-                    <h4>Entities</h4>
-                    <div class="setting-row">
-                        <button id="ha-refresh-btn" type="button" class="btn">Refresh List</button>
-                        <span id="ha-selection-count">0 selected of 0</span>
+                    <h3>Connection</h3>
+                    <div class="toggle-grid">
+                        <div class="toggle-row">
+                            <span class="toggle-label">HA URL</span>
+                            <input type="text" class="url-input" id="ha-url" placeholder="http://homeassistant.local:8123">
+                        </div>
+                        <div class="toggle-row">
+                            <span class="toggle-label">Access Token</span>
+                            <span class="ha-token-wrap">
+                                <input type="password" class="url-input" id="ha-token" autocomplete="off" placeholder="paste long-lived token">
+                                <button type="button" class="ha-token-toggle" id="ha-token-toggle" title="Show/Hide token">👁</button>
+                            </span>
+                        </div>
                     </div>
-                    <div id="ha-entities-tree" class="ha-tree"></div>
-                    <div class="setting-row">
-                        <button id="ha-save-btn" type="button" class="btn btn-primary">Save Selection</button>
-                    </div>
+                    <button class="restart-btn" id="ha-test-btn" style="margin-top: 12px;">Test Connection</button>
+                    <div class="restart-status" id="ha-test-result"></div>
+                </div>
+                <div class="detail-section">
+                    <h3>Entities <span class="ha-count" id="ha-selection-count">0 selected of 0</span></h3>
+                    <button class="restart-btn" id="ha-refresh-btn">Refresh List</button>
+                    <div id="ha-entities-tree" class="ha-tree"><div class="face-empty">Click "Refresh List" after configuring connection.</div></div>
+                    <button class="restart-btn" id="ha-save-btn" style="margin-top: 12px; background: rgba(118, 185, 0, 0.15); border-color: rgba(118, 185, 0, 0.4); color: var(--green);">Save Selection</button>
+                    <div class="restart-status" id="ha-save-status"></div>
                 </div>
             </div>
         </div>
@@ -563,9 +578,9 @@
     </div>
 </div>
 
-<script src="/static/app.js?v=10"></script>
+<script src="/static/app.js?v=11"></script>
 <script src="/static/diary.js?v=3"></script>
 <script src="/static/settings.js?v=4"></script>
-<script src="/static/ha_settings.js"></script>
+<script src="/static/ha_settings.js?v=2"></script>
 </body>
 </html>

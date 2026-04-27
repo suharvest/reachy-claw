@@ -2198,19 +2198,20 @@ async function activateHATab() {
 }
 
 async function renderDiaryHAChips() {
+    const section = document.getElementById("ha-chips-section");
     const el = document.getElementById("ha-entities-chips");
-    if (!el) return;
+    if (!el || !section) return;
     try {
         const r = await fetch("/api/settings/ha");
-        if (!r.ok) { el.hidden = true; return; }
+        if (!r.ok) { section.hidden = true; return; }
         const j = await r.json();
         const ents = j.entities || [];
-        if (ents.length === 0) { el.hidden = true; return; }
-        el.hidden = false;
+        if (ents.length === 0) { section.hidden = true; return; }
+        section.hidden = false;
         const shown = ents.slice(0, 10).map(e => `<span class="chip">${e}</span>`).join("");
-        const extra = ents.length > 10 ? ` <span class="chip-more">… (+${ents.length - 10} more)</span>` : "";
-        el.innerHTML = `<div class="ha-chips-label">Available HA entities:</div>${shown}${extra}`;
-    } catch (e) { el.hidden = true; }
+        const extra = ents.length > 10 ? `<span class="chip-more">+${ents.length - 10} more</span>` : "";
+        el.innerHTML = `${shown}${extra}`;
+    } catch (e) { section.hidden = true; }
 }
 
 // ── Init ────────────────────────────────────────────────────────────

@@ -74,17 +74,114 @@
 }
 
 /* HA Sensors settings */
-.ha-tree { max-height: 320px; overflow-y: auto; border: 1px solid #444;
-  border-radius: 4px; padding: 8px; background: rgba(0,0,0,0.2); }
-.ha-tree details { margin: 4px 0; }
-.ha-tree summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
-.ha-entity-list { padding-left: 16px; display: flex; flex-direction: column; gap: 2px; }
-.ha-entity-row { display: flex; align-items: center; gap: 6px; cursor: pointer;
-  font-family: monospace; font-size: 12px; }
-.ha-result { margin-left: 8px; font-size: 12px; }
-.ha-chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
-.ha-chips-label { width: 100%; font-size: 12px; opacity: 0.7; }
-.ha-chips .chip { background: rgba(255,255,255,0.1); padding: 2px 8px;
-  border-radius: 12px; font-family: monospace; font-size: 11px; }
-.ha-chips .chip-more { font-size: 11px; opacity: 0.6; }
-.btn-icon { background: none; border: none; cursor: pointer; padding: 0 4px; }
+.ha-help {
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--text);
+    background: rgba(163, 230, 53, 0.04);
+    border: 1px solid rgba(163, 230, 53, 0.18);
+    border-radius: 4px;
+    padding: 12px 14px;
+}
+.ha-help ol { margin: 8px 0 2px 0; padding-left: 20px; }
+.ha-help li { margin: 6px 0; color: var(--text); }
+.ha-help b { color: var(--green); font-weight: 600; }
+.ha-help-note { color: var(--text-dim); font-size: 12px; }
+
+.ha-token-wrap {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+.ha-token-wrap .url-input {
+    flex: 1;
+    min-width: 0;
+    font-family: monospace;
+    font-size: 12px;
+}
+.ha-token-toggle {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-dim);
+    padding: 4px 8px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.15s;
+}
+.ha-token-toggle:hover { border-color: var(--green); color: var(--green); }
+
+.ha-count {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-dim);
+    margin-left: 8px;
+    letter-spacing: 0;
+}
+
+.ha-tree {
+    max-height: 320px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px;
+    background: rgba(255, 255, 255, 0.02);
+    margin-top: 10px;
+}
+.ha-tree details { margin: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+.ha-tree details:last-child { border-bottom: none; }
+.ha-tree summary {
+    cursor: pointer;
+    font-weight: 600;
+    padding: 6px 4px;
+    color: var(--green);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    list-style: none;
+}
+.ha-tree summary::before { content: "▸ "; color: var(--text-dim); }
+.ha-tree details[open] summary::before { content: "▾ "; }
+.ha-entity-list { padding: 4px 0 6px 18px; display: flex; flex-direction: column; gap: 3px; }
+.ha-entity-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-family: monospace;
+    font-size: 12px;
+    color: var(--text);
+    padding: 2px 4px;
+    border-radius: 3px;
+}
+.ha-entity-row:hover { background: rgba(163, 230, 53, 0.06); }
+.ha-entity-row input[type=checkbox] { accent-color: var(--green); }
+
+/* Diary tab chips strip */
+.ha-chips-hint {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+}
+.ha-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+.ha-chips .chip {
+    background: rgba(163, 230, 53, 0.08);
+    border: 1px solid rgba(163, 230, 53, 0.2);
+    color: var(--text);
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-family: monospace;
+    font-size: 11px;
+}
+.ha-chips .chip-more {
+    font-size: 11px;
+    color: var(--text-dim);
+    padding: 3px 6px;
+}

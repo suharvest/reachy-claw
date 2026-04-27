@@ -9,11 +9,22 @@ let _haSelectedSet = new Set();    // entity_ids currently checked
 
 function _byId(id) { return document.getElementById(id); }
 
-function _renderTestResult(ok, msg) {
-  const el = _byId("ha-test-result");
+function _setStatus(elId, msg, kind) {
+  // kind: "ok" | "err" | "info" | null
+  const el = _byId(elId);
   if (!el) return;
-  el.textContent = msg || (ok ? "Connected" : "Error");
-  el.style.color = ok ? "#4caf50" : "#e57373";
+  el.textContent = msg || "";
+  el.style.color = kind === "ok" ? "var(--green)"
+                 : kind === "err" ? "var(--red)"
+                 : "var(--text-dim)";
+}
+
+function _renderTestResult(ok, msg) {
+  if (ok === null) {
+    _setStatus("ha-test-result", msg, "info");
+  } else {
+    _setStatus("ha-test-result", msg || (ok ? "Connected" : "Error"), ok ? "ok" : "err");
+  }
 }
 
 function _updateSelectionCount() {
@@ -29,8 +40,16 @@ function _renderEntities(groups) {
   const root = _byId("ha-entities-tree");
   if (!root) return;
   root.innerHTML = "";
+  if (!groups || groups.length === 0) {
+    root.innerHTML = '<div class="face-empty">No entities returned by HA.</div>';
+    return;
+  }
   for (const g of groups) {
     const details = document.createElement("details");
+    // Auto-open groups that contain a checked entity.
+    if (g.entities.some((e) => _haSelectedSet.has(e.entity_id))) {
+      details.open = true;
+    }
     const summary = document.createElement("summary");
     summary.textContent = `${g.domain} (${g.count})`;
     details.appendChild(summary);
@@ -50,8 +69,8 @@ function _renderEntities(groups) {
       });
       label.appendChild(cb);
       const txt = document.createElement("span");
-      txt.textContent = ` ${e.entity_id} — ${e.state}` +
-                        (e.friendly_name ? `  (${e.friendly_name})` : "");
+      const fn = e.friendly_name ? `  · ${e.friendly_name}` : "";
+      txt.textContent = ` ${e.entity_id} = ${e.state}${fn}`;
       label.appendChild(txt);
       list.appendChild(label);
     }
@@ -133,10 +152,13 @@ async function bindHASettings() {
 
   _byId("ha-refresh-btn").addEventListener("click", refreshHAEntities);
   _byId("ha-save-btn").addEventListener("click", async () => {
+    _setStatus("ha-save-status", "Saving…", "info");
     try {
       await _saveCurrentSettings({ entities: Array.from(_haSelectedSet).sort() });
+      _setStatus("ha-save-status", `Saved ${_haSelectedSet.size} entities.`, "ok");
       _toast(`Saved ${_haSelectedSet.size} entities`);
     } catch (e) {
+      _setStatus("ha-save-status", `Save failed: ${e.message}`, "err");
       _toast(`Save failed: ${e.message}`, false);
     }
   });
@@ -144,11 +166,18 @@ async function bindHASettings() {
 
 async function refreshHAEntities() {
   const tree = _byId("ha-entities-tree");
-  tree.innerHTML = "<em>Loading…</em>";
-  const r = await fetch("/api/ha/entities");
+  if (!tree) return;
+  tree.innerHTML = '<div class="face-empty">Loading…</div>';
+  let r;
+  try {
+    r = await fetch("/api/ha/entities");
+  } catch (e) {
+    tree.innerHTML = `<div class="face-empty" style="color:var(--red)">Network error: ${e.message}</div>`;
+    return;
+  }
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));
-    tree.innerHTML = `<span style="color:#e57373">${body.error || `HTTP ${r.status}`}</span>`;
+    tree.innerHTML = `<div class="face-empty" style="color:var(--red)">${body.error || `HTTP ${r.status}`}</div>`;
     return;
   }
   _haEntitiesCache = await r.json();
