@@ -60,11 +60,35 @@ class RestPlugin(Plugin):
         self._tasks: list[HousekeepingTask] = []
         self._zmq_ctx = None
         self._ctrl_pub = None
+        # Manual override: True forces rest, False forces awake, None = follow schedule.
+        self._force_state: bool | None = None
+        self._started_at: int | None = None
 
     def register_task(self, task: "HousekeepingTask") -> None:
         self._tasks.append(task)
 
+    def is_resting(self) -> bool:
+        return self._resting
+
+    async def force_rest(self) -> None:
+        """Manually enter rest immediately, ignoring schedule until force_clear()."""
+        self._force_state = True
+        if not self._resting:
+            await self._enter_rest()
+
+    async def force_resume(self) -> None:
+        """Manually exit rest immediately, ignoring schedule until force_clear()."""
+        self._force_state = False
+        if self._resting:
+            await self._exit_rest()
+
+    def force_clear(self) -> None:
+        """Drop manual override; next loop tick reverts to scheduled behavior."""
+        self._force_state = None
+
     def _should_rest_now(self, now: datetime) -> bool:
+        if self._force_state is not None:
+            return self._force_state
         if not getattr(self.app.config, "rest_enabled", True):
             return False
         return _is_in_window(
@@ -111,10 +135,11 @@ class RestPlugin(Plugin):
         if self._resting:
             return
         self._resting = True
+        self._started_at = int(time.time())
         logger.info("Entering rest window")
         self._ensure_ctrl_pub()
         self._publish_ctrl("pause")
-        self.app.events.emit("rest_start", {"started_at": int(time.time())})
+        self.app.events.emit("rest_start", {"started_at": self._started_at})
         # Run housekeeping tasks sequentially in the background.
         asyncio.create_task(self._run_housekeeping())
 
@@ -122,6 +147,7 @@ class RestPlugin(Plugin):
         if not self._resting:
             return
         self._resting = False
+        self._started_at = None
         logger.info("Exiting rest window")
         self._publish_ctrl("resume")
         self.app.events.emit("rest_end", {"ended_at": int(time.time())})
