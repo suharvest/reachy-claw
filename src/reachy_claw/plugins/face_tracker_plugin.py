@@ -44,6 +44,9 @@ class FaceTrackerPlugin(Plugin):
         self._smooth_roll = 0.0
         self._last_face_time = 0.0
 
+        # Rest window pause
+        self._paused = False
+
     def _has_sdk_camera(self) -> bool:
         """Check if the Reachy SDK camera is available."""
         reachy = self.app.reachy
@@ -178,11 +181,17 @@ class FaceTrackerPlugin(Plugin):
 
         self._face_lost_published = False
 
+        self.app.events.subscribe("rest_start", self._on_rest_start_handler)
+        self.app.events.subscribe("rest_end", self._on_rest_end_handler)
+
         consecutive_errors = 0
         max_consecutive_errors = 50  # ~2s at 25Hz — then back off
 
         try:
             while self._running:
+                if self._paused:
+                    await asyncio.sleep(0.5)
+                    continue
                 try:
                     if self._gst_cam:
                         frame = await asyncio.to_thread(self._gst_cam.read)
@@ -289,3 +298,17 @@ class FaceTrackerPlugin(Plugin):
 
     async def stop(self):
         self._running = False
+        self.app.events.unsubscribe("rest_start", self._on_rest_start_handler)
+        self.app.events.unsubscribe("rest_end", self._on_rest_end_handler)
+
+    async def on_rest_start(self) -> None:
+        self._paused = True
+
+    async def on_rest_end(self) -> None:
+        self._paused = False
+
+    def _on_rest_start_handler(self, _data: dict) -> None:
+        asyncio.create_task(self.on_rest_start())
+
+    def _on_rest_end_handler(self, _data: dict) -> None:
+        asyncio.create_task(self.on_rest_end())

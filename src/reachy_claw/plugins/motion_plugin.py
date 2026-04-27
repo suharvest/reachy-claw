@@ -95,6 +95,9 @@ class MotionPlugin(Plugin):
         self._antenna_anim: AntennaAnimation | None = None
         self._antenna_anim_start: float = 0.0
 
+        # Rest window pause
+        self._paused = False
+
     def set_speech_offsets(self, offsets: tuple) -> None:
         """Called by HeadWobbler to set speech-driven head offsets."""
         self._speech_roll, self._speech_pitch, self._speech_yaw = offsets
@@ -130,11 +133,30 @@ class MotionPlugin(Plugin):
         return {"enabled": self._motor_enabled, "preset": self._motor_preset}
 
     async def start(self):
+        self.app.events.subscribe("rest_start", self._on_rest_start_handler)
+        self.app.events.subscribe("rest_end", self._on_rest_end_handler)
         await asyncio.gather(
             self._motion_loop(),
             self._head_tracking_loop(),
             self._antenna_animation_loop(),
         )
+
+    async def stop(self):
+        self._running = False
+        self.app.events.unsubscribe("rest_start", self._on_rest_start_handler)
+        self.app.events.unsubscribe("rest_end", self._on_rest_end_handler)
+
+    async def on_rest_start(self) -> None:
+        self._paused = True
+
+    async def on_rest_end(self) -> None:
+        self._paused = False
+
+    def _on_rest_start_handler(self, _data: dict) -> None:
+        asyncio.create_task(self.on_rest_start())
+
+    def _on_rest_end_handler(self, _data: dict) -> None:
+        asyncio.create_task(self.on_rest_end())
 
     async def _motion_loop(self):
         """Process queued expressions and idle animations."""
@@ -143,6 +165,9 @@ class MotionPlugin(Plugin):
         config = self.app.config
 
         while self._running:
+            if self._paused:
+                await asyncio.sleep(0.5)
+                continue
             if not self._motor_enabled:
                 await asyncio.sleep(0.2)
                 continue
@@ -170,6 +195,10 @@ class MotionPlugin(Plugin):
         logger.info("Head tracking fusion loop started")
 
         while self._running:
+            if self._paused:
+                await asyncio.sleep(0.5)
+                continue
+
             poll_interval = self.app.config.motion_head_tracking_poll_interval
 
             if not self._motor_enabled:
@@ -243,6 +272,9 @@ class MotionPlugin(Plugin):
         interval = 1.0 / _ANIM_HZ
 
         while self._running:
+            if self._paused:
+                await asyncio.sleep(interval)
+                continue
             if not self._motor_enabled:
                 await asyncio.sleep(interval)
                 continue

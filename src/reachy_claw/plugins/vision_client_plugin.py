@@ -86,6 +86,9 @@ class VisionClientPlugin(Plugin):
         self._last_face_count: int = 0
         self._last_faces_summary: list[dict] = []
 
+        # Rest window pause
+        self._paused = False
+
     def setup(self) -> bool:
         """Check ZMQ availability."""
         # Check ZMQ
@@ -104,6 +107,10 @@ class VisionClientPlugin(Plugin):
 
         self._running = True
         self._loop = asyncio.get_running_loop()
+
+        self.app.events.subscribe("rest_start", self._on_rest_start_handler)
+        self.app.events.subscribe("rest_end", self._on_rest_end_handler)
+
         logger.info(f"Vision client started (zmq={self._zmq_url})")
 
         result_task = asyncio.create_task(
@@ -149,6 +156,10 @@ class VisionClientPlugin(Plugin):
         """Inner loop for ZMQ result processing."""
         recv_count = 0
         while self._running:
+            if self._paused:
+                import time as _time
+                _time.sleep(0.5)
+                continue
             try:
                 parts = sub.recv_multipart()
                 msg = msgpack.unpackb(parts[1], raw=False)
@@ -348,3 +359,19 @@ class VisionClientPlugin(Plugin):
 
     async def stop(self):
         self._running = False
+        self.app.events.unsubscribe("rest_start", self._on_rest_start_handler)
+        self.app.events.unsubscribe("rest_end", self._on_rest_end_handler)
+
+    async def on_rest_start(self) -> None:
+        self._paused = True
+
+    async def on_rest_end(self) -> None:
+        self._paused = False
+
+    def _on_rest_start_handler(self, _data: dict) -> None:
+        import asyncio
+        asyncio.create_task(self.on_rest_start())
+
+    def _on_rest_end_handler(self, _data: dict) -> None:
+        import asyncio
+        asyncio.create_task(self.on_rest_end())
