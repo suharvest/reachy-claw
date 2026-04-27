@@ -1,4 +1,4 @@
-"""Tests for DashboardPlugin setup/lifecycle and message format."""
+"""Tests for DashboardPlugin setup/lifecycle, message format, and HA prompt cache."""
 
 from __future__ import annotations
 
@@ -291,3 +291,14 @@ async def test_diary_endpoint_404_for_missing_date(diary_dashboard_app):
         assert "error" in body
     finally:
         await client.close()
+
+
+# ── HA prompt cache test ────────────────────────────────────────────────────
+
+
+def test_diary_default_prompt_includes_ha_paragraph():
+    from reachy_claw.plugins.dashboard_plugin import _diary_default_prompt, _DIARY_DEFAULT_PROMPT_CACHE
+    import reachy_claw.plugins.dashboard_plugin as mod
+    mod._DIARY_DEFAULT_PROMPT_CACHE = None  # reset cache
+    text = _diary_default_prompt()
+    assert "Home Assistant" in text or "sensors" in text

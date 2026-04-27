@@ -113,3 +113,55 @@ MARKDOWN
     db.init()
     assert db.get_diary("2026-04-26") is None
     db.close()
+
+
+# ── HA history injection tests ─────────────────────────────────────────────
+
+
+def test_fetch_ha_history_unconfigured_returns_empty(monkeypatch):
+    sys.path.insert(0, str(REPO))
+    from scripts.generate_diary import _fetch_ha_history
+    from reachy_claw.config import Config
+    cfg = Config(ha_url="", ha_token="", ha_entities=[])
+    assert _fetch_ha_history("2026-04-27", cfg) == {}
+
+
+def test_fetch_ha_history_calls_client(monkeypatch):
+    sys.path.insert(0, str(REPO))
+    from scripts.generate_diary import _fetch_ha_history
+    from reachy_claw.config import Config
+    cfg = Config(ha_url="http://ha.local:8123", ha_token="t",
+                 ha_entities=["weather.home"], rest_timezone="UTC")
+
+    captured = {}
+
+    async def fake_get_history(url, token, ents, start, end, **kw):
+        captured["args"] = (url, token, list(ents), start, end)
+        return {"weather.home": [{"ts": "2026-04-27T10:00:00+00:00",
+                                  "state": "sunny", "attributes": {"temp": 22}}]}
+
+    monkeypatch.setattr("reachy_claw.ha_client.get_history", fake_get_history)
+    out = _fetch_ha_history("2026-04-27", cfg)
+    assert out["weather.home"][0]["state"] == "sunny"
+    assert captured["args"][0] == "http://ha.local:8123"
+    assert captured["args"][2] == ["weather.home"]
+    # Window should be [00:00 today, 00:00 next day) — half-open, no 1s gap.
+    assert captured["args"][3].year == 2026 and captured["args"][3].month == 4 and captured["args"][3].day == 27
+    assert captured["args"][3].hour == 0 and captured["args"][3].minute == 0
+    assert captured["args"][4].day == 28
+    assert captured["args"][4].hour == 0 and captured["args"][4].minute == 0
+
+
+def test_fetch_ha_history_swallows_errors(monkeypatch):
+    sys.path.insert(0, str(REPO))
+    from scripts.generate_diary import _fetch_ha_history
+    from reachy_claw import ha_client
+    from reachy_claw.config import Config
+
+    async def fake_fail(url, token, ents, start, end, **kw):
+        raise ha_client.HAUnreachable("nope")
+
+    monkeypatch.setattr("reachy_claw.ha_client.get_history", fake_fail)
+    cfg = Config(ha_url="http://ha.local:8123", ha_token="t",
+                 ha_entities=["weather.home"])
+    assert _fetch_ha_history("2026-04-27", cfg) == {}

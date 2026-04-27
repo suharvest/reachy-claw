@@ -48,6 +48,11 @@ Rules:
   - tags: array like ["Reachy 日记", "Reachy", "AI"]
 - Body is Chinese only (no English body; English version is via title_en/description_en).
 - Output ONLY the Markdown document. No code fences, no commentary.
+
+你今天可获得的 Home Assistant 传感器数据已附在用户消息的 `sensors` 字段中，
+形如 `{"weather.home": [{"ts": ..., "state": "sunny", "attributes": {...}}, ...], ...}`。
+请自然地融入日记叙述，例如提到天气、室内温湿度、有人活动等，避免堆砌读数或列表化。
+若某天 sensors 字段为空或缺失，正常忽略即可。
 """
 
 
@@ -146,6 +151,44 @@ def _call_llm(date: str, events: dict, model: str) -> str:
     return res.stdout
 
 
+def _fetch_ha_history(date: str, config) -> dict:
+    """Fetch HA history for the date's local-calendar day. Returns {} on any error.
+
+    Best-effort: never raises. A failure here must not abort diary generation.
+    """
+    if not (config.ha_url and config.ha_token and config.ha_entities):
+        return {}
+
+    import asyncio
+    from datetime import datetime, time
+    from zoneinfo import ZoneInfo
+
+    from reachy_claw import ha_client
+
+    try:
+        tz = ZoneInfo(config.rest_timezone or "UTC")
+    except Exception:
+        tz = ZoneInfo("UTC")
+    from datetime import timedelta
+    y, m, d = (int(x) for x in date.split("-"))
+    day_start = datetime.combine(datetime(y, m, d), time(0, 0), tzinfo=tz)
+    day_end = day_start + timedelta(days=1)
+
+    async def _go():
+        return await ha_client.get_history(
+            config.ha_url, config.ha_token, list(config.ha_entities),
+            day_start, day_end,
+        )
+    try:
+        return asyncio.run(_go())
+    except ha_client.HAError as e:
+        sys.stderr.write(f"WARN: HA history fetch failed: {e}\n")
+        return {}
+    except Exception as e:
+        sys.stderr.write(f"WARN: HA history fetch unexpected error: {e}\n")
+        return {}
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"))
@@ -169,6 +212,16 @@ def main() -> int:
         return 0
 
     events = db.events_for_day(args.date)
+
+    # Inject HA history. Pulls fresh from HA's REST API every time. Best-effort.
+    from reachy_claw.config import load_config
+    try:
+        config = load_config()
+        events["sensors"] = _fetch_ha_history(args.date, config)
+    except Exception as e:
+        sys.stderr.write(f"WARN: skipping HA history due to config load error: {e}\n")
+        events["sensors"] = {}
+
     if os.environ.get("DIARY_LLM_MOCK") == "1":
         md = _mock_markdown(args.date, events)
         model = "mock"
