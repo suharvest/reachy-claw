@@ -19,6 +19,7 @@ from ..settings_schema import (
     validate as validate_setting,
 )
 from ..config import save_runtime_overrides
+from .. import ha_client
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +250,11 @@ class DashboardPlugin(Plugin):
         rest_handlers = _build_rest_status_handlers(self.app)
         app.router.add_get("/api/rest/status", rest_handlers["status"])
         app.router.add_post("/api/rest/force", rest_handlers["force"])
+
+        # HA API
+        ha_handlers = _build_ha_handlers(self.app)
+        app.router.add_post("/api/ha/test", ha_handlers["test"])
+        app.router.add_get("/api/ha/entities", ha_handlers["entities"])
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -1706,3 +1712,64 @@ def _build_rest_status_handlers(app):
         return web.json_response({"resting": rp.is_resting(), "force_state": rp._force_state})
 
     return {"status": status_handler, "force": force_handler}
+
+
+def _build_ha_handlers(app):
+    """HA Sensors API: connection probe + entity listing.
+
+    Settings PUT/GET for ha.* is handled by the generic
+    _build_settings_handlers via the namespace dispatch.
+    """
+    from aiohttp import web
+
+    async def test_handler(request):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        url = body.get("url") if isinstance(body, dict) else None
+        token = body.get("token") if isinstance(body, dict) else None
+        url = url or app.config.ha_url
+        token = token or app.config.ha_token
+        if not url or not token:
+            return web.json_response(
+                {"ok": False, "status": 0, "message": "ha_url or ha_token not set"}
+            )
+        result = await ha_client.probe(url, token)
+        return web.json_response(result)
+
+    async def entities_handler(request):
+        url = app.config.ha_url
+        token = app.config.ha_token
+        if not url or not token:
+            return web.json_response(
+                {"error": "ha_url or ha_token not configured"}, status=400
+            )
+        try:
+            states = await ha_client.list_states(url, token)
+        except ha_client.HAUnauthorized as e:
+            return web.json_response({"error": f"unauthorized: {e}"}, status=502)
+        except ha_client.HAUnreachable as e:
+            return web.json_response({"error": f"unreachable: {e}"}, status=502)
+        except ha_client.HABadResponse as e:
+            return web.json_response({"error": f"bad response: {e}"}, status=502)
+
+        groups: dict[str, list[dict]] = {}
+        for s in states:
+            eid = s.get("entity_id", "")
+            if "." not in eid:
+                continue
+            domain = eid.split(".", 1)[0]
+            attrs = s.get("attributes") or {}
+            groups.setdefault(domain, []).append({
+                "entity_id": eid,
+                "state": s.get("state", ""),
+                "friendly_name": attrs.get("friendly_name", ""),
+            })
+        out = []
+        for domain in sorted(groups):
+            entities = sorted(groups[domain], key=lambda e: e["entity_id"])
+            out.append({"domain": domain, "count": len(entities), "entities": entities})
+        return web.json_response({"groups": out})
+
+    return {"test": test_handler, "entities": entities_handler}
