@@ -14,8 +14,8 @@ from reachy_claw.settings_schema import (
 )
 
 
-def test_namespaces_are_rest_and_diary():
-    assert set(NAMESPACES) == {"rest", "diary"}
+def test_namespaces_includes_rest_diary_ha():
+    assert {"rest", "diary", "ha"}.issubset(set(NAMESPACES))
 
 
 def test_registry_has_expected_keys():
@@ -29,6 +29,9 @@ def test_registry_has_expected_keys():
         "diary.site_repo_url",
         "diary.site_diary_path",
         "diary.site_branch",
+        "ha.url",
+        "ha.token",
+        "ha.entities",
     }
     assert set(REGISTRY) == expected
 
@@ -105,3 +108,41 @@ def test_validate_string_type():
 def test_validate_unknown_key_rejected():
     with pytest.raises(KeyError):
         validate("rest.unknown", "anything")
+
+
+# ── HA namespace ────────────────────────────────────────────────────
+
+
+def test_ha_namespace_registered():
+    assert "ha" in NAMESPACES
+    assert set(keys_for_namespace("ha")) == {"url", "token", "entities"}
+
+
+def test_ha_url_validator():
+    validate("ha.url", "")  # empty allowed
+    validate("ha.url", "http://homeassistant.local:8123")
+    validate("ha.url", "https://ha.example.com")
+    with pytest.raises(ValueError):
+        validate("ha.url", "ha.local")  # missing scheme
+    with pytest.raises(ValueError):
+        validate("ha.url", 123)  # not a string
+
+
+def test_ha_token_validator():
+    validate("ha.token", "")
+    validate("ha.token", "long-token")
+    with pytest.raises(ValueError):
+        validate("ha.token", None)
+
+
+def test_ha_entities_validator():
+    validate("ha.entities", [])
+    validate("ha.entities", ["weather.home", "sensor.bedroom_temp"])
+    with pytest.raises(ValueError):
+        validate("ha.entities", "weather.home")  # not a list
+    with pytest.raises(ValueError):
+        validate("ha.entities", ["weather.home", 1])  # non-str element
+    with pytest.raises(ValueError):
+        validate("ha.entities", ["BadFormat"])  # missing dot
+    with pytest.raises(ValueError):
+        validate("ha.entities", ["weather.Home Office"])  # bad chars

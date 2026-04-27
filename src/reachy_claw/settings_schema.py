@@ -49,6 +49,34 @@ def _validate_tz(v: Any) -> None:
         raise ValueError(f"unknown IANA timezone: {v!r}") from e
 
 
+_HA_URL = re.compile(r"^https?://")
+_ENTITY_ID = re.compile(r"^[a-z_]+\.[a-zA-Z0-9_]+$")
+
+
+def _validate_ha_url(v: Any) -> None:
+    if not isinstance(v, str):
+        raise ValueError(f"ha.url must be a string, got {type(v).__name__}")
+    if v == "":
+        return
+    if not _HA_URL.match(v):
+        raise ValueError(f"ha.url must start with http:// or https://, got {v!r}")
+
+
+def _validate_str_list(v: Any) -> None:
+    if not isinstance(v, list):
+        raise ValueError(f"expected list, got {type(v).__name__}")
+    for i, item in enumerate(v):
+        if not isinstance(item, str):
+            raise ValueError(f"item {i} must be str, got {type(item).__name__}")
+
+
+def _validate_entity_id_list(v: Any) -> None:
+    _validate_str_list(v)
+    for i, item in enumerate(v):
+        if not _ENTITY_ID.match(item):
+            raise ValueError(f"item {i}: invalid HA entity_id {item!r}")
+
+
 _SPECS: list[SettingSpec] = [
     SettingSpec("rest", "enabled", "rest_enabled", bool),
     SettingSpec("rest", "window_start", "rest_window_start", str, _validate_hhmm),
@@ -59,6 +87,9 @@ _SPECS: list[SettingSpec] = [
     SettingSpec("diary", "site_repo_url", "diary_site_repo_url", str),
     SettingSpec("diary", "site_diary_path", "diary_site_diary_path", str),
     SettingSpec("diary", "site_branch", "diary_site_branch", str),
+    SettingSpec("ha", "url", "ha_url", str, _validate_ha_url),
+    SettingSpec("ha", "token", "ha_token", str),
+    SettingSpec("ha", "entities", "ha_entities", list, _validate_entity_id_list),
 ]
 
 REGISTRY: dict[str, SettingSpec] = {

@@ -86,6 +86,11 @@ class Config:
     diary_site_repo_url: str = ""
     diary_site_diary_path: str = "src/content/docs"
     diary_site_branch: str = "main"
+
+    # ── Home Assistant integration ──────────────────────────────
+    ha_url: str = ""              # e.g. "http://homeassistant.local:8123"
+    ha_token: str = ""            # long-lived access token
+    ha_entities: list[str] = field(default_factory=list)  # entity_ids to include
     sample_rate: int = 16000
     silence_threshold: float = 0.01
     silence_duration: float = 0.7
@@ -299,6 +304,9 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("diary", "site_repo_url"): "diary_site_repo_url",
     ("diary", "site_diary_path"): "diary_site_diary_path",
     ("diary", "site_branch"): "diary_site_branch",
+    ("ha", "url"): "ha_url",
+    ("ha", "token"): "ha_token",
+    ("ha", "entities"): "ha_entities",
 }
 
 # Environment variable → Config field name

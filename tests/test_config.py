@@ -247,6 +247,29 @@ def test_env_overrides_runtime_overrides(tmp_path, monkeypatch):
     assert config2.stt_backend == "openai"  # env wins
 
 
+def test_config_has_ha_fields():
+    from reachy_claw.config import Config
+    c = Config()
+    assert c.ha_url == ""
+    assert c.ha_token == ""
+    assert c.ha_entities == []
+
+
+def test_runtime_overrides_load_ha_entities(tmp_path, monkeypatch):
+    from reachy_claw.config import load_config, save_runtime_overrides
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg_dir = tmp_path / ".reachy-claw"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.yaml").write_text("gateway_host: 127.0.0.1\n")
+    cfg = load_config()
+    cfg.ha_url = "http://ha.local:8123"
+    cfg.ha_entities = ["weather.home", "sensor.temp"]
+    save_runtime_overrides(cfg, ["ha_url", "ha_entities"])
+    cfg2 = load_config()
+    assert cfg2.ha_url == "http://ha.local:8123"
+    assert cfg2.ha_entities == ["weather.home", "sensor.temp"]
+
+
 def test_rest_diary_defaults():
     from reachy_claw.config import Config
     c = Config()
