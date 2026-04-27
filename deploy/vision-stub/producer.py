@@ -161,6 +161,21 @@ def _capture_loop() -> None:
     pub.bind(f"tcp://0.0.0.0:{ZMQ_PUB_PORT}")
     print(f"[vision-stub] ZMQ PUB on tcp://0.0.0.0:{ZMQ_PUB_PORT}", flush=True)
 
+    # Optional rest-control subscriber: when Reachy emits {"cmd":"pause"} we stop
+    # camera reads + inference and emit nothing. {"cmd":"resume"} re-enables.
+    rest_ctrl_url = os.environ.get("REST_CTRL_URL", "").strip()
+    ctrl_sub = None
+    poller = None
+    if rest_ctrl_url:
+        ctrl_sub = ctx.socket(zmq.SUB)
+        ctrl_sub.connect(rest_ctrl_url)
+        ctrl_sub.setsockopt(zmq.SUBSCRIBE, b"")
+        poller = zmq.Poller()
+        poller.register(ctrl_sub, zmq.POLLIN)
+        print(f"[vision-stub] Rest control SUB connected to {rest_ctrl_url}", flush=True)
+
+    paused = False
+
     models = TODO_init_models()
     state.capture_count = _existing_capture_count()
 
@@ -183,6 +198,31 @@ def _capture_loop() -> None:
 
     while True:
         loop_start = time.monotonic()
+
+        # Drain any pending rest-control messages.
+        if poller is not None:
+            while True:
+                socks = dict(poller.poll(timeout=0))
+                if ctrl_sub not in socks:
+                    break
+                try:
+                    msg = ctrl_sub.recv_json(flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    break
+                cmd = msg.get("cmd")
+                if cmd == "pause":
+                    if not paused:
+                        print("[vision-stub] REST: pausing inference", flush=True)
+                    paused = True
+                elif cmd == "resume":
+                    if paused:
+                        print("[vision-stub] REST: resuming inference", flush=True)
+                    paused = False
+
+        if paused:
+            time.sleep(0.5)
+            continue
+
         ok, frame = cap.read()
         if not ok:
             time.sleep(0.05)

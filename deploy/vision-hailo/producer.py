@@ -179,6 +179,21 @@ def _capture_loop() -> None:
     pub.bind(f"tcp://0.0.0.0:{ZMQ_PUB_PORT}")
     logger.info(f"ZMQ PUB on tcp://0.0.0.0:{ZMQ_PUB_PORT}")
 
+    # Optional rest-control subscriber: when Reachy emits {"cmd":"pause"} we stop
+    # camera reads + inference and emit nothing. {"cmd":"resume"} re-enables.
+    rest_ctrl_url = os.environ.get("REST_CTRL_URL", "").strip()
+    ctrl_sub = None
+    poller = None
+    if rest_ctrl_url:
+        ctrl_sub = ctx.socket(zmq.SUB)
+        ctrl_sub.connect(rest_ctrl_url)
+        ctrl_sub.setsockopt(zmq.SUBSCRIBE, b"")
+        poller = zmq.Poller()
+        poller.register(ctrl_sub, zmq.POLLIN)
+        logger.info("Rest control SUB connected to %s", rest_ctrl_url)
+
+    paused = False
+
     # Init pipeline
     state.pipeline = init_pipeline()
     state.face_db = FaceDatabase(str(FACE_DB_DIR))
@@ -194,6 +209,31 @@ def _capture_loop() -> None:
     try:
         while True:
             loop_start = time.monotonic()
+
+            # Drain any pending rest-control messages.
+            if poller is not None:
+                while True:
+                    socks = dict(poller.poll(timeout=0))
+                    if ctrl_sub not in socks:
+                        break
+                    try:
+                        msg = ctrl_sub.recv_json(flags=zmq.NOBLOCK)
+                    except zmq.Again:
+                        break
+                    cmd = msg.get("cmd")
+                    if cmd == "pause":
+                        if not paused:
+                            logger.info("REST: pausing inference")
+                        paused = True
+                    elif cmd == "resume":
+                        if paused:
+                            logger.info("REST: resuming inference")
+                        paused = False
+
+            if paused:
+                time.sleep(0.5)
+                continue
+
             ok, frame = cap.read()
             if not ok:
                 logger.warning("Camera read failed")

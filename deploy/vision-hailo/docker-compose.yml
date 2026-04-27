@@ -1,0 +1,39 @@
+services:
+  vision-hailo:
+    build: .
+    image: vision-hailo:0.2
+    container_name: vision-hailo
+    restart: unless-stopped
+    network_mode: host
+    devices:
+      - /dev/hailo0:/dev/hailo0
+      - ${CAMERA_DEVICE:-/dev/video0}:${CAMERA_DEVICE:-/dev/video0}
+    volumes:
+      - ${DATA_DIR:-~/reachy-data}/vision:/var/lib/vision-hailo
+      - /usr/lib/python3/dist-packages/hailo_platform:/usr/lib/python3/dist-packages/hailo_platform:ro
+      - /usr/lib/python3/dist-packages/hailort:/usr/lib/python3/dist-packages/hailort:ro
+      - /usr/lib/aarch64-linux-gnu/libhailort.so:/usr/lib/aarch64-linux-gnu/libhailort.so:ro
+      - /usr/lib/aarch64-linux-gnu/libhailort.so.4:/usr/lib/aarch64-linux-gnu/libhailort.so.4:ro
+      - /usr/share/hailo-models:/host-hailo-models:ro
+      - /run/udev:/run/udev:ro
+    environment:
+      - PYTHONPATH=/usr/lib/python3/dist-packages
+      - ZMQ_PUB_PORT=8631
+      - HTTP_PORT=8630
+      - CAMERA_DEVICE=${CAMERA_DEVICE:-/dev/video0}
+      - HEF_DETECT=/usr/share/hailo-models/scrfd_2.5g_h8l.hef
+      - HEF_EMOTION=/app/models/hsemotion_b0.hef
+      - CAPTURE_DIR=/var/lib/vision-hailo/captures
+      - FACE_DB_DIR=/var/lib/vision-hailo/faces
+      - REST_CTRL_URL=tcp://reachy:18791
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8630/', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
