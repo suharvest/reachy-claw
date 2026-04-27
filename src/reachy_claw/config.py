@@ -108,6 +108,7 @@ class Config:
     ollama_model: str = "qwen3.5:0.8b"
     ollama_system_prompt: str = ""  # empty = use default
     ollama_monologue_prompt: str = ""  # empty = use default MONOLOGUE_SYSTEM_PROMPT
+    diary_system_prompt: str = ""  # empty = use default in scripts/generate_diary.py
     ollama_temperature: float = 0.7
     ollama_max_history: int = 3  # conversation turns to keep (0 = stateless)
     ollama_skill_dir: str = "skills"  # directory containing skill subdirs, each with SKILL.md
@@ -256,6 +257,7 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("llm", "base_url"): "ollama_base_url",
     ("llm", "system_prompt"): "ollama_system_prompt",
     ("llm", "monologue_prompt"): "ollama_monologue_prompt",
+    ("diary", "system_prompt"): "diary_system_prompt",
     ("llm", "temperature"): "ollama_temperature",
     ("llm", "max_history"): "ollama_max_history",
     ("llm", "skill_dir"): "ollama_skill_dir",

@@ -133,8 +133,12 @@ def _call_llm(date: str, events: dict, model: str) -> str:
         )
     import subprocess
 
+    # Allow the dashboard to override the system prompt via env. Empty/unset
+    # means use the built-in default. This lets users configure tone, focus
+    # sections, sensor handling, etc. without editing this file.
+    system = os.environ.get("DIARY_SYSTEM_PROMPT_OVERRIDE", "").strip() or SYSTEM_PROMPT
     payload = json.dumps(
-        {"system": SYSTEM_PROMPT, "user": _build_user_prompt(date, events), "model": model}
+        {"system": system, "user": _build_user_prompt(date, events), "model": model}
     )
     res = subprocess.run(
         cmd, input=payload, shell=True, capture_output=True, text=True, check=True

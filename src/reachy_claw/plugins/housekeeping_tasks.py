@@ -36,12 +36,16 @@ class DiaryGenerateAndPublishTask:
         gen_script = REPO_ROOT / "scripts" / "generate_diary.py"
         pub_script = REPO_ROOT / "scripts" / "publish_diary.py"
 
+        gen_env = os.environ.copy()
+        if getattr(app.config, "diary_system_prompt", "").strip():
+            gen_env["DIARY_SYSTEM_PROMPT_OVERRIDE"] = app.config.diary_system_prompt
         await self._run_subprocess(
             sys.executable,
             str(gen_script),
             "--date",
             date,
             label="generate_diary",
+            env=gen_env,
         )
 
         if not getattr(app.config, "diary_auto_publish", True):
