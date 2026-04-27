@@ -73,7 +73,10 @@ async def get_history(
     start: datetime, end: datetime,
     *, timeout: float = 30.0,
 ) -> dict[str, list[dict]]:
-    """GET <url>/api/history/period/<start>?filter_entity_id=...&end_time=...&minimal_response.
+    """GET <url>/api/history/period/<start>?filter_entity_id=...&end_time=...
+    (we deliberately do NOT pass `minimal_response` because it strips
+    `attributes` from non-first rows, which would violate the "full
+    attributes JSON to LLM" decision from spec Q3=B).
     Returns {entity_id: [{"ts": iso8601_str, "state": str, "attributes": dict}, ...]}.
     Raises HAError subclasses on failure. Used by generate_diary.py."""
 ```
@@ -92,7 +95,7 @@ async def get_history(
 ```python
 ha_url: str = ""              # e.g. "http://homeassistant.local:8123"
 ha_token: str = ""            # long-lived access token
-ha_entities: list[str] = []   # entity_ids to include; empty = HA disabled
+ha_entities: list[str] = field(default_factory=list)   # entity_ids to include; empty = HA disabled
 ```
 
 `KEY_MAP` adds entries for namespace `"ha"`: `("ha", "url")`, `("ha", "token")`, `("ha", "entities")`.
@@ -147,7 +150,7 @@ In `dashboard_plugin.py`, new `_build_ha_handlers(app)` registers:
 
 ### `PUT /api/settings/ha`
 - Already routed by existing `_build_settings_handlers` namespace dispatch. No new handler code, but the schema entries above must be registered.
-- Persists to `runtime-overrides.yaml`. Returns `{"ok": true, "saved": {...}}` per existing convention.
+- Persists to `runtime-overrides.yaml`. Returns `{"updated": [<keys>]}` per the existing settings handler convention.
 
 ---
 

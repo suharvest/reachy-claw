@@ -145,6 +145,19 @@ def _normalise_url(url: str) -> str:
     return url.rstrip("/")
 
 
+def _safe_url_for_log(url: str) -> str:
+    """Strip query string + userinfo so secrets never appear in log lines."""
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+        parts = urlsplit(url)
+        # Drop userinfo from netloc.
+        host = parts.hostname or ""
+        port = f":{parts.port}" if parts.port else ""
+        return urlunsplit((parts.scheme, f"{host}{port}", parts.path, "", ""))
+    except Exception:
+        return "<redacted>"
+
+
 def _headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
@@ -283,7 +296,7 @@ async def list_states(url: str, token: str, *, timeout: float = 10.0) -> list[di
         try:
             r = await client.get(f"{base}/api/states", headers=_headers(token))
         except httpx.HTTPError as e:
-            raise HAUnreachable(str(e)) from e
+            raise HAUnreachable(f"{type(e).__name__} contacting {_safe_url_for_log(base)}") from e
     if r.status_code == 401:
         raise HAUnauthorized("token rejected")
     if r.status_code != 200:
@@ -341,12 +354,48 @@ async def test_get_history_builds_query(monkeypatch):
     assert "filter_entity_id" in captured["params"]
     assert "weather.home" in captured["params"]["filter_entity_id"]
     assert "sensor.temp" in captured["params"]["filter_entity_id"]
-    assert "minimal_response" in captured["params"]
+    # We deliberately do NOT pass minimal_response (see ha_client.get_history docstring).
+    assert "minimal_response" not in captured["params"]
     assert out["weather.home"][0]["state"] == "sunny"
     assert out["weather.home"][1]["state"] == "cloudy"
     assert out["sensor.temp"][0]["state"] == "20"
     assert "ts" in out["weather.home"][0]
     assert "attributes" in out["weather.home"][0]
+
+
+@pytest.mark.asyncio
+async def test_get_history_handles_minimal_rows(monkeypatch):
+    """Even without minimal_response, defensive parsing should handle rows
+    that omit entity_id (carry-over from first row in same series) and rows
+    with empty/missing attributes."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[
+            [
+                {"entity_id": "weather.home", "state": "sunny",
+                 "attributes": {"temp": 22},
+                 "last_updated": "2026-04-27T10:00:00+00:00"},
+                # Subsequent rows in same series with missing entity_id /
+                # missing attributes — must not crash and must associate
+                # with weather.home.
+                {"state": "cloudy",
+                 "last_updated": "2026-04-27T14:00:00+00:00"},
+            ],
+            [],  # empty series
+            [
+                {"entity_id": "sensor.temp", "state": "20",
+                 "last_updated": "2026-04-27T08:00:00+00:00"},
+            ],
+        ])
+    monkeypatch.setattr(ha_client, "_transport_factory", lambda: _mock_transport(handler))
+    out = await ha_client.get_history(
+        "http://ha.local:8123", "t", ["weather.home", "sensor.temp"],
+        datetime(2026, 4, 27, tzinfo=timezone.utc),
+        datetime(2026, 4, 28, tzinfo=timezone.utc),
+    )
+    assert len(out["weather.home"]) == 2
+    assert out["weather.home"][1]["state"] == "cloudy"
+    assert out["weather.home"][1]["attributes"] == {}
+    assert len(out["sensor.temp"]) == 1
 
 
 @pytest.mark.asyncio
@@ -404,10 +453,16 @@ async def get_history(
     base = _normalise_url(url)
     start_iso = start.isoformat()
     end_iso = end.isoformat()
+    # NOTE: we deliberately omit `minimal_response`. HA's REST API treats it
+    # as a flag (no value), but httpx always emits `key=value` for params,
+    # producing `&minimal_response=` which HA may reject; more importantly,
+    # `minimal_response` strips `attributes` from non-first rows in each
+    # entity's series, which contradicts the spec's Q3=B decision to pass
+    # full attributes JSON to the LLM. Bandwidth cost is fine: this fires
+    # once per diary generation (nightly).
     params = {
         "filter_entity_id": ",".join(entity_ids),
         "end_time": end_iso,
-        "minimal_response": "",
     }
     async with _client(timeout) as client:
         try:
@@ -417,7 +472,7 @@ async def get_history(
                 params=params,
             )
         except httpx.HTTPError as e:
-            raise HAUnreachable(str(e)) from e
+            raise HAUnreachable(_safe_url_for_log(base)) from e
     if r.status_code == 401:
         raise HAUnauthorized("token rejected")
     if r.status_code != 200:
@@ -453,7 +508,7 @@ async def get_history(
 ```bash
 uv run pytest tests/test_ha_client.py -v
 ```
-Expected: 10 PASSED.
+Expected: 11 PASSED.
 
 - [ ] **Step 1.15: Commit**
 
@@ -952,7 +1007,64 @@ git commit -m "feat(dashboard): /api/ha/test + /api/ha/entities endpoints"
 - Modify: `scripts/generate_diary.py`
 - Modify: `tests/test_generate_diary.py`
 
-- [ ] **Step 4.1: Append HA paragraph to SYSTEM_PROMPT**
+- [ ] **Step 4.1: Write failing test for `_fetch_ha_history`**
+
+Append to `tests/test_generate_diary.py`:
+```python
+def test_fetch_ha_history_unconfigured_returns_empty(monkeypatch):
+    from scripts.generate_diary import _fetch_ha_history
+    from reachy_claw.config import Config
+    cfg = Config(ha_url="", ha_token="", ha_entities=[])
+    assert _fetch_ha_history("2026-04-27", cfg) == {}
+
+
+def test_fetch_ha_history_calls_client(monkeypatch):
+    from scripts.generate_diary import _fetch_ha_history
+    from reachy_claw.config import Config
+    cfg = Config(ha_url="http://ha.local:8123", ha_token="t",
+                 ha_entities=["weather.home"], rest_timezone="UTC")
+
+    captured = {}
+
+    async def fake_get_history(url, token, ents, start, end, **kw):
+        captured["args"] = (url, token, list(ents), start, end)
+        return {"weather.home": [{"ts": "2026-04-27T10:00:00+00:00",
+                                  "state": "sunny", "attributes": {"temp": 22}}]}
+
+    monkeypatch.setattr("reachy_claw.ha_client.get_history", fake_get_history)
+    out = _fetch_ha_history("2026-04-27", cfg)
+    assert out["weather.home"][0]["state"] == "sunny"
+    assert captured["args"][0] == "http://ha.local:8123"
+    assert captured["args"][2] == ["weather.home"]
+    # Window should be [00:00 today, 00:00 next day) — half-open, no 1s gap.
+    assert captured["args"][3].year == 2026 and captured["args"][3].month == 4 and captured["args"][3].day == 27
+    assert captured["args"][3].hour == 0 and captured["args"][3].minute == 0
+    assert captured["args"][4].day == 28
+    assert captured["args"][4].hour == 0 and captured["args"][4].minute == 0
+
+
+def test_fetch_ha_history_swallows_errors(monkeypatch):
+    from scripts.generate_diary import _fetch_ha_history
+    from reachy_claw import ha_client
+    from reachy_claw.config import Config
+
+    async def fake_fail(url, token, ents, start, end, **kw):
+        raise ha_client.HAUnreachable("nope")
+
+    monkeypatch.setattr("reachy_claw.ha_client.get_history", fake_fail)
+    cfg = Config(ha_url="http://ha.local:8123", ha_token="t",
+                 ha_entities=["weather.home"])
+    assert _fetch_ha_history("2026-04-27", cfg) == {}
+```
+
+- [ ] **Step 4.2: Run; expect failure**
+
+```bash
+uv run pytest tests/test_generate_diary.py -v -k fetch_ha
+```
+Expected: 3 FAIL — `_fetch_ha_history` not yet defined.
+
+- [ ] **Step 4.3: Append HA paragraph to SYSTEM_PROMPT**
 
 In `scripts/generate_diary.py`, replace the closing `"""` of `SYSTEM_PROMPT` (line ~51) with the appended paragraph:
 
@@ -986,7 +1098,7 @@ Rules:
 """
 ```
 
-- [ ] **Step 4.2: Add helper to fetch HA history during diary generation**
+- [ ] **Step 4.4: Add helper to fetch HA history during diary generation**
 
 Append to `scripts/generate_diary.py` (before `def main()`):
 ```python
@@ -1008,9 +1120,12 @@ def _fetch_ha_history(date: str, config) -> dict:
         tz = ZoneInfo(config.rest_timezone or "UTC")
     except Exception:
         tz = ZoneInfo("UTC")
+    from datetime import timedelta
     y, m, d = (int(x) for x in date.split("-"))
     day_start = datetime.combine(datetime(y, m, d), time(0, 0), tzinfo=tz)
-    day_end = datetime.combine(datetime(y, m, d), time(23, 59, 59), tzinfo=tz)
+    # Half-open interval [today 00:00, tomorrow 00:00) — exclusive end avoids
+    # the sub-second gap from using 23:59:59.
+    day_end = day_start + timedelta(days=1)
 
     async def _go():
         return await ha_client.get_history(
@@ -1027,7 +1142,7 @@ def _fetch_ha_history(date: str, config) -> dict:
         return {}
 ```
 
-- [ ] **Step 4.3: Wire HA bundle into events dict in `main()`**
+- [ ] **Step 4.5: Wire HA bundle into events dict in `main()`**
 
 In `scripts/generate_diary.py`, replace the block from `events = db.events_for_day(args.date)` through the LLM call. Updated section (around lines 171-177):
 ```python
@@ -1050,67 +1165,12 @@ In `scripts/generate_diary.py`, replace the block from `events = db.events_for_d
         model = args.model
 ```
 
-- [ ] **Step 4.4: Write failing test for HA injection**
-
-Append to `tests/test_generate_diary.py`:
-```python
-def test_fetch_ha_history_unconfigured_returns_empty(monkeypatch):
-    from scripts.generate_diary import _fetch_ha_history
-    from reachy_claw.config import Config
-    cfg = Config(ha_url="", ha_token="", ha_entities=[])
-    assert _fetch_ha_history("2026-04-27", cfg) == {}
-
-
-def test_fetch_ha_history_calls_client(monkeypatch):
-    from scripts.generate_diary import _fetch_ha_history
-    from reachy_claw.config import Config
-    cfg = Config(ha_url="http://ha.local:8123", ha_token="t",
-                 ha_entities=["weather.home"], rest_timezone="UTC")
-
-    captured = {}
-
-    async def fake_get_history(url, token, ents, start, end, **kw):
-        captured["args"] = (url, token, list(ents), start, end)
-        return {"weather.home": [{"ts": "2026-04-27T10:00:00+00:00",
-                                  "state": "sunny", "attributes": {"temp": 22}}]}
-
-    monkeypatch.setattr("reachy_claw.ha_client.get_history", fake_get_history)
-    out = _fetch_ha_history("2026-04-27", cfg)
-    assert out["weather.home"][0]["state"] == "sunny"
-    assert captured["args"][0] == "http://ha.local:8123"
-    assert captured["args"][2] == ["weather.home"]
-    assert captured["args"][3].year == 2026 and captured["args"][3].month == 4 and captured["args"][3].day == 27
-
-
-def test_fetch_ha_history_swallows_errors(monkeypatch):
-    from scripts.generate_diary import _fetch_ha_history
-    from reachy_claw import ha_client
-    from reachy_claw.config import Config
-
-    async def fake_fail(url, token, ents, start, end, **kw):
-        raise ha_client.HAUnreachable("nope")
-
-    monkeypatch.setattr("reachy_claw.ha_client.get_history", fake_fail)
-    cfg = Config(ha_url="http://ha.local:8123", ha_token="t",
-                 ha_entities=["weather.home"])
-    assert _fetch_ha_history("2026-04-27", cfg) == {}
-```
-
-- [ ] **Step 4.5: Run; expect failure**
+- [ ] **Step 4.6: Run failing tests now pass after Step 4.4**
 
 ```bash
 uv run pytest tests/test_generate_diary.py -v -k fetch_ha
 ```
-Expected: 3 FAIL — function not yet importable / wrong behavior.
-
-- [ ] **Step 4.6: Verify implementation already from Step 4.2**
-
-(Already implemented in Step 4.2. Re-run.)
-
-```bash
-uv run pytest tests/test_generate_diary.py -v -k fetch_ha
-```
-Expected: 3 PASS.
+Expected: 3 PASS (the 3 tests you wrote in Step 4.1).
 
 - [ ] **Step 4.7: Run full generate_diary suite**
 
@@ -1156,12 +1216,19 @@ git commit -m "feat(diary): inject HA sensor history into LLM context"
 
 This task is UI-only. Tests are manual; verify in a browser at the end.
 
+- [ ] **Step 5.0: Verify how existing settings.js exposes its functions**
+
+Open `src/reachy_claw/plugins/dashboard_static/index.html` and confirm whether existing scripts use `<script type="module" src=...>` or plain `<script src=...>`. Wave 2 used plain scripts that attach to `window.*` (`bindRestSettings`, `bindDiarySettings` are global). The new `ha_settings.js` will follow the same pattern — no `import`/`export`.
+
 - [ ] **Step 5.1: Create `ha_settings.js`**
 
 `src/reachy_claw/plugins/dashboard_static/ha_settings.js`:
 ```javascript
-// HA Sensors settings binding. Loaded by index.html, called from app.js
-// when the SETTINGS modal opens or when the HA tab is activated.
+// HA Sensors settings binding. Loaded by index.html as a classic script
+// (NOT type="module") to match the rest of the dashboard. Exposes
+// window.bindHASettings / window.refreshHAEntities for app.js.
+(function () {
+"use strict";
 
 let _haEntitiesCache = null;       // last fetched groups payload
 let _haSelectedSet = new Set();    // entity_ids currently checked
@@ -1247,7 +1314,7 @@ function _toast(msg, ok = true) {
   }
 }
 
-export async function bindHASettings() {
+async function bindHASettings() {
   const cur = await _loadCurrentSettings();
   if (cur) {
     _byId("ha-url").value = cur.url || "";
@@ -1301,7 +1368,7 @@ export async function bindHASettings() {
   });
 }
 
-export async function refreshHAEntities() {
+async function refreshHAEntities() {
   const tree = _byId("ha-entities-tree");
   tree.innerHTML = "<em>Loading…</em>";
   const r = await fetch("/api/ha/entities");
@@ -1313,6 +1380,11 @@ export async function refreshHAEntities() {
   _haEntitiesCache = await r.json();
   _renderEntities(_haEntitiesCache.groups);
 }
+
+// Expose to other classic scripts (app.js).
+window.bindHASettings = bindHASettings;
+window.refreshHAEntities = refreshHAEntities;
+})();
 ```
 
 - [ ] **Step 5.2: Add HA tab to `index.html` modal**
@@ -1362,26 +1434,24 @@ In the Diary tab pane, add the chip strip below the diary prompt textarea:
 <div id="ha-entities-chips" class="ha-chips" hidden></div>
 ```
 
-Add the script tag near the end of `<body>` (alongside `settings.js`):
+Add the script tag near the end of `<body>` (alongside `settings.js`, classic script — NOT a module):
 ```html
-<script type="module" src="/static/ha_settings.js"></script>
+<script src="/static/ha_settings.js"></script>
 ```
 
 - [ ] **Step 5.3: Wire HA tab activation in `app.js`**
 
-In `src/reachy_claw/plugins/dashboard_static/app.js`, locate the modal-open / tab-click handlers used for `bindRestSettings()` / `bindDiarySettings()`. Add at the same level:
+In `src/reachy_claw/plugins/dashboard_static/app.js`, locate the modal-open / tab-click handlers used for `bindRestSettings()` / `bindDiarySettings()`. Add at the same level (no imports — `window.bindHASettings` / `window.refreshHAEntities` are exposed by `ha_settings.js`):
 
 ```javascript
-import { bindHASettings, refreshHAEntities } from "/static/ha_settings.js";
-
 // (Inside the modal-open or first-tab-show handler:)
 let haBound = false;
 async function activateHATab() {
   if (!haBound) {
-    await bindHASettings();
+    await window.bindHASettings();
     haBound = true;
   }
-  await refreshHAEntities();
+  await window.refreshHAEntities();
   await renderDiaryHAChips();
 }
 
@@ -1499,5 +1569,6 @@ git push -u origin feat/ha-sensor-sync
 2. **Async event loops**: `_fetch_ha_history` uses `asyncio.run()`. This is safe inside the `generate_diary.py` script (no outer loop). Do not call this from inside an async context.
 3. **Token redaction**: Never include `Authorization` header values in log lines. The error formatting in `ha_client.py` quotes URLs but not tokens — keep it that way.
 4. **Tab class names**: The `index.html` modal already uses some tab class convention (verify by reading the existing tabs around the General/Face/Details/Prompt/Diary buttons). Use the same classes for consistency. The class `settings-tab` shown in the example is illustrative.
-5. **Frontend module wiring**: If `app.js` is not currently an ES module (no `type="module"` on its `<script>`), import-syntax won't work. In that case, have `ha_settings.js` register `window.bindHASettings` / `window.refreshHAEntities` and call them from `app.js` directly without imports. Verify by reading the existing `<script>` tags in `index.html`.
+5. **Frontend wiring**: `ha_settings.js` is loaded as a classic `<script>` (NOT a module) and exposes `window.bindHASettings` / `window.refreshHAEntities`, matching the Wave 2 `settings.js` pattern. `app.js` calls these via the `window.*` globals — no `import`/`export`.
 6. **No new pytest fixture for aiohttp_client?** If `aiohttp_client` is unavailable, follow the pattern in `tests/test_diary_trigger_api.py` (which uses the same testing approach).
+7. **HA URL log redaction**: `_safe_url_for_log()` strips query string + userinfo before any URL appears in `HAUnreachable` exception messages. Token never goes through `_normalise_url`/`_safe_url_for_log` (it's only ever in the `Authorization` header).
