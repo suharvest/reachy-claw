@@ -1,0 +1,34 @@
+services:
+  vision-cm4:
+    build: .
+    image: vision-cm4:0.1
+    container_name: vision-cm4
+    restart: unless-stopped
+    network_mode: host
+    devices:
+      - ${CAMERA_DEVICE:-/dev/video0}:${CAMERA_DEVICE:-/dev/video0}
+    volumes:
+      - ${DATA_DIR:-~/reachy-data}/vision:/app/data
+    environment:
+      - ZMQ_PUB_PORT=8631
+      - HTTP_PORT=8630
+      - CAMERA_DEVICE=${CAMERA_DEVICE:-/dev/video0}
+      - CAMERA_W=${CAMERA_W:-640}
+      - CAMERA_H=${CAMERA_H:-480}
+      - TARGET_FPS=${TARGET_FPS:-10}
+      - EMOTION_SKIP_FRAMES=${EMOTION_SKIP_FRAMES:-5}
+      - SMILE_THRESHOLD=${SMILE_THRESHOLD:-0.75}
+      - CAPTURE_DIR=/app/data/captures
+      - FACE_DB_DIR=/app/data/faces
+      - REST_CTRL_URL=${REST_CTRL_URL:-tcp://reachy:18791}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8630/', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
