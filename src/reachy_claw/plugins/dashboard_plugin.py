@@ -24,6 +24,29 @@ logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "dashboard_static"
 
+
+_DIARY_DEFAULT_PROMPT_CACHE: str | None = None
+
+
+def _diary_default_prompt() -> str:
+    """Read the SYSTEM_PROMPT default from scripts/generate_diary.py.
+
+    Single source of truth: the script's hardcoded constant. We parse the
+    file once and cache. If the script can't be read (missing file etc.),
+    return an empty string and let the script fall back to its built-in.
+    """
+    global _DIARY_DEFAULT_PROMPT_CACHE
+    if _DIARY_DEFAULT_PROMPT_CACHE is not None:
+        return _DIARY_DEFAULT_PROMPT_CACHE
+    try:
+        path = Path(__file__).resolve().parents[3] / "scripts" / "generate_diary.py"
+        text = path.read_text(encoding="utf-8")
+        m = re.search(r'SYSTEM_PROMPT\s*=\s*"""(.*?)"""', text, re.DOTALL)
+        _DIARY_DEFAULT_PROMPT_CACHE = m.group(1).strip() if m else ""
+    except Exception:
+        _DIARY_DEFAULT_PROMPT_CACHE = ""
+    return _DIARY_DEFAULT_PROMPT_CACHE
+
 # ── Markdown Diary Parser ─────────────────────────────────────────────────────
 
 _FRONT_MATTER_RE = re.compile(r"^---\n(.*?)\n---\n(.*)$", re.DOTALL)
@@ -221,6 +244,11 @@ class DashboardPlugin(Plugin):
         app.router.add_get("/api/diary/status", diary_handlers["status"])
         app.router.add_post("/api/diary/generate", diary_handlers["generate"])
         app.router.add_post("/api/diary/publish", diary_handlers["publish"])
+
+        # Rest control API
+        rest_handlers = _build_rest_status_handlers(self.app)
+        app.router.add_get("/api/rest/status", rest_handlers["status"])
+        app.router.add_post("/api/rest/force", rest_handlers["force"])
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -459,6 +487,7 @@ class DashboardPlugin(Plugin):
                 "conversation": cfg.ollama_system_prompt or DEFAULT_SYSTEM_PROMPT,
                 "monologue": cfg.ollama_monologue_prompt or MONOLOGUE_SYSTEM_PROMPT,
                 "interpreter": cfg.interpreter_prompt or interp_default,
+                "diary": cfg.diary_system_prompt or _diary_default_prompt(),
             })
 
         elif msg_type == "set_prompt":
@@ -472,6 +501,11 @@ class DashboardPlugin(Plugin):
                 self.app.config.ollama_monologue_prompt = prompt
             elif mode == "interpreter":
                 self.app.config.interpreter_prompt = prompt
+            elif mode == "diary":
+                self.app.config.diary_system_prompt = prompt
+                self._save_overrides(["diary_system_prompt"])
+                await self._broadcast({"type": "prompt_saved", "mode": "diary"})
+                return
             else:
                 return
 
@@ -1547,7 +1581,10 @@ def _build_diary_trigger_handlers(app, broadcast):
     async def _do_generate(date: str, force: bool, job_id: str, lock: asyncio.Lock):
         try:
             await broadcast({"type": "diary_job", "job_id": job_id, "phase": "generating", "date": date})
-            rc, msg = await _run_script(GEN, date, force)
+            env_extra = {}
+            if getattr(app.config, "diary_system_prompt", "").strip():
+                env_extra["DIARY_SYSTEM_PROMPT_OVERRIDE"] = app.config.diary_system_prompt
+            rc, msg = await _run_script(GEN, date, force, env_extra=env_extra or None)
             if rc != 0:
                 await broadcast({"type": "diary_job", "job_id": job_id, "phase": "error", "date": date, "error": msg})
                 return
@@ -1612,3 +1649,60 @@ def _build_diary_trigger_handlers(app, broadcast):
         return web.json_response({"job_id": job_id, "date": date}, status=202)
 
     return {"status": status_handler, "generate": generate_handler, "publish": publish_handler}
+
+
+def _build_rest_status_handlers(app):
+    """GET /api/rest/status, POST /api/rest/force ({"action":"enter"|"exit"|"clear"})."""
+    from aiohttp import web
+
+    def _rest_plugin():
+        if hasattr(app, "get_plugin"):
+            return app.get_plugin("rest")
+        for p in getattr(app, "_plugins", getattr(app, "plugins", [])):
+            if getattr(p, "name", "") == "rest":
+                return p
+        return None
+
+    async def status_handler(request):
+        rp = _rest_plugin()
+        if rp is None:
+            return web.json_response({"error": "rest plugin not registered"}, status=503)
+        # Introspect each plugin's _paused flag so the user can verify the
+        # rest signal actually propagated to the relevant plugins.
+        plugin_states = {}
+        for p in getattr(app, "_plugins", []):
+            if hasattr(p, "_paused"):
+                plugin_states[p.name] = bool(p._paused)
+        return web.json_response({
+            "resting": rp.is_resting(),
+            "started_at": rp._started_at,
+            "force_state": rp._force_state,  # True / False / None
+            "enabled": getattr(app.config, "rest_enabled", True),
+            "window_start": getattr(app.config, "rest_window_start", "23:00"),
+            "window_end": getattr(app.config, "rest_window_end", "24:00"),
+            "timezone": getattr(app.config, "rest_timezone", "Asia/Shanghai"),
+            "plugin_paused": plugin_states,
+        })
+
+    async def force_handler(request):
+        rp = _rest_plugin()
+        if rp is None:
+            return web.json_response({"error": "rest plugin not registered"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        action = body.get("action")
+        if action == "enter":
+            await rp.force_rest()
+        elif action == "exit":
+            await rp.force_resume()
+        elif action == "clear":
+            rp.force_clear()
+        else:
+            return web.json_response(
+                {"error": "action must be one of: enter, exit, clear"}, status=400
+            )
+        return web.json_response({"resting": rp.is_resting(), "force_state": rp._force_state})
+
+    return {"status": status_handler, "force": force_handler}

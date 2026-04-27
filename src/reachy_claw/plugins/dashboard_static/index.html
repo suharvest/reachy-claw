@@ -6,7 +6,7 @@
 <title>EMOTION MIRROR</title>
 <link rel="stylesheet" href="/static/style.css?v=18">
 <link rel="stylesheet" href="/static/diary.css?v=3">
-<link rel="stylesheet" href="/static/settings.css?v=1">
+<link rel="stylesheet" href="/static/settings.css?v=5">
 </head>
 <body>
 
@@ -14,7 +14,6 @@
 <nav class="page-tabs">
     <button class="page-tab active" data-page="live">LIVE</button>
     <button class="page-tab" data-page="diary">DIARY</button>
-    <button class="page-tab" data-page="settings">SETTINGS</button>
 </nav>
 
 <!-- Page: Live Dashboard -->
@@ -106,11 +105,6 @@
     </div>
 </div>
 
-<!-- Page: Settings -->
-<div id="page-settings" class="tab-page" style="display:none">
-  <div id="settings-root"></div>
-</div>
-
 <!-- Settings button (floating) -->
 <button class="settings-btn" id="settings-open">
     <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
@@ -128,6 +122,7 @@
             <button class="settings-tab" data-tab="faces">Face Management</button>
             <button class="settings-tab" data-tab="detail">Details</button>
             <button class="settings-tab" data-tab="prompt">Prompt</button>
+            <button class="settings-tab" data-tab="diary">Diary</button>
         </div>
         <div class="settings-content">
             <div class="tab-pane active" id="tab-mode">
@@ -216,6 +211,36 @@
                         <input type="range" class="volume-slider" id="volume-slider" min="0" max="100" value="80">
                         <span class="volume-value" id="volume-value">80%</span>
                     </div>
+                </div>
+                <div class="restart-section">
+                    <div class="section-title-row">
+                        <h3>Rest Window</h3>
+                        <span class="rest-state-badge" id="rest-state-badge" title="Current rest state">— —</span>
+                    </div>
+                    <div class="toggle-row">
+                        <span class="toggle-label">Enabled</span>
+                        <button class="motor-sleep-toggle" id="rest-enabled-toggle" title="Enable scheduled rest">
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </button>
+                    </div>
+                    <div class="toggle-row rest-row">
+                        <span class="toggle-label" style="min-width: 50px;">Window</span>
+                        <input type="text" class="voice-input rest-time" id="rest-window-start" value="23:00" pattern="^([01]\d|2[0-3]):[0-5]\d$" placeholder="HH:MM" maxlength="5" inputmode="numeric">
+                        <span class="rest-sep">→</span>
+                        <input type="text" class="voice-input rest-time" id="rest-window-end" value="23:59" pattern="^(([01]\d|2[0-3]):[0-5]\d|24:00)$" placeholder="HH:MM" maxlength="5" inputmode="numeric">
+                        <span style="font-size: 11px; color: var(--text-dim); margin-left: auto;">24h</span>
+                    </div>
+                    <div class="toggle-row rest-row">
+                        <span class="toggle-label" style="min-width: 50px;">Timezone</span>
+                        <input type="text" class="url-input rest-tz" id="rest-timezone" value="Asia/Shanghai" style="flex: 1;">
+                        <button class="enroll-btn" id="rest-save">Save</button>
+                    </div>
+                    <div class="rest-actions">
+                        <button class="action-btn" id="rest-force-enter" title="Force enter rest now">Force Sleep</button>
+                        <button class="action-btn" id="rest-force-exit" title="Force exit rest now">Force Wake</button>
+                        <button class="action-btn" id="rest-force-clear" title="Drop manual override; follow schedule">Follow Schedule</button>
+                    </div>
+                    <div class="restart-status" id="rest-status"></div>
                 </div>
                 <div class="restart-section">
                     <h3>Services</h3>
@@ -406,6 +431,56 @@
                         <button class="enroll-btn" id="prompt-interp-save">Save</button>
                     </div>
                 </div>
+                <div class="detail-section">
+                    <h3>Diary Prompt</h3>
+                    <textarea id="prompt-diary" rows="6" class="prompt-textarea" placeholder="System prompt for daily diary generation. Reference sensor keys, set tone, customize sections."></textarea>
+                    <div class="prompt-actions">
+                        <button class="action-btn" id="prompt-diary-reset">Reset Default</button>
+                        <button class="enroll-btn" id="prompt-diary-save">Save</button>
+                    </div>
+                </div>
+            </div>
+            <div class="tab-pane" id="tab-diary">
+                <div class="detail-section">
+                    <h3>Auto Publish</h3>
+                    <div class="toggle-grid">
+                        <div class="toggle-row">
+                            <span class="toggle-label">Auto publish daily</span>
+                            <button class="motor-sleep-toggle" id="diary-auto-publish-toggle" title="Toggle auto publish">
+                                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                            </button>
+                        </div>
+                        <div class="toggle-row">
+                            <span class="toggle-label">Privacy linter</span>
+                            <button class="motor-sleep-toggle" id="diary-privacy-linter-toggle" title="Toggle privacy linter">
+                                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="detail-section">
+                    <h3>Site Repository</h3>
+                    <div class="toggle-grid">
+                        <div class="toggle-row">
+                            <span class="toggle-label">Repo URL</span>
+                            <input type="text" class="url-input" id="diary-site-repo-url" placeholder="git@github.com:org/site.git">
+                        </div>
+                        <div class="toggle-row">
+                            <span class="toggle-label">Diary Path</span>
+                            <input type="text" class="url-input" id="diary-site-diary-path" value="src/content/docs">
+                        </div>
+                        <div class="toggle-row">
+                            <span class="toggle-label">Branch</span>
+                            <input type="text" class="url-input" id="diary-site-branch" value="main">
+                        </div>
+                    </div>
+                    <button class="restart-btn" id="diary-save" style="margin-top: 12px; background: rgba(118, 185, 0, 0.15); border-color: rgba(118, 185, 0, 0.4); color: var(--green);">Save Diary Settings</button>
+                    <div class="restart-status" id="diary-status"></div>
+                </div>
+                <div class="detail-section">
+                    <h3>History (last 14 days)</h3>
+                    <div class="face-list" id="diary-history"><div class="face-empty">Loading...</div></div>
+                </div>
             </div>
         </div>
     </div>
@@ -453,8 +528,8 @@
     </div>
 </div>
 
-<script src="/static/app.js?v=7"></script>
+<script src="/static/app.js?v=10"></script>
 <script src="/static/diary.js?v=3"></script>
-<script src="/static/settings.js?v=1"></script>
+<script src="/static/settings.js?v=4"></script>
 </body>
 </html>

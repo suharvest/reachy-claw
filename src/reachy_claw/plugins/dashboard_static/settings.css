@@ -1,41 +1,74 @@
-/* src/reachy_claw/plugins/dashboard_static/settings.css */
-.settings-section {
-  background: rgba(0,0,0,0.45);
-  border: 1px solid #2a2a2a;
-  border-radius: 6px;
-  padding: 16px;
-  margin: 12px 0;
+/* Rest + Diary settings — overrides + small additions over style.css. */
+
+/* Single-row Rest Window layout */
+.toggle-row.rest-row {
+    gap: 10px;
 }
-.settings-section h3 {
-  margin: 0 0 12px;
-  color: #A3E635;
-  font-family: 'Outfit', sans-serif;
+.toggle-row.rest-row .voice-input.rest-time {
+    width: 64px;
+    text-align: center;
+    font-family: monospace;
+    font-size: 13px;
+    flex-shrink: 0;
 }
-.settings-section label {
-  display: block;
-  margin: 6px 0;
-  font-size: 14px;
+.toggle-row.rest-row .url-input.rest-tz {
+    flex: 1;
+    min-width: 100px;
 }
-.settings-section input[type=text],
-.settings-section input[type=time] {
-  background: #111; color: #ddd; border: 1px solid #333;
-  padding: 4px 8px; border-radius: 4px; margin-left: 6px;
+.toggle-row.rest-row .rest-sep {
+    color: var(--text-dim);
+    font-size: 12px;
+    flex-shrink: 0;
 }
-.btn-save {
-  background: #A3E635; color: #000; border: none;
-  padding: 6px 14px; border-radius: 4px; cursor: pointer;
-  margin-top: 10px;
+.toggle-row.rest-row .enroll-btn {
+    flex-shrink: 0;
 }
-.msg.ok { color: #A3E635; margin-left: 10px; }
-.msg.err { color: #f87171; margin-left: 10px; }
-.diary-history { width: 100%; border-collapse: collapse; margin-top: 10px; }
-.diary-history td {
-  padding: 6px 10px; border-bottom: 1px solid #2a2a2a;
-  font-family: monospace;
+
+/* Rest state badge in section title row */
+.rest-state-badge {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    text-transform: uppercase;
+    background: var(--border);
+    color: var(--text-dim);
 }
-.diary-history button {
-  background: transparent; color: #A3E635;
-  border: 1px solid #A3E635; padding: 4px 10px;
-  cursor: pointer; border-radius: 4px;
+.rest-state-badge.active {
+    background: rgba(118, 185, 0, 0.15);
+    color: var(--green);
+    border: 1px solid rgba(118, 185, 0, 0.3);
 }
-.diary-history button:disabled { opacity: 0.5; cursor: wait; }
+.rest-state-badge.resting {
+    background: rgba(245, 158, 11, 0.15);
+    color: #f59e0b;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+}
+.rest-state-badge.forced {
+    background: rgba(255, 51, 102, 0.12);
+    color: var(--red);
+    border: 1px solid rgba(255, 51, 102, 0.3);
+}
+
+/* Force action buttons */
+.rest-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+}
+.rest-actions .action-btn {
+    flex: 1;
+    padding: 6px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.rest-actions .action-btn:hover {
+    border-color: var(--green);
+    color: var(--green);
+}

@@ -295,6 +295,10 @@ function handleDashboardMsg(msg) {
             document.getElementById('prompt-conversation').value = msg.conversation || '';
             document.getElementById('prompt-monologue').value = msg.monologue || '';
             document.getElementById('prompt-interpreter').value = msg.interpreter || '';
+            {
+                const diaryEl = document.getElementById('prompt-diary');
+                if (diaryEl) diaryEl.value = msg.diary || '';
+            }
             break;
 
         case 'prompt_saved':
@@ -891,6 +895,7 @@ function initSettings() {
     document.getElementById('settings-open').onclick = () => {
         overlay.classList.add('open');
         loadFaces();
+        if (window.bindRestSettings) window.bindRestSettings();
         if (dashboardWs && dashboardWs.readyState === 1) {
             dashboardWs.send(JSON.stringify({ type: 'get_volume' }));
             dashboardWs.send(JSON.stringify({ type: 'get_motor' }));
@@ -919,6 +924,9 @@ function initSettings() {
                 }
             }
             if (tab.dataset.tab === 'prompt') loadPrompts();
+            if (tab.dataset.tab === 'diary' && window.bindDiarySettings) {
+                window.bindDiarySettings();
+            }
         };
     });
 
@@ -1057,6 +1065,16 @@ function initSettings() {
         document.getElementById('prompt-monologue').value = '';
         savePrompt('monologue', '');
     };
+    const diarySaveBtn = document.getElementById('prompt-diary-save');
+    if (diarySaveBtn) {
+        diarySaveBtn.onclick = () => savePrompt('diary');
+        document.getElementById('prompt-diary-reset').onclick = () => {
+            document.getElementById('prompt-diary').value = '';
+            savePrompt('diary', '');
+            // Re-load to display the built-in default again
+            setTimeout(loadPrompts, 200);
+        };
+    }
 
     // Voice settings (speaker, pitch, speed)
     initVoice();
@@ -1811,7 +1829,12 @@ function savePrompt(mode, text) {
         return;
     }
     if (text === undefined) {
-        const idMap = { conversation: 'prompt-conversation', monologue: 'prompt-monologue', interpreter: 'prompt-interpreter' };
+        const idMap = {
+            conversation: 'prompt-conversation',
+            monologue: 'prompt-monologue',
+            interpreter: 'prompt-interpreter',
+            diary: 'prompt-diary',
+        };
         text = document.getElementById(idMap[mode]).value;
     }
     dashboardWs.send(JSON.stringify({ type: 'set_prompt', mode, prompt: text }));
@@ -1868,7 +1891,6 @@ function switchPage(page) {
 
     document.getElementById('page-live').style.display = page === 'live' ? '' : 'none';
     document.getElementById('page-diary').style.display = page === 'diary' ? '' : 'none';
-    document.getElementById('page-settings').style.display = page === 'settings' ? '' : 'none';
 
     document.querySelectorAll('.page-tab').forEach(tab => {
         tab.classList.toggle('active', tab.dataset.page === page);
@@ -1878,14 +1900,6 @@ function switchPage(page) {
     if (page === 'diary' && !diaryInitialized && typeof initDiary === 'function') {
         diaryInitialized = true;
         initDiary();
-    }
-
-    // Lazy-init settings on first visit
-    if (page === 'settings' && !window._settingsRendered) {
-        window._settingsRendered = true;
-        if (typeof window.renderSettings === 'function') {
-            window.renderSettings(document.getElementById('settings-root'));
-        }
     }
 
     // No need to pause/resume video — fetch-based MJPEG handles reconnection
