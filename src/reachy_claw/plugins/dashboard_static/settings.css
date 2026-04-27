@@ -1,0 +1,41 @@
+/* src/reachy_claw/plugins/dashboard_static/settings.css */
+.settings-section {
+  background: rgba(0,0,0,0.45);
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 16px;
+  margin: 12px 0;
+}
+.settings-section h3 {
+  margin: 0 0 12px;
+  color: #A3E635;
+  font-family: 'Outfit', sans-serif;
+}
+.settings-section label {
+  display: block;
+  margin: 6px 0;
+  font-size: 14px;
+}
+.settings-section input[type=text],
+.settings-section input[type=time] {
+  background: #111; color: #ddd; border: 1px solid #333;
+  padding: 4px 8px; border-radius: 4px; margin-left: 6px;
+}
+.btn-save {
+  background: #A3E635; color: #000; border: none;
+  padding: 6px 14px; border-radius: 4px; cursor: pointer;
+  margin-top: 10px;
+}
+.msg.ok { color: #A3E635; margin-left: 10px; }
+.msg.err { color: #f87171; margin-left: 10px; }
+.diary-history { width: 100%; border-collapse: collapse; margin-top: 10px; }
+.diary-history td {
+  padding: 6px 10px; border-bottom: 1px solid #2a2a2a;
+  font-family: monospace;
+}
+.diary-history button {
+  background: transparent; color: #A3E635;
+  border: 1px solid #A3E635; padding: 4px 10px;
+  cursor: pointer; border-radius: 4px;
+}
+.diary-history button:disabled { opacity: 0.5; cursor: wait; }

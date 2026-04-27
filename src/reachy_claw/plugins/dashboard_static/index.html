@@ -6,6 +6,7 @@
 <title>EMOTION MIRROR</title>
 <link rel="stylesheet" href="/static/style.css?v=18">
 <link rel="stylesheet" href="/static/diary.css?v=3">
+<link rel="stylesheet" href="/static/settings.css?v=1">
 </head>
 <body>
 
@@ -13,6 +14,7 @@
 <nav class="page-tabs">
     <button class="page-tab active" data-page="live">LIVE</button>
     <button class="page-tab" data-page="diary">DIARY</button>
+    <button class="page-tab" data-page="settings">SETTINGS</button>
 </nav>
 
 <!-- Page: Live Dashboard -->
@@ -102,6 +104,11 @@
         </div>
         <div id="diary-content"></div>
     </div>
+</div>
+
+<!-- Page: Settings -->
+<div id="page-settings" class="tab-page" style="display:none">
+  <div id="settings-root"></div>
 </div>
 
 <!-- Settings button (floating) -->
@@ -448,5 +455,6 @@
 
 <script src="/static/app.js?v=7"></script>
 <script src="/static/diary.js?v=3"></script>
+<script src="/static/settings.js?v=1"></script>
 </body>
 </html>

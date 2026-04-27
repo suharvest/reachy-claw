@@ -1868,6 +1868,7 @@ function switchPage(page) {
 
     document.getElementById('page-live').style.display = page === 'live' ? '' : 'none';
     document.getElementById('page-diary').style.display = page === 'diary' ? '' : 'none';
+    document.getElementById('page-settings').style.display = page === 'settings' ? '' : 'none';
 
     document.querySelectorAll('.page-tab').forEach(tab => {
         tab.classList.toggle('active', tab.dataset.page === page);
@@ -1877,6 +1878,14 @@ function switchPage(page) {
     if (page === 'diary' && !diaryInitialized && typeof initDiary === 'function') {
         diaryInitialized = true;
         initDiary();
+    }
+
+    // Lazy-init settings on first visit
+    if (page === 'settings' && !window._settingsRendered) {
+        window._settingsRendered = true;
+        if (typeof window.renderSettings === 'function') {
+            window.renderSettings(document.getElementById('settings-root'));
+        }
     }
 
     // No need to pause/resume video — fetch-based MJPEG handles reconnection
