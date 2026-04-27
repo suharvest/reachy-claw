@@ -216,6 +216,12 @@ class DashboardPlugin(Plugin):
         app.router.add_get("/api/settings/{namespace}", settings_handlers["get"])
         app.router.add_put("/api/settings/{namespace}", settings_handlers["put"])
 
+        # Diary trigger API
+        diary_handlers = _build_diary_trigger_handlers(self.app, broadcast=self._broadcast)
+        app.router.add_get("/api/diary/status", diary_handlers["status"])
+        app.router.add_post("/api/diary/generate", diary_handlers["generate"])
+        app.router.add_post("/api/diary/publish", diary_handlers["publish"])
+
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         port = self.app.config.dashboard_port
@@ -1484,3 +1490,125 @@ class DashboardPlugin(Plugin):
         except Exception as e:
             logger.warning("Failed to clear captures: %s", e)
         await self._broadcast({"type": "capture_reset", "count": 0})
+
+
+def _build_diary_trigger_handlers(app, broadcast):
+    """Builds /api/diary/status, /generate, /publish handlers.
+
+    `broadcast` is an async callable that takes a dict and pushes it to all WS clients.
+    """
+    from aiohttp import web
+    import asyncio
+    import sys
+    import uuid
+    from datetime import datetime, timedelta
+    from pathlib import Path
+
+    REPO_ROOT = Path(__file__).resolve().parents[3]
+    GEN = REPO_ROOT / "scripts" / "generate_diary.py"
+    PUB = REPO_ROOT / "scripts" / "publish_diary.py"
+    SCAN_DAYS = 14
+
+    # Prevent concurrent generate/publish for the same date.
+    _date_locks: dict[str, asyncio.Lock] = {}
+
+    def _lock_for(date: str) -> asyncio.Lock:
+        if date not in _date_locks:
+            _date_locks[date] = asyncio.Lock()
+        return _date_locks[date]
+
+    async def status_handler(request):
+        today = datetime.now()
+        out = []
+        for i in range(SCAN_DAYS):
+            d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+            row = app.db.get_diary(d)
+            out.append({
+                "date": d,
+                "generated": row is not None,
+                "published": bool(row and row.get("published_at")),
+            })
+        return web.json_response({"dates": out, "scan_window_days": SCAN_DAYS})
+
+    async def _run_script(script: Path, date: str, force: bool, *, env_extra=None) -> tuple[int, str]:
+        import os
+        env = os.environ.copy()
+        if env_extra:
+            env.update(env_extra)
+        args = [sys.executable, str(script), "--date", date]
+        if force:
+            args.append("--force")
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
+        )
+        out, err = await proc.communicate()
+        return proc.returncode, (err.decode(errors="replace") or out.decode(errors="replace"))
+
+    async def _do_generate(date: str, force: bool, job_id: str, lock: asyncio.Lock):
+        try:
+            await broadcast({"type": "diary_job", "job_id": job_id, "phase": "generating", "date": date})
+            rc, msg = await _run_script(GEN, date, force)
+            if rc != 0:
+                await broadcast({"type": "diary_job", "job_id": job_id, "phase": "error", "date": date, "error": msg})
+                return
+            await broadcast({"type": "diary_job", "job_id": job_id, "phase": "done", "date": date})
+        finally:
+            lock.release()
+
+    async def _do_publish(date: str, force: bool, job_id: str, lock: asyncio.Lock):
+        try:
+            await broadcast({"type": "diary_job", "job_id": job_id, "phase": "publishing", "date": date})
+            env_extra = {
+                "SITE_REPO_URL": app.config.diary_site_repo_url,
+                "SITE_DIARY_PATH": app.config.diary_site_diary_path,
+                "SITE_BRANCH": app.config.diary_site_branch,
+            }
+            rc, msg = await _run_script(PUB, date, force, env_extra=env_extra)
+            if rc != 0:
+                await broadcast({"type": "diary_job", "job_id": job_id, "phase": "error", "date": date, "error": msg})
+                return
+            await broadcast({"type": "diary_job", "job_id": job_id, "phase": "done", "date": date})
+        finally:
+            lock.release()
+
+    async def generate_handler(request):
+        body = await request.json()
+        date = body.get("date")
+        force = bool(body.get("force"))
+        if not date:
+            return web.json_response({"error": "date required"}, status=400)
+        if not force and app.db.get_diary(date) is not None:
+            return web.json_response({"date": date, "status": "already-generated"})
+        lock = _lock_for(date)
+        if lock.locked():
+            # Per-date concurrency guard: refuse a second generate while one is in flight.
+            return web.json_response(
+                {"date": date, "status": "in-progress"}, status=409
+            )
+        await lock.acquire()
+        job_id = uuid.uuid4().hex[:12]
+        asyncio.create_task(_do_generate(date, force, job_id, lock))
+        return web.json_response({"job_id": job_id, "date": date}, status=202)
+
+    async def publish_handler(request):
+        body = await request.json()
+        date = body.get("date")
+        force = bool(body.get("force"))
+        if not date:
+            return web.json_response({"error": "date required"}, status=400)
+        row = app.db.get_diary(date)
+        if row is None:
+            return web.json_response({"error": "diary not generated"}, status=404)
+        if not force and row.get("published_at"):
+            return web.json_response({"date": date, "status": "already-published"})
+        lock = _lock_for(date)
+        if lock.locked():
+            return web.json_response(
+                {"date": date, "status": "in-progress"}, status=409
+            )
+        await lock.acquire()
+        job_id = uuid.uuid4().hex[:12]
+        asyncio.create_task(_do_publish(date, force, job_id, lock))
+        return web.json_response({"job_id": job_id, "date": date}, status=202)
+
+    return {"status": status_handler, "generate": generate_handler, "publish": publish_handler}
