@@ -12,6 +12,13 @@ from typing import Any
 import yaml
 
 from ..plugin import Plugin
+from ..settings_schema import (
+    NAMESPACES,
+    keys_for_namespace,
+    spec_for,
+    validate as validate_setting,
+)
+from ..config import save_runtime_overrides
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +105,68 @@ def _parse_diary_markdown(md: str) -> dict:
     }
 
 
+def _build_settings_handlers(app):
+    from aiohttp import web
+
+    async def get_handler(request):
+        ns = request.match_info["namespace"]
+        if ns not in NAMESPACES:
+            return web.json_response({"error": "unknown namespace"}, status=404)
+        out = {}
+        for k in keys_for_namespace(ns):
+            spec = spec_for(f"{ns}.{k}")
+            out[k] = getattr(app.config, spec.config_field)
+        return web.json_response(out)
+
+    async def put_handler(request):
+        ns = request.match_info["namespace"]
+        if ns not in NAMESPACES:
+            return web.json_response({"error": "unknown namespace"}, status=404)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "expected JSON object"}, status=400)
+
+        # Validate everything first (no partial updates).
+        fields_to_save: list[str] = []
+        for k, v in body.items():
+            qkey = f"{ns}.{k}"
+            try:
+                validate_setting(qkey, v)
+            except KeyError:
+                return web.json_response(
+                    {"error": f"unknown key: {qkey}"}, status=400
+                )
+            except ValueError as e:
+                return web.json_response(
+                    {"error": f"invalid value for {qkey}: {e}"}, status=400
+                )
+            fields_to_save.append(spec_for(qkey).config_field)
+
+        # Cross-field validation for rest window: degenerate equal start/end
+        # (other than the 24:00 sentinel) means the window is permanently closed.
+        # Reject explicitly so the user can't accidentally disable rest.
+        if ns == "rest":
+            new_start = body.get("window_start", getattr(app.config, "rest_window_start"))
+            new_end = body.get("window_end", getattr(app.config, "rest_window_end"))
+            if new_end != "24:00" and new_start == new_end:
+                return web.json_response(
+                    {"error": "rest.window_start must differ from rest.window_end (unless end is 24:00)"},
+                    status=400,
+                )
+
+        # Apply.
+        for k, v in body.items():
+            spec = spec_for(f"{ns}.{k}")
+            setattr(app.config, spec.config_field, v)
+        save_runtime_overrides(app.config, fields_to_save)
+        return web.json_response({"updated": list(body.keys())})
+
+    return {"get": get_handler, "put": put_handler}
+
+
 class DashboardPlugin(Plugin):
     """Serves exhibition dashboard UI and broadcasts robot state via WebSocket."""
 
@@ -141,6 +210,11 @@ class DashboardPlugin(Plugin):
         # AI commands endpoint (unified tool execution for skills)
         app.router.add_post("/api/ai/commands", self._handle_ai_command)
         app.router.add_static("/static", STATIC_DIR, show_index=False)
+
+        # Settings API
+        settings_handlers = _build_settings_handlers(self.app)
+        app.router.add_get("/api/settings/{namespace}", settings_handlers["get"])
+        app.router.add_put("/api/settings/{namespace}", settings_handlers["put"])
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
