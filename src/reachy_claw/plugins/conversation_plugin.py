@@ -109,6 +109,10 @@ class ConversationPlugin(Plugin):
         self._mode_manager: ModeManager | None = None  # initialized in start()
         self._narration_mode = False  # True during diary narration — suppresses conversation
 
+        # Rest window pause
+        self._paused = False
+        self._active_llm_task: asyncio.Task | None = None
+
     def setup(self) -> bool:
         return True
 
@@ -202,6 +206,8 @@ class ConversationPlugin(Plugin):
             self._mode_manager.register(InterpreterMode())
             await self._mode_manager.switch(config.conversation_mode)
             self.app.events.subscribe("monologue_trigger", self._on_monologue_trigger)
+            self.app.events.subscribe("rest_start", self._on_rest_start_handler)
+            self.app.events.subscribe("rest_end", self._on_rest_end_handler)
 
             # Apply mode-specific OllamaClient config after switch
             if isinstance(self._client, OllamaClient) and self._mode_manager:
@@ -282,6 +288,9 @@ class ConversationPlugin(Plugin):
     async def stop(self):
         self._running = False
 
+        self.app.events.unsubscribe("rest_start", self._on_rest_start_handler)
+        self.app.events.unsubscribe("rest_end", self._on_rest_end_handler)
+
         if self._pending_tasks:
             for task in list(self._pending_tasks):
                 task.cancel()
@@ -299,6 +308,36 @@ class ConversationPlugin(Plugin):
 
         if self._tts:
             self._tts.cleanup()
+
+    # ── Rest window hooks ─────────────────────────────────────────
+
+    async def on_rest_start(self) -> None:
+        self._paused = True
+        logger.info("ConversationPlugin paused for rest")
+        # Cancel any in-flight LLM task
+        active = self._active_llm_task
+        if active is not None and not active.done():
+            active.cancel()
+            try:
+                await active
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._active_llm_task = None
+        # Fire interrupt to stop any in-progress TTS playback
+        self._interrupt_event.set()
+        # Drain pending output
+        _drain_queue(self._audio_queue)
+        _drain_queue(self._sentence_queue)
+
+    async def on_rest_end(self) -> None:
+        self._paused = False
+        logger.info("ConversationPlugin resumed")
+
+    def _on_rest_start_handler(self, _data: dict) -> None:
+        asyncio.create_task(self.on_rest_start())
+
+    def _on_rest_end_handler(self, _data: dict) -> None:
+        asyncio.create_task(self.on_rest_end())
 
     def _find_motion_plugin(self):
         """Find the MotionPlugin instance if registered."""
@@ -1345,7 +1384,7 @@ class ConversationPlugin(Plugin):
                         if self._vad:
                             self._vad.reset()
                         logger.info(f"ASR is_final received: \"{text}\"")
-                        self._spawn_task(
+                        self._active_llm_task = self._spawn_task(
                             self._process_and_send(text),
                             name="conversation.process_and_send",
                         )
@@ -1374,7 +1413,7 @@ class ConversationPlugin(Plugin):
                         if self._vad:
                             self._vad.reset()
                         logger.info(f"ASR is_final during silence: \"{text}\"")
-                        self._spawn_task(
+                        self._active_llm_task = self._spawn_task(
                             self._process_and_send(text),
                             name="conversation.process_and_send",
                         )
@@ -1400,7 +1439,7 @@ class ConversationPlugin(Plugin):
     
                         if self._vad:
                             self._vad.reset()
-                        self._spawn_task(
+                        self._active_llm_task = self._spawn_task(
                             self._process_and_send(text),
                             name="conversation.process_and_send",
                         )
@@ -1415,7 +1454,7 @@ class ConversationPlugin(Plugin):
                             self._vad.reset()
                         duration = len(audio_data) / self.app.config.sample_rate
                         logger.info(f"Captured {duration:.2f}s of audio")
-                        self._spawn_task(
+                        self._active_llm_task = self._spawn_task(
                             self._transcribe_and_send(audio_data),
                             name="conversation.transcribe_and_send",
                         )
@@ -1450,6 +1489,9 @@ class ConversationPlugin(Plugin):
         overlapping LLM streams.  In interpreter mode, ASR keeps running
         but translations are still serialised to avoid pipeline conflicts.
         """
+        if self._paused:
+            logger.debug("Paused — skipping ASR final")
+            return
         async with self._send_lock:
             await self._process_and_send_inner(text)
 
@@ -1546,6 +1588,9 @@ class ConversationPlugin(Plugin):
 
     async def _process_and_send_raw(self, text: str) -> None:
         """Send pre-composed text directly to LLM (used by monologue timer)."""
+        if self._paused:
+            logger.debug("Paused — skipping monologue LLM")
+            return
         if not text or not self._client:
             return
         logger.info(f"Monologue prompt: {text[:60]}")
@@ -1567,7 +1612,7 @@ class ConversationPlugin(Plugin):
             return
         prompt = data.get("prompt", "")
         if prompt:
-            self._spawn_task(
+            self._active_llm_task = self._spawn_task(
                 self._process_and_send_raw(prompt),
                 name="conversation.monologue_auto",
             )
@@ -1668,6 +1713,10 @@ class ConversationPlugin(Plugin):
             if item is None:
                 continue
 
+            if self._paused:
+                logger.debug("Paused — skipping TTS synthesis")
+                continue
+
             if item.is_last and not item.text:
                 await self._audio_queue.put((item, None))
                 continue
@@ -1726,6 +1775,10 @@ class ConversationPlugin(Plugin):
                 continue
 
             item, prefetched_chunks = entry
+
+            if self._paused:
+                logger.debug("Paused — skipping TTS playback")
+                continue
 
             if item.is_last and not item.text:
                 await self._finish_speaking()
