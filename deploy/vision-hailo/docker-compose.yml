@@ -1,7 +1,6 @@
 services:
   vision-hailo:
-    build: .
-    image: vision-hailo:0.2
+    image: vision-hailo:0.3
     container_name: vision-hailo
     restart: unless-stopped
     network_mode: host
@@ -10,18 +9,12 @@ services:
       - ${CAMERA_DEVICE:-/dev/video0}:${CAMERA_DEVICE:-/dev/video0}
     volumes:
       - ${DATA_DIR:-~/reachy-data}/vision:/var/lib/vision-hailo
-      - /usr/lib/python3/dist-packages/hailo_platform:/usr/lib/python3/dist-packages/hailo_platform:ro
-      - /usr/lib/python3/dist-packages/hailort:/usr/lib/python3/dist-packages/hailort:ro
-      - /usr/lib/aarch64-linux-gnu/libhailort.so:/usr/lib/aarch64-linux-gnu/libhailort.so:ro
-      - /usr/lib/aarch64-linux-gnu/libhailort.so.4:/usr/lib/aarch64-linux-gnu/libhailort.so.4:ro
-      - /usr/share/hailo-models:/host-hailo-models:ro
       - /run/udev:/run/udev:ro
     environment:
-      - PYTHONPATH=/usr/lib/python3/dist-packages
       - ZMQ_PUB_PORT=8631
       - HTTP_PORT=8630
       - CAMERA_DEVICE=${CAMERA_DEVICE:-/dev/video0}
-      - HEF_DETECT=/usr/share/hailo-models/scrfd_2.5g_h8l.hef
+      - HEF_DETECT=/app/models/scrfd_2.5g.hef
       - HEF_EMOTION=/app/models/hsemotion_b0.hef
       - CAPTURE_DIR=/var/lib/vision-hailo/captures
       - FACE_DB_DIR=/var/lib/vision-hailo/faces
