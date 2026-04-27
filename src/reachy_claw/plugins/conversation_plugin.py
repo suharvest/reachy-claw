@@ -206,8 +206,6 @@ class ConversationPlugin(Plugin):
             self._mode_manager.register(InterpreterMode())
             await self._mode_manager.switch(config.conversation_mode)
             self.app.events.subscribe("monologue_trigger", self._on_monologue_trigger)
-            self.app.events.subscribe("rest_start", self._on_rest_start_handler)
-            self.app.events.subscribe("rest_end", self._on_rest_end_handler)
 
             # Apply mode-specific OllamaClient config after switch
             if isinstance(self._client, OllamaClient) and self._mode_manager:
@@ -251,6 +249,11 @@ class ConversationPlugin(Plugin):
                 logger.warning(f"{name} init failed: {r}")
         elapsed = (time.perf_counter() - t0) * 1000
         logger.info(f"All subsystems initialized in {elapsed:.0f}ms")
+
+        # Rest window hooks — subscribe at top level so they fire regardless
+        # of standalone vs gateway mode.
+        self.app.events.subscribe("rest_start", self._on_rest_start_handler)
+        self.app.events.subscribe("rest_end", self._on_rest_end_handler)
 
         # ── Phase 3: start listening + pipeline immediately ──────────
         await self._audio.start_continuous()
