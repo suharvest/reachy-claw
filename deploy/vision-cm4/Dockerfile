@@ -1,20 +1,29 @@
 FROM python:3.11-slim-bookworm
 
-# Install OpenCV dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
-    && rm -rf /var/lib/apt/lists/*
+# No apt packages needed — opencv-python-headless + mediapipe work without
+# X11/OpenGL libs (no libgl1, no mesa, no llvm).
 
 WORKDIR /app
 
-# Copy dependency specs and install
-COPY pyproject.toml emotion_onnx.py producer.py face_db.py* ./
-RUN pip install --no-cache-dir .
+# Install mediapipe without heavy optional deps (no jax, scipy, sounddevice, etc.)
+RUN pip install --no-cache-dir --no-deps mediapipe && \
+    pip install --no-cache-dir \
+    "protobuf<5" \
+    absl-py \
+    flatbuffers \
+    "numpy<2" \
+    opencv-python-headless \
+    attrs \
+    pyzmq \
+    msgpack \
+    fastapi \
+    uvicorn \
+    onnxruntime
 
-# Copy emotion model (FERPlus 8-class ONNX)
+# App code + model
+COPY emotion_onnx.py producer.py face_db.py* ./
 COPY models/ /app/models/
 
-# Create data directories
 RUN mkdir -p /app/data/captures /app/data/faces
 
 ENV CAPTURE_DIR=/app/data/captures

@@ -11,10 +11,17 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
+from unittest.mock import MagicMock
+
+# Avoid pulling in matplotlib (~30MB) — mediapipe's drawing_utils imports it
+# unconditionally but face_detection never uses it at runtime.
+sys.modules['matplotlib'] = MagicMock()
+sys.modules['matplotlib.pyplot'] = MagicMock()
 
 import cv2
 import msgpack
@@ -23,7 +30,6 @@ import zmq
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
-# MediaPipe Face Detection
 import mediapipe as mp
 
 # ONNX emotion classifier
@@ -149,8 +155,8 @@ def infer_frame(frame_bgr: np.ndarray, models: dict, state: dict) -> list[dict]:
         if emotion_model is not None:
             # Check if we should run emotion this frame
             should_run_emotion = (
-                state["frame_id"] % EMOTION_SKIP_FRAMES == 0
-                or face_id not in state["last_emotions"]
+                state.frame_id % EMOTION_SKIP_FRAMES == 0
+                or face_id not in state.last_emotions
             )
 
             if should_run_emotion:
@@ -173,13 +179,13 @@ def infer_frame(frame_bgr: np.ndarray, models: dict, state: dict) -> list[dict]:
                 if crop.size > 0:
                     try:
                         emotion_result = emotion_model.infer(crop)
-                        state["last_emotions"][face_id] = emotion_result
+                        state.last_emotions[face_id] = emotion_result
                     except Exception as e:
                         # Fallback to cached or neutral
                         pass
 
             # Use cached emotion if available
-            cached = state["last_emotions"].get(face_id)
+            cached = state.last_emotions.get(face_id)
             if cached:
                 face["emotion"] = cached["emotion"]
                 face["emotion_confidence"] = cached["emotion_confidence"]

@@ -31,3 +31,8 @@ reachy:
   serialport: /dev/cu.wchusbserial5B420748751
   spawn_daemon: false
 
+
+# Local dev — enable dashboard so we can preview SETTINGS tab
+dashboard:
+  enabled: true
+  port: 8640
