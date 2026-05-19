@@ -14,6 +14,23 @@ class EventBus:
 
     def __init__(self) -> None:
         self._subscribers: dict[str, list[Callable]] = defaultdict(list)
+        self._pending_tasks: set[asyncio.Task] = set()
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        """Cleanup completed task; log unhandled exceptions (except cancellation)."""
+        self._pending_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.exception(
+                "EventBus async callback raised unhandled exception",
+                exc_info=exc,
+            )
+
+    def _track(self, task: asyncio.Task) -> None:
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._on_task_done)
 
     def subscribe(self, event: str, callback: Callable) -> None:
         self._subscribers[event].append(callback)
@@ -31,7 +48,7 @@ class EventBus:
                 if inspect.iscoroutinefunction(cb):
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
-                        loop.create_task(cb(data))
+                        self._track(loop.create_task(cb(data)))
                     else:
                         loop.run_until_complete(cb(data))
                 else:
@@ -46,7 +63,7 @@ class EventBus:
                 if inspect.iscoroutinefunction(cb):
                     try:
                         loop = asyncio.get_running_loop()
-                        loop.create_task(cb(data))
+                        self._track(loop.create_task(cb(data)))
                     except RuntimeError:
                         # Called from non-async thread — schedule on main loop
                         try:
