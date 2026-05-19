@@ -25,7 +25,12 @@ Incoming (V2V → clawd):
   * `{"type":"tts_done"}`
   * `{"type":"vad_event","event":"speech_start"|"speech_end"}`
   * `{"type":"error","error":<msg>}`
-  * binary frames: 4-byte LE uint32 sample-rate header, then int16 PCM mono
+  * binary frames: first binary frame carries 4-byte LE uint32 sample-rate
+    header followed by int16 PCM mono. ALL SUBSEQUENT binary frames in the
+    same WebSocket session are raw int16 PCM (no header). Upstream sends
+    the header once when the first synthesised audio is ready and never
+    again for the lifetime of the connection (see
+    `seeed-local-voice/app/main.py::tts_out_task` `sr_header_sent` latch).
 """
 
 from __future__ import annotations
@@ -77,6 +82,12 @@ class V2VClient:
         self._recv_task: asyncio.Task | None = None
         self._send_lock = asyncio.Lock()
         self._connected = False
+        # Per-connection TTS sample-rate latch. Upstream sends the 4-byte
+        # LE uint32 SR header on the FIRST binary frame of the session
+        # only (verified in seeed-local-voice/app/main.py:1214,1246-1253:
+        # `sr_header_sent` is scoped to `tts_out_task` lifetime). Subsequent
+        # frames are raw int16 PCM. Reset on disconnect.
+        self._tts_sample_rate: int | None = None
 
         # Event callbacks — wire from outside before connect().
         self.on_asr_partial: Callable[[str, bool], Awaitable[None] | None] | None = None
@@ -119,6 +130,8 @@ class V2VClient:
 
     async def disconnect(self) -> None:
         self._connected = False
+        # Reset per-connection state so a reconnect re-reads the SR header.
+        self._tts_sample_rate = None
         if self._recv_task and not self._recv_task.done():
             self._recv_task.cancel()
             try:
@@ -177,13 +190,22 @@ class V2VClient:
                 await _maybe_await(self.on_error(str(e)))
 
     async def _handle_binary(self, data: bytes) -> None:
-        if len(data) < 4:
-            logger.warning("V2V binary frame too short: %d bytes", len(data))
+        # First binary frame of the session: 4-byte LE uint32 SR header
+        # followed by PCM. Subsequent frames are raw PCM (no header).
+        if self._tts_sample_rate is None:
+            if len(data) < 4:
+                logger.warning(
+                    "V2V binary frame too short for SR header: %d bytes", len(data),
+                )
+                return
+            self._tts_sample_rate = struct.unpack("<I", data[:4])[0]
+            pcm = data[4:]
+            logger.debug("V2V SR header parsed: %d Hz", self._tts_sample_rate)
+            if pcm and self.on_tts_audio:
+                await _maybe_await(self.on_tts_audio(self._tts_sample_rate, pcm))
             return
-        sample_rate = struct.unpack("<I", data[:4])[0]
-        pcm = data[4:]
         if self.on_tts_audio:
-            await _maybe_await(self.on_tts_audio(sample_rate, pcm))
+            await _maybe_await(self.on_tts_audio(self._tts_sample_rate, data))
 
     async def _handle_text(self, raw: str) -> None:
         try:

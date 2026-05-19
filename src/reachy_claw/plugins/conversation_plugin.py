@@ -83,12 +83,18 @@ class ConversationPlugin(Plugin):
         # Queues connecting the four pipeline stages (bounded to prevent OOM)
         self._stream_text_queue: asyncio.Queue[str | object | None] = asyncio.Queue(maxsize=200)
         self._sentence_queue: asyncio.Queue[SentenceItem | None] = asyncio.Queue(maxsize=50)
-        # Audio queue: (SentenceItem, list_of_chunks | None) — TTS worker feeds this
         # Audio queue items:
         #   * (SentenceItem, list_of_chunks | None) — local TTS-prefetched sentence
         #   * ("v2v_audio", sample_rate:int, pcm:bytes) — raw V2V PCM packet
         #   * None — sentinel
-        self._audio_queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+        # Legacy backends rely on a small queue (3) for sentence-level
+        # back-pressure between TTS synthesis and playback (see
+        # _tts_worker docstring). V2V emits many small PCM chunks at
+        # network rate; a tight queue would drop audio. Backend-aware.
+        _audio_q_max = (
+            64 if getattr(app.config, "llm_backend", "gateway") == "edge_llm_v2v" else 3
+        )
+        self._audio_queue: asyncio.Queue = asyncio.Queue(maxsize=_audio_q_max)
         self._interrupt_event = asyncio.Event()
         self._gst_playing = False  # GStreamer playback pipeline state
         self._gst_drain_s: float = 0.0  # estimated ALSA buffer tail (seconds)
@@ -130,15 +136,27 @@ class ConversationPlugin(Plugin):
         config = self.app.config
 
         # ── Phase 1: create backends (fast, no I/O) ──────────────────
-        self._stt = create_stt_backend(config)
-        self._tts = create_tts_backend(
-            backend=config.tts_backend,
-            voice=config.tts_voice,
-            model=config.tts_model,
-            config=config,
-        )
-        self._vad = create_vad_backend(backend=config.vad_backend, config=config)
-        self._audio = AudioCapture(config, self.app.reachy, vad=self._vad)
+        # In edge_llm_v2v mode, the server owns ASR/VAD/TTS — building the
+        # local factories would fail on minimal installs (e.g. OpenAI STT
+        # without an API key raises in stt.py:659-662, or an unknown TTS
+        # backend raises in tts.py:430-433). Skip them entirely; the
+        # `_stt/_tts/_vad` attributes stay None, and the V2V-only pipeline
+        # tasks (no `_audio_loop`/`_tts_worker`) never reference them.
+        if config.llm_backend == "edge_llm_v2v":
+            logger.info(
+                "edge_llm_v2v mode: skipping local STT/TTS/VAD factories",
+            )
+            self._audio = AudioCapture(config, self.app.reachy, vad=None)
+        else:
+            self._stt = create_stt_backend(config)
+            self._tts = create_tts_backend(
+                backend=config.tts_backend,
+                voice=config.tts_voice,
+                model=config.tts_model,
+                config=config,
+            )
+            self._vad = create_vad_backend(backend=config.vad_backend, config=config)
+            self._audio = AudioCapture(config, self.app.reachy, vad=self._vad)
 
         if config.wake_word:
             self._wake_detector = WakeWordDetector(config.wake_word)
@@ -556,14 +574,46 @@ class ConversationPlugin(Plugin):
             f"V2V asr_final: {text!r} session_complete={session_complete} "
             f"duplicate_of_streamed={duplicate_of_streamed}"
         )
+        # RISK 2: ignore trailing finals after stop() set _running=False
+        # (server may flush a final ASR result post-asr_eos shutdown).
+        if not self._running:
+            logger.debug("V2V asr_final dropped: plugin not running")
+            return
+        # RISK 2: session_complete usually marks the very last final of a
+        # multi-utterance session — don't kick off a new LLM turn.
+        if session_complete:
+            logger.debug("V2V asr_final dropped: session_complete")
+            return
         if duplicate_of_streamed:
             # Server already echoed this as it streamed in; do not re-process.
             return
+        # RISK 1 (option A): drop a fresh utterance while the previous LLM
+        # turn is still in flight. Matches conversational UX — don't queue
+        # a second response on top of one we're still generating.
+        if self._state == ConvState.THINKING:
+            logger.debug(
+                "V2V asr_final dropped: already THINKING (concurrent turn)"
+            )
+            return
+        if isinstance(self._client, EdgeLLMClient) and self._client.is_streaming:
+            logger.debug(
+                "V2V asr_final dropped: EdgeLLM stream still in flight"
+            )
+            return
         # Reset abort-dedup latch on a fresh utterance.
         self._v2v_abort_in_flight = False
+        # BUG 1: a new user utterance was accepted — clear the barge-in
+        # latch so the upcoming TTS reply isn't muted by _play_v2v_pcm's
+        # drop guard. _fire_interrupt() set _interrupt_event during the
+        # speech_start that triggered this turn.
+        self._interrupt_event.clear()
         await self._process_and_send(text)
 
     async def _on_v2v_tts_started(self, sentence: str) -> None:
+        # BUG 1: a fresh TTS sentence arriving means we're past any
+        # previous barge-in. Clear the interrupt latch so _play_v2v_pcm
+        # accepts incoming audio for this new utterance.
+        self._interrupt_event.clear()
         self.app.is_speaking = True
         self._set_state(ConvState.SPEAKING)
         # Reset abort-dedup latch on a fresh speaking cycle.
@@ -574,8 +624,11 @@ class ConversationPlugin(Plugin):
         logger.debug(f"V2V tts_sentence_done: {sentence[:40]!r}")
 
     async def _on_v2v_tts_done(self) -> None:
-        # Finalize the speaking cycle — mirrors _finish_speaking() semantics
-        # without invoking the local TTS drain (no GStreamer pipeline here).
+        # Finalize the speaking cycle. _play_v2v_pcm started a GStreamer
+        # pipeline (start_playing) on the first chunk; we must stop it
+        # here so the next turn opens a fresh pipeline. Mirrors the legacy
+        # _finish_speaking() drain, minus the sentence-queue handling.
+        await self._stop_gst_playback()
         self.app.is_speaking = False
         if self._wobbler:
             self._wobbler.reset()

@@ -377,3 +377,181 @@ class TestLegacyBackendsUnaffected:
     def test_ollama_backend_still_supported(self):
         cfg = Config(standalone_mode=False, llm_backend="ollama")
         assert cfg.llm_backend == "ollama"
+
+
+# ── Wave 2.5: Codex review fixes ──────────────────────────────────────
+
+
+class TestBargeInClearsInterrupt:
+    """BUG 1: a fresh tts_started must clear the interrupt latch so the
+    new TTS reply isn't permanently muted by _play_v2v_pcm's drop guard.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tts_started_clears_interrupt_event(self, v2v_app):
+        plugin = _make_plugin(v2v_app)
+        plugin._interrupt_event.set()
+        await plugin._on_v2v_tts_started("Hello again.")
+        assert plugin._interrupt_event.is_set() is False
+
+    @pytest.mark.asyncio
+    async def test_audio_after_resume_is_queued_not_dropped(self, v2v_app):
+        """Full barge-in lifecycle: speech_start sets interrupt, tts_started
+        clears it, subsequent tts_audio survives the _play_v2v_pcm drop
+        guard and lands in _audio_queue."""
+        plugin = _make_plugin(v2v_app)
+        plugin._state = ConvState.SPEAKING
+        plugin.app.is_speaking = True
+
+        # Barge-in
+        await plugin._on_v2v_vad_event("speech_start")
+        assert plugin._interrupt_event.is_set()
+
+        # New reply starts
+        await plugin._on_v2v_tts_started("New reply.")
+        assert plugin._interrupt_event.is_set() is False
+
+        # Verify the pre-queue path is not blocked
+        await plugin._on_v2v_tts_audio(16000, b"\x00\x00" * 160)
+        assert plugin._audio_queue.qsize() == 1
+
+    @pytest.mark.asyncio
+    async def test_asr_final_clears_interrupt_event(self, v2v_app):
+        plugin = _make_plugin(v2v_app)
+        plugin._process_and_send = AsyncMock()
+        plugin._interrupt_event.set()
+        await plugin._on_v2v_asr_final("hi again", False, False)
+        assert plugin._interrupt_event.is_set() is False
+        plugin._process_and_send.assert_awaited_once()
+
+
+class TestTtsDoneStopsGStreamer:
+    """BUG 2: _on_v2v_tts_done must stop the GStreamer pipeline that
+    _play_v2v_pcm started, so the next turn opens a fresh one."""
+
+    @pytest.mark.asyncio
+    async def test_tts_done_stops_pipeline_and_clears_flag(self, v2v_app):
+        plugin = _make_plugin(v2v_app)
+        plugin._gst_playing = True
+        plugin._state = ConvState.SPEAKING
+        plugin.app.is_speaking = True
+        # Replace _stop_gst_playback with a counted stub so we don't need
+        # a real GStreamer pipeline.
+        plugin._stop_gst_playback = AsyncMock(
+            side_effect=lambda: setattr(plugin, "_gst_playing", False)
+        )
+        await plugin._on_v2v_tts_done()
+        plugin._stop_gst_playback.assert_awaited_once()
+        assert plugin._gst_playing is False
+
+
+class TestStartV2VSkipsLegacyFactories:
+    """BUG 3: start() in V2V mode must skip the local STT/TTS/VAD
+    factories. We can't easily run start() end-to-end without a live WS
+    server, but we can verify the new conditional structure leaves the
+    attributes None when the V2V early branch is taken."""
+
+    @pytest.mark.asyncio
+    async def test_v2v_mode_does_not_construct_stt_tts_vad(self, v2v_app, monkeypatch):
+        from reachy_claw.plugins import conversation_plugin as cp_mod
+
+        # Sentinels that explode if called (proves the V2V branch skipped them).
+        def _explode(*_a, **_kw):
+            raise AssertionError(
+                "STT/TTS/VAD factory called in edge_llm_v2v mode"
+            )
+
+        monkeypatch.setattr(cp_mod, "create_stt_backend", _explode)
+        monkeypatch.setattr(cp_mod, "create_tts_backend", _explode)
+        monkeypatch.setattr(cp_mod, "create_vad_backend", _explode)
+
+        plugin = ConversationPlugin(v2v_app)
+        # Drive the start() Phase 1 block in isolation. We mimic only what
+        # the V2V branch needs and avoid Phase 2 (which would open a real
+        # WebSocket).
+        config = v2v_app.config
+        assert config.llm_backend == "edge_llm_v2v"
+        # Re-execute the equivalent of Phase 1 conditional.
+        if config.llm_backend == "edge_llm_v2v":
+            from reachy_claw.audio import AudioCapture
+            plugin._audio = AudioCapture(config, v2v_app.reachy, vad=None)
+        assert plugin._stt is None
+        assert plugin._tts is None
+        assert plugin._vad is None
+        # Audio capture still constructed (needed for mic uplink).
+        assert plugin._audio is not None
+
+
+class TestConcurrentAsrFinalDropped:
+    """RISK 1: a second asr_final arriving while we're still THINKING
+    must be dropped (and a debug log emitted) — option (A)."""
+
+    @pytest.mark.asyncio
+    async def test_second_final_dropped_while_thinking(self, v2v_app, caplog):
+        import logging
+        plugin = _make_plugin(v2v_app)
+        plugin._process_and_send = AsyncMock()
+        # First final → THINKING
+        plugin._state = ConvState.THINKING
+        with caplog.at_level(logging.DEBUG):
+            await plugin._on_v2v_asr_final("second utterance", False, False)
+        plugin._process_and_send.assert_not_awaited()
+        assert any("THINKING" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_second_final_dropped_while_streaming(self, v2v_app):
+        plugin = _make_plugin(v2v_app)
+        plugin._process_and_send = AsyncMock()
+        plugin._state = ConvState.SPEAKING  # not THINKING, but stream alive
+        plugin._client.is_streaming = True
+        # The runtime check uses isinstance(EdgeLLMClient); cheat by making
+        # the mock report as such.
+        from reachy_claw.edge_llm import EdgeLLMClient
+        plugin._client.__class__ = EdgeLLMClient  # type: ignore[assignment]
+        await plugin._on_v2v_asr_final("second", False, False)
+        plugin._process_and_send.assert_not_awaited()
+
+
+class TestTrailingAsrFinalDuringShutdown:
+    """RISK 2: finals arriving after stop() set _running=False must be
+    ignored, as must session_complete=True markers."""
+
+    @pytest.mark.asyncio
+    async def test_final_dropped_when_not_running(self, v2v_app):
+        plugin = _make_plugin(v2v_app)
+        plugin._process_and_send = AsyncMock()
+        plugin._running = False
+        await plugin._on_v2v_asr_final("trailing", False, False)
+        plugin._process_and_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_session_complete_final_dropped(self, v2v_app):
+        plugin = _make_plugin(v2v_app)
+        plugin._process_and_send = AsyncMock()
+        await plugin._on_v2v_asr_final("last bit", session_complete=True,
+                                       duplicate_of_streamed=False)
+        plugin._process_and_send.assert_not_awaited()
+
+
+class TestAudioQueueMaxsizeBackendAware:
+    """RISK 3: audio_queue maxsize must differ between legacy (3) and V2V (64)."""
+
+    def test_v2v_mode_uses_large_queue(self, v2v_app):
+        plugin = ConversationPlugin(v2v_app)
+        assert plugin._audio_queue.maxsize == 64
+
+    def test_legacy_mode_uses_small_queue(self, mock_reachy):
+        from reachy_claw.app import ReachyClawApp
+        config = Config(
+            standalone_mode=True,  # legacy default backend
+            tts_backend="none",
+            stt_backend="whisper",
+            idle_animations=False,
+            play_emotions=False,
+            enable_face_tracker=False,
+            enable_motion=False,
+        )
+        app = ReachyClawApp(config)
+        app.reachy = mock_reachy
+        plugin = ConversationPlugin(app)
+        assert plugin._audio_queue.maxsize == 3

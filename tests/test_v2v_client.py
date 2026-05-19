@@ -210,6 +210,99 @@ class TestInboundDispatch:
         assert events == ["speech_start", "speech_end"]
 
     @pytest.mark.asyncio
+    async def test_binary_audio_sr_header_once_per_session(self):
+        """BUG 4: upstream sends the SR header ONLY on the first binary
+        frame of the WS session. Subsequent binary frames are raw PCM.
+        Cross-ref: seeed-local-voice/app/main.py:1214,1246-1253 — the
+        `sr_header_sent` latch is scoped to `tts_out_task` lifetime and
+        never reset, so it persists across utterances and tts_done events.
+        """
+        sr = 24000
+        pcm0 = b"\xaa\xbb" * 50
+        pcm1 = b"\xcc\xdd" * 50
+        pcm2 = b"\xee\xff" * 50
+        first_frame = struct.pack("<I", sr) + pcm0
+
+        async with FakeV2VServer() as srv:
+            srv.scripted = [
+                first_frame,
+                pcm1,                                # raw PCM, no header
+                {"type": "tts_done"},                # mid-session sentinel
+                pcm2,                                # still raw PCM
+            ]
+            cfg = V2VConfig(url=srv.url)
+            client = V2VClient(cfg)
+
+            audio: list[tuple[int, bytes]] = []
+            done_count = {"n": 0}
+            done = asyncio.Event()
+
+            async def on_audio(sample_rate, data):
+                audio.append((sample_rate, data))
+                if len(audio) == 3:
+                    done.set()
+
+            async def on_tts_done():
+                done_count["n"] += 1
+
+            client.on_tts_audio = on_audio
+            client.on_tts_done = on_tts_done
+            await client.connect()
+            try:
+                await asyncio.wait_for(done.wait(), timeout=2.0)
+            finally:
+                await client.disconnect()
+
+        # All three audio frames must yield SR=24000 and exact bytes.
+        assert audio == [(sr, pcm0), (sr, pcm1), (sr, pcm2)]
+        assert done_count["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_disconnect_resets_sr_latch(self):
+        """A reconnect must re-read the SR header."""
+        sr_a, sr_b = 16000, 22050
+        pcm_a, pcm_b = b"\xaa" * 32, b"\xbb" * 32
+
+        async with FakeV2VServer() as srv:
+            srv.scripted = [struct.pack("<I", sr_a) + pcm_a]
+            cfg = V2VConfig(url=srv.url)
+            client = V2VClient(cfg)
+            seen: list[tuple[int, bytes]] = []
+            ev = asyncio.Event()
+
+            async def on_audio(sample_rate, data):
+                seen.append((sample_rate, data))
+                ev.set()
+
+            client.on_tts_audio = on_audio
+            await client.connect()
+            await asyncio.wait_for(ev.wait(), timeout=2.0)
+            await client.disconnect()
+            # Latch reset on disconnect.
+            assert client._tts_sample_rate is None
+
+        # Second session, different SR — header must be parsed afresh.
+        async with FakeV2VServer() as srv2:
+            srv2.scripted = [struct.pack("<I", sr_b) + pcm_b]
+            cfg2 = V2VConfig(url=srv2.url)
+            client2 = V2VClient(cfg2)
+            seen2: list[tuple[int, bytes]] = []
+            ev2 = asyncio.Event()
+
+            async def on_audio2(sample_rate, data):
+                seen2.append((sample_rate, data))
+                ev2.set()
+
+            client2.on_tts_audio = on_audio2
+            await client2.connect()
+            try:
+                await asyncio.wait_for(ev2.wait(), timeout=2.0)
+            finally:
+                await client2.disconnect()
+
+        assert seen2 == [(sr_b, pcm_b)]
+
+    @pytest.mark.asyncio
     async def test_asr_final_carries_session_complete(self):
         async with FakeV2VServer() as srv:
             srv.scripted = [{

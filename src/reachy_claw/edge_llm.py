@@ -20,7 +20,7 @@ import json
 import logging
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -80,6 +80,12 @@ class EdgeLLMClient:
     @property
     def is_connected(self) -> bool:
         return self._connected and self._http is not None
+
+    @property
+    def is_streaming(self) -> bool:
+        """True while a chat-completion stream task is in flight."""
+        t = self._current_task
+        return t is not None and not t.done()
 
     @property
     def model(self) -> str:
