@@ -14,6 +14,7 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 
 import cv2
@@ -298,6 +299,12 @@ class VisionService:
         self._frame_count = 0
         self._last_stats_time = time.monotonic()
         self._frame_id = 0
+        # Rolling-window timing samples (last 100 frames, milliseconds).
+        # _pull_inf_samples: capture.get_inference_frame() blocking duration.
+        # _total_loop_samples: one full run_loop iteration incl. sleep.
+        # Reported as simple mean via /api/stats.
+        self._pull_inf_samples: deque = deque(maxlen=100)
+        self._total_loop_samples: deque = deque(maxlen=100)
 
     def init(self):
         """Initialize all components."""
@@ -503,7 +510,9 @@ class VisionService:
                 time.sleep(1.0)
                 continue
 
+            t_pull_start = time.monotonic()
             frame = self.capture.get_inference_frame()
+            pull_inf_ms = (time.monotonic() - t_pull_start) * 1000
             if frame is None:
                 no_frame_count += 1
                 # If no frames for 30s, camera may have disconnected
@@ -515,6 +524,7 @@ class VisionService:
                 time.sleep(0.01)
                 continue
 
+            self._pull_inf_samples.append(pull_inf_ms)
             no_frame_count = 0
             self._frame_id += 1
             self.process_and_publish(frame, self._frame_id)
@@ -523,6 +533,7 @@ class VisionService:
             sleep_time = target_interval - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
+            self._total_loop_samples.append((time.monotonic() - t0) * 1000)
 
     def close(self):
         """Cleanup."""
@@ -602,9 +613,15 @@ async def stats():
     frame = getattr(service, "_last_frame", None)
     if frame is not None:
         inf_shape = list(frame.shape)  # [H, W, C]
+    pull_samples = service._pull_inf_samples
+    loop_samples = service._total_loop_samples
+    pull_inf_ms = round(sum(pull_samples) / len(pull_samples), 1) if pull_samples else 0.0
+    total_loop_ms = round(sum(loop_samples) / len(loop_samples), 1) if loop_samples else 0.0
     return {
         "fps": round(service._fps, 1),
         "inference_ms": round(service._inference_ms, 1),
+        "pull_inf_ms": pull_inf_ms,
+        "total_loop_ms": total_loop_ms,
         "pipeline_ready": service.pipeline is not None,
         "faces_registered": len(service.face_db.list_faces()) if service.face_db else 0,
         "inference_frame_shape": inf_shape,
