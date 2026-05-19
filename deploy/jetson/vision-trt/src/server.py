@@ -496,7 +496,11 @@ class VisionService:
 
         camera_retry_interval = 30  # seconds between camera retry attempts
         last_camera_retry = 0.0
-        no_frame_count = 0
+        # Wall-time watchdog: count-based watchdogs are too sensitive to the
+        # None-path sleep duration (0.01s × N triggers ≈ 0.01N seconds, not
+        # N / target_fps seconds), so trigger on elapsed real time instead.
+        no_frame_deadline = 30.0  # seconds without a frame before camera restart
+        last_frame_time = time.monotonic()
 
         while self._running:
             t0 = time.monotonic()
@@ -507,6 +511,7 @@ class VisionService:
                     last_camera_retry = t0
                     logger.info("Camera not available, attempting to start...")
                     self._start_camera()
+                    last_frame_time = time.monotonic()
                 time.sleep(1.0)
                 continue
 
@@ -514,18 +519,20 @@ class VisionService:
             frame = self.capture.get_inference_frame()
             pull_inf_ms = (time.monotonic() - t_pull_start) * 1000
             if frame is None:
-                no_frame_count += 1
-                # If no frames for 30s, camera may have disconnected
-                if no_frame_count > target_fps * 30:
-                    logger.warning("No frames for 30s, restarting camera...")
+                # If no frames for `no_frame_deadline` seconds (wall-time),
+                # the camera may have disconnected — restart it.
+                if time.monotonic() - last_frame_time > no_frame_deadline:
+                    logger.warning(
+                        f"No frames for {no_frame_deadline:.0f}s, restarting camera..."
+                    )
                     self.capture.close()
                     self.capture = None
-                    no_frame_count = 0
+                    last_frame_time = time.monotonic()
                 time.sleep(0.01)
                 continue
 
             self._pull_inf_samples.append(pull_inf_ms)
-            no_frame_count = 0
+            last_frame_time = time.monotonic()
             self._frame_id += 1
             self.process_and_publish(frame, self._frame_id)
 
@@ -613,8 +620,12 @@ async def stats():
     frame = getattr(service, "_last_frame", None)
     if frame is not None:
         inf_shape = list(frame.shape)  # [H, W, C]
-    pull_samples = service._pull_inf_samples
-    loop_samples = service._total_loop_samples
+    # Snapshot the deques first: list(deque) is atomic under the GIL,
+    # whereas iterating/sum'ing the live deque can race with the inference
+    # thread's append() and raise RuntimeError. This keeps the hot path
+    # lock-free on the producer side.
+    pull_samples = list(service._pull_inf_samples)
+    loop_samples = list(service._total_loop_samples)
     pull_inf_ms = round(sum(pull_samples) / len(pull_samples), 1) if pull_samples else 0.0
     total_loop_ms = round(sum(loop_samples) / len(loop_samples), 1) if loop_samples else 0.0
     return {
