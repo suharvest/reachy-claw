@@ -299,11 +299,16 @@ class VisionService:
         self._frame_count = 0
         self._last_stats_time = time.monotonic()
         self._frame_id = 0
-        # Rolling-window timing samples (last 100 frames, milliseconds).
-        # _pull_inf_samples: capture.get_inference_frame() blocking duration.
-        # _total_loop_samples: one full run_loop iteration incl. sleep.
-        # Reported as simple mean via /api/stats.
+        # Rolling-window timing samples (last 100 iterations, milliseconds).
+        # _pull_inf_samples:  capture.get_inference_frame() blocking duration,
+        #                     recorded for BOTH successful frames and None
+        #                     returns (so we don't hide pull-timeout stalls).
+        # _loop_busy_samples: time spent in pull + inference + serialize
+        #                     (i.e. before the FPS-cap sleep).
+        # _total_loop_samples: full run_loop iteration including the cap sleep.
+        # Reported as simple means via /api/stats.
         self._pull_inf_samples: deque = deque(maxlen=100)
+        self._loop_busy_samples: deque = deque(maxlen=100)
         self._total_loop_samples: deque = deque(maxlen=100)
 
     def init(self):
@@ -518,6 +523,10 @@ class VisionService:
             t_pull_start = time.monotonic()
             frame = self.capture.get_inference_frame()
             pull_inf_ms = (time.monotonic() - t_pull_start) * 1000
+            # Record pull duration regardless of outcome — None-path stalls
+            # (e.g. 100ms timeouts inside the capture queue) are exactly the
+            # data we need when diagnosing FPS issues, so don't hide them.
+            self._pull_inf_samples.append(pull_inf_ms)
             if frame is None:
                 # If no frames for `no_frame_deadline` seconds (wall-time),
                 # the camera may have disconnected — restart it.
@@ -531,11 +540,15 @@ class VisionService:
                 time.sleep(0.01)
                 continue
 
-            self._pull_inf_samples.append(pull_inf_ms)
             last_frame_time = time.monotonic()
             self._frame_id += 1
             self.process_and_publish(frame, self._frame_id)
 
+            # Busy = pull + inference + serialize (everything before the cap
+            # sleep). Total = busy + cap sleep. Tracking both lets /api/stats
+            # distinguish real work from idle FPS-cap padding.
+            busy_ms = (time.monotonic() - t0) * 1000
+            self._loop_busy_samples.append(busy_ms)
             elapsed = time.monotonic() - t0
             sleep_time = target_interval - elapsed
             if sleep_time > 0:
@@ -625,13 +638,16 @@ async def stats():
     # thread's append() and raise RuntimeError. This keeps the hot path
     # lock-free on the producer side.
     pull_samples = list(service._pull_inf_samples)
+    busy_samples = list(service._loop_busy_samples)
     loop_samples = list(service._total_loop_samples)
     pull_inf_ms = round(sum(pull_samples) / len(pull_samples), 1) if pull_samples else 0.0
+    loop_busy_ms = round(sum(busy_samples) / len(busy_samples), 1) if busy_samples else 0.0
     total_loop_ms = round(sum(loop_samples) / len(loop_samples), 1) if loop_samples else 0.0
     return {
         "fps": round(service._fps, 1),
         "inference_ms": round(service._inference_ms, 1),
         "pull_inf_ms": pull_inf_ms,
+        "loop_busy_ms": loop_busy_ms,
         "total_loop_ms": total_loop_ms,
         "pipeline_ready": service.pipeline is not None,
         "faces_registered": len(service.face_db.list_faces()) if service.face_db else 0,
