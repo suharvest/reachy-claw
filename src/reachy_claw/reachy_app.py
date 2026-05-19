@@ -20,7 +20,7 @@ from reachy_claw.config import load_config
 logger = logging.getLogger(__name__)
 
 
-class ReachyClawApp(ReachyMiniApp):
+class ReachyClawApp(ReachyMiniApp):  # noqa: F811 (intentional wrapper class name; pre-existing)
     """Reachy Mini app wrapper around ReachyClawApp."""
 
     # No custom settings UI for now

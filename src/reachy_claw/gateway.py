@@ -135,7 +135,7 @@ class DesktopRobotClient:
         t0 = time.perf_counter()
         try:
             # Send a minimal message — fast to process, minimal token usage
-            response = await asyncio.wait_for(
+            response = await asyncio.wait_for(  # noqa: F841 (warmup discards response)
                 self.send_message("."), timeout=15.0
             )
             elapsed = (time.perf_counter() - t0) * 1000

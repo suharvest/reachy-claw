@@ -49,7 +49,7 @@ def test_setup_without_aiohttp():
 
     # If aiohttp IS installed, setup should return True
     try:
-        import aiohttp
+        import aiohttp  # noqa: F401
         assert plugin.setup() is True
     except ImportError:
         assert plugin.setup() is False

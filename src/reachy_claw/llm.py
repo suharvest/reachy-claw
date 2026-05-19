@@ -13,11 +13,14 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import httpx
 
 from .gateway import StreamCallbacks
+
+if TYPE_CHECKING:
+    from .skill_loader import SkillSection
 
 logger = logging.getLogger(__name__)
 
