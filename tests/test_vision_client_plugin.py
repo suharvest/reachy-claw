@@ -45,7 +45,11 @@ class TestVisionClientSetup:
         app = ReachyClawApp(vision_config)
         app.reachy = None
         plugin = VisionClientPlugin(app)
-        assert plugin.setup() is True
+        # zmq / msgpack may not be installed in CI; stub them so setup() can succeed
+        mock_zmq = MagicMock()
+        mock_msgpack = MagicMock()
+        with patch.dict("sys.modules", {"zmq": mock_zmq, "msgpack": mock_msgpack}):
+            assert plugin.setup() is True
 
     def test_skips_without_zmq(self, vision_app):
         plugin = VisionClientPlugin(vision_app)
