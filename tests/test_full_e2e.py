@@ -19,7 +19,6 @@ import asyncio
 import json
 import os
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
@@ -30,9 +29,7 @@ from reachy_claw.config import Config
 from reachy_claw.gateway import DesktopRobotClient
 from reachy_claw.plugins.conversation_plugin import (
     ConversationPlugin,
-    ConvState,
     SentenceItem,
-    _drain_queue,
 )
 
 SPEECH_URL = os.environ.get("SPEECH_SERVICE_URL", "http://100.67.111.58:8000")

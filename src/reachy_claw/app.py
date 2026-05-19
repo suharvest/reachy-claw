@@ -158,7 +158,7 @@ class ReachyClawApp:
                 import gi
                 gi.require_version("Gst", "1.0")
                 gi.require_version("GstApp", "1.0")
-                from gi.repository import Gst, GstApp  # noqa: F811
+                from gi.repository import Gst  # noqa: F811
 
                 self._appsink_audio = Gst.ElementFactory.make("appsink")
                 caps = Gst.Caps.from_string(
@@ -191,7 +191,7 @@ class ReachyClawApp:
                 import gi
                 gi.require_version("Gst", "1.0")
                 gi.require_version("GstApp", "1.0")
-                from gi.repository import Gst, GstApp  # noqa: F811
+                from gi.repository import Gst  # noqa: F811
 
                 self._appsrc = Gst.ElementFactory.make("appsrc")
                 self._appsrc.set_property("format", Gst.Format.TIME)

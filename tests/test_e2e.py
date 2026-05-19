@@ -14,13 +14,12 @@ import asyncio
 import json
 import time
 
-import numpy as np
 import pytest
 import websockets
 
 from reachy_claw.app import ReachyClawApp
 from reachy_claw.config import Config
-from reachy_claw.gateway import DesktopRobotClient, StreamCallbacks
+from reachy_claw.gateway import DesktopRobotClient
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────

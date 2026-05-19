@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import time
 
 import pytest
 
 from reachy_claw.motion.emotion_mapper import (
-    AntennaAnimation,
     AntennaMotion,
     EmotionMapper,
     HeadPose,

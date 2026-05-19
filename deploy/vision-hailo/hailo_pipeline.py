@@ -4,10 +4,6 @@ Single VDevice shared across both models using Hailo's multi-context feature.
 """
 
 import logging
-import queue
-import threading
-from functools import partial
-from typing import Optional
 
 import numpy as np
 
@@ -338,7 +334,6 @@ class HailoPipeline:
 
         Returns list of face dicts with center, bbox, confidence, landmarks, emotion.
         """
-        import cv2
 
         h, w = frame.shape[:2]
 

@@ -11,7 +11,7 @@ import logging
 import math
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from queue import Empty, Queue
 from typing import Optional
 

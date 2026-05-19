@@ -12,7 +12,7 @@ mappings, and CLI choices — no manual wiring needed.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, fields
 from typing import Any
 
 logger = logging.getLogger(__name__)

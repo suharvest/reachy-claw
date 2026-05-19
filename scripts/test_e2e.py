@@ -24,7 +24,6 @@ import argparse
 import asyncio
 import logging
 import os
-import subprocess
 import sys
 
 # Add src to path for local dev

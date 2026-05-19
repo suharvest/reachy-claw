@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import shutil
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 

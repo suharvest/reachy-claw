@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -45,7 +44,6 @@ def test_setup_without_aiohttp():
 
     with patch.dict("sys.modules", {"aiohttp": None}):
         # Import will fail, setup should return False
-        import importlib
         # Actually test via the ImportError path
         pass
 
@@ -227,7 +225,6 @@ def diary_dashboard_app(diary_db: Database, mock_reachy):
 async def test_diary_endpoint_returns_sqlite_diary(diary_dashboard_app, diary_db):
     """Test that diary endpoint reads from SQLite and parses Markdown correctly."""
     from aiohttp import web
-    from aiohttp.test_utils import AioHTTPTestCase, unittest_run_loop
     from reachy_claw.plugins.dashboard_plugin import DashboardPlugin
 
     # Create plugin and spin up a test server
@@ -297,7 +294,7 @@ async def test_diary_endpoint_404_for_missing_date(diary_dashboard_app):
 
 
 def test_diary_default_prompt_includes_ha_paragraph():
-    from reachy_claw.plugins.dashboard_plugin import _diary_default_prompt, _DIARY_DEFAULT_PROMPT_CACHE
+    from reachy_claw.plugins.dashboard_plugin import _diary_default_prompt
     import reachy_claw.plugins.dashboard_plugin as mod
     mod._DIARY_DEFAULT_PROMPT_CACHE = None  # reset cache
     text = _diary_default_prompt()

@@ -1,6 +1,5 @@
 """Tests for the lightweight Ollama LLM client."""
 
-import asyncio
 import json
 
 import pytest

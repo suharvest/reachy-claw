@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 from unittest.mock import MagicMock
 
 # Avoid pulling in matplotlib (~30MB) — mediapipe's drawing_utils imports it
@@ -180,7 +180,7 @@ def infer_frame(frame_bgr: np.ndarray, models: dict, state: dict) -> list[dict]:
                     try:
                         emotion_result = emotion_model.infer(crop)
                         state.last_emotions[face_id] = emotion_result
-                    except Exception as e:
+                    except Exception:
                         # Fallback to cached or neutral
                         pass
 

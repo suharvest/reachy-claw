@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import struct
 import tempfile
-import wave
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 

@@ -7,7 +7,6 @@ import asyncio
 import pytest
 
 from reachy_claw.app import ReachyClawApp
-from reachy_claw.config import Config
 from reachy_claw.plugin import Plugin
 
 

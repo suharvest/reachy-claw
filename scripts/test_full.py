@@ -40,7 +40,6 @@ import sys
 
 sys.path.insert(0, "src")
 
-from reachy_claw.config import Config, load_config
 from reachy_claw.interface import ReachyInterface
 from reachy_claw.main import parse_args, create_config, setup_logging
 

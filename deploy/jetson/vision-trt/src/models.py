@@ -162,7 +162,6 @@ class TRTEngine:
 
     def infer(self, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         """Run inference with named inputs/outputs."""
-        import pycuda.driver as cuda
 
         # Ensure CUDA context is active on this thread
         if self._cuda_ctx is not None:

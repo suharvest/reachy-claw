@@ -12,7 +12,6 @@ import pytest
 from reachy_claw.edge_llm import (
     EdgeLLMClient,
     EdgeLLMConfig,
-    EdgeLLMError,
 )
 from reachy_claw.gateway import StreamCallbacks
 

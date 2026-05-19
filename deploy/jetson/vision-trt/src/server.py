@@ -313,7 +313,6 @@ class VisionService:
 
     def init(self):
         """Initialize all components."""
-        from .capture import GstCameraCapture
         from .config import config
         from .face_database import FaceDatabase
         from .stream import VideoStreamer

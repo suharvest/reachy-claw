@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from reachy_claw.settings_schema import (
-    SettingSpec,
     NAMESPACES,
     REGISTRY,
     keys_for_namespace,

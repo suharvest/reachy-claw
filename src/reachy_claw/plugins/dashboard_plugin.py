@@ -354,7 +354,6 @@ class DashboardPlugin(Plugin):
         then dispatches to the conversation plugin's robot command handler.
         """
         from aiohttp import web
-        import json as _json
 
         try:
             data = await request.json()
@@ -934,7 +933,6 @@ class DashboardPlugin(Plugin):
             return
 
         # Sanitize name (alphanumeric + underscore only)
-        import re
         name = name[:32]
         if not name or not name.strip():
             await self._broadcast({"type": "clone_voice_result", "error": "Please enter a voice name"})

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 
 from reachy_claw.config import Config, load_config, save_runtime_overrides
 

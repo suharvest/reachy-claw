@@ -5,10 +5,9 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
-from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from .migrations import migrate
 

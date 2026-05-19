@@ -9,7 +9,6 @@ Wire-compatible with reachy-claw's VisionClientPlugin.
 """
 
 import asyncio
-import json
 import logging
 import os
 import threading
@@ -24,7 +23,7 @@ import zmq
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
-from hailo_pipeline import init_pipeline, HailoPipeline, EMOTION_CLASSES
+from hailo_pipeline import init_pipeline, HailoPipeline
 from face_db import FaceDatabase
 
 logging.basicConfig(
@@ -85,7 +84,7 @@ def _open_camera() -> cv2.VideoCapture:
             if cap.isOpened():
                 logger.info(f"Opened camera on {dev}")
                 return cap
-        raise RuntimeError(f"Cannot open any camera device")
+        raise RuntimeError("Cannot open any camera device")
 
     logger.info(f"Camera {CAMERA_DEVICE} open at {CAMERA_W}x{CAMERA_H}")
     return cap

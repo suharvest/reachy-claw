@@ -5,7 +5,6 @@ Processes a single BGR frame through the full vision pipeline.
 
 import logging
 import threading
-import time
 from collections import deque
 from dataclasses import dataclass, field
 

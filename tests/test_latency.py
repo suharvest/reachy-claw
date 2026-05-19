@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import struct
 import time
 
 import numpy as np
@@ -189,7 +188,6 @@ class TestGatewayLLMLatency:
         """Measure: send message → first complete sentence from accumulator."""
         from reachy_claw.plugins.conversation_plugin import (
             ConversationPlugin,
-            SentenceItem,
         )
 
         config = _make_config()
