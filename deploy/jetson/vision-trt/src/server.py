@@ -479,8 +479,13 @@ class VisionService:
 
     def run_loop(self):
         """Main inference loop (runs in thread)."""
-        target_interval = 1.0 / self.config.TARGET_FPS
-        logger.info(f"Inference loop started (target {self.config.TARGET_FPS} FPS)")
+        # Explicit FPS cap: 5 Hz is enough for face / gesture tasks and
+        # halves GPU duty cycle vs. the previous 10 FPS default. The cap
+        # is a per-loop upper bound only — pull_inf may still block on
+        # the camera if frames arrive slower than 5 Hz.
+        target_fps = 5
+        target_interval = 1.0 / target_fps
+        logger.info(f"Inference loop started (target {target_fps} FPS)")
 
         camera_retry_interval = 30  # seconds between camera retry attempts
         last_camera_retry = 0.0
@@ -502,7 +507,7 @@ class VisionService:
             if frame is None:
                 no_frame_count += 1
                 # If no frames for 30s, camera may have disconnected
-                if no_frame_count > self.config.TARGET_FPS * 30:
+                if no_frame_count > target_fps * 30:
                     logger.warning("No frames for 30s, restarting camera...")
                     self.capture.close()
                     self.capture = None
