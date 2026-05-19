@@ -22,8 +22,10 @@ from typing import Any, Coroutine
 import numpy as np
 
 from ..audio import AudioCapture, WakeWordDetector
+from ..edge_llm import EdgeLLMClient, EdgeLLMConfig
 from ..gateway import DesktopRobotClient
 from ..llm import OllamaClient, OllamaConfig, MONOLOGUE_SYSTEM_PROMPT
+from ..v2v_client import V2VClient, V2VConfig
 from ..mode import ModeContext, ModeManager
 from ..modes import ConversationMode, MonologueMode, InterpreterMode
 from ..motion.head_wobbler import HeadWobbler
@@ -67,7 +69,10 @@ class ConversationPlugin(Plugin):
 
     def __init__(self, app):
         super().__init__(app)
-        self._client: DesktopRobotClient | OllamaClient | None = None
+        self._client: DesktopRobotClient | OllamaClient | EdgeLLMClient | None = None
+        self._v2v: V2VClient | None = None
+        self._v2v_sr_mismatch_logged: bool = False
+        self._v2v_abort_in_flight: bool = False
         self._stt = None
         self._tts = None
         self._vad = None
@@ -79,7 +84,11 @@ class ConversationPlugin(Plugin):
         self._stream_text_queue: asyncio.Queue[str | object | None] = asyncio.Queue(maxsize=200)
         self._sentence_queue: asyncio.Queue[SentenceItem | None] = asyncio.Queue(maxsize=50)
         # Audio queue: (SentenceItem, list_of_chunks | None) — TTS worker feeds this
-        self._audio_queue: asyncio.Queue[tuple[SentenceItem, list | None] | None] = asyncio.Queue(maxsize=3)
+        # Audio queue items:
+        #   * (SentenceItem, list_of_chunks | None) — local TTS-prefetched sentence
+        #   * ("v2v_audio", sample_rate:int, pcm:bytes) — raw V2V PCM packet
+        #   * None — sentinel
+        self._audio_queue: asyncio.Queue = asyncio.Queue(maxsize=64)
         self._interrupt_event = asyncio.Event()
         self._gst_playing = False  # GStreamer playback pipeline state
         self._gst_drain_s: float = 0.0  # estimated ALSA buffer tail (seconds)
@@ -143,11 +152,17 @@ class ConversationPlugin(Plugin):
 
         # ── Phase 2: preload + connect + warmup ALL in parallel ──────
         async def _init_stt():
+            if config.llm_backend == "edge_llm_v2v":
+                logger.info("Skipping local STT init (edge_llm_v2v delegates ASR to V2V)")
+                return
             logger.info("Loading speech recognition model...")
             await asyncio.to_thread(self._stt.preload)
             logger.info("Speech recognition ready")
 
         async def _init_vad():
+            if config.llm_backend == "edge_llm_v2v":
+                logger.info("Skipping local VAD init (edge_llm_v2v delegates VAD to V2V)")
+                return
             await asyncio.to_thread(self._vad.preload)
             logger.info(f"VAD backend: {config.vad_backend}")
 
@@ -157,7 +172,38 @@ class ConversationPlugin(Plugin):
                 logger.info("Running in standalone mode - no server connection")
                 return
 
-            if config.llm_backend == "ollama":
+            if config.llm_backend == "edge_llm_v2v":
+                from ..llm import DEFAULT_SYSTEM_PROMPT
+
+                edge_cfg = EdgeLLMConfig(
+                    base_url=config.edge_llm_url,
+                    model=config.edge_llm_model,
+                    system_prompt=DEFAULT_SYSTEM_PROMPT,
+                    max_tokens=config.edge_llm_max_tokens,
+                    prefix_cache=config.edge_llm_prefix_cache,
+                )
+                self._client = EdgeLLMClient(edge_cfg)
+                await self._client.connect()
+                self._setup_callbacks()
+                if config.gateway_warmup:
+                    await self._client.warmup_session()
+                logger.info(f"Using Edge LLM: {self._client.model} @ {config.edge_llm_url}")
+
+                v2v_cfg = V2VConfig(
+                    url=config.v2v_url,
+                    sample_rate=config.sample_rate,
+                    asr_language=config.v2v_asr_language,
+                    tts_language=config.v2v_tts_language,
+                    vad=config.v2v_vad,
+                    vad_silence_ms=config.v2v_vad_silence_ms,
+                    multi_utterance=config.v2v_multi_utterance,
+                )
+                self._v2v = V2VClient(v2v_cfg)
+                self._setup_v2v_callbacks()
+                # On V2V connect failure: propagate. DO NOT silently fall back.
+                await self._v2v.connect()
+                logger.info(f"V2V connected: {config.v2v_url}")
+            elif config.llm_backend == "ollama":
                 from ..llm import DEFAULT_SYSTEM_PROMPT
 
                 system_prompt = config.ollama_system_prompt or DEFAULT_SYSTEM_PROMPT
@@ -215,6 +261,9 @@ class ConversationPlugin(Plugin):
             logger.info(f"Mode: {config.conversation_mode}{mode_label}")
 
         async def _init_tts():
+            if config.llm_backend == "edge_llm_v2v":
+                logger.info("Skipping local TTS warmup (edge_llm_v2v delegates TTS to V2V)")
+                return
             logger.info(f"TTS backend: {config.tts_backend}")
             await self._warmup_tts()
 
@@ -247,6 +296,14 @@ class ConversationPlugin(Plugin):
             if isinstance(r, Exception):
                 name = ["STT", "VAD", "Gateway", "TTS", "Robot"][i]
                 logger.warning(f"{name} init failed: {r}")
+        # edge_llm_v2v: fail hard on Gateway init exception so orchestrator can
+        # choose a different backend. Do NOT silently fall back here.
+        if config.llm_backend == "edge_llm_v2v":
+            gateway_result = results[2]
+            if isinstance(gateway_result, Exception):
+                raise RuntimeError(
+                    f"edge_llm_v2v init failed: {gateway_result}"
+                ) from gateway_result
         elapsed = (time.perf_counter() - t0) * 1000
         logger.info(f"All subsystems initialized in {elapsed:.0f}ms")
 
@@ -265,12 +322,20 @@ class ConversationPlugin(Plugin):
             logger.info("Speak anytime - always listening!")
         logger.info("=" * 50)
 
-        tasks = [
-            self._audio_loop(),
-            self._sentence_accumulator(),
-            self._tts_worker(),
-            self._output_pipeline(),
-        ]
+        if config.llm_backend == "edge_llm_v2v":
+            # V2V mode: ASR/VAD/sentence-split/TTS are server-side.
+            # Reuse _output_pipeline for V2V-delivered audio chunks.
+            tasks = [
+                self._v2v_audio_uplink_loop(),
+                self._output_pipeline(),
+            ]
+        else:
+            tasks = [
+                self._audio_loop(),
+                self._sentence_accumulator(),
+                self._tts_worker(),
+                self._output_pipeline(),
+            ]
 
         async def _guarded(coro, name: str):
             try:
@@ -305,6 +370,25 @@ class ConversationPlugin(Plugin):
 
         if self._audio:
             await self._audio.stop()
+
+        # V2V backend: send asr_eos + abort (if speaking), then disconnect
+        # WebSocket before tearing down the LLM client.
+        if self._v2v is not None:
+            try:
+                if self._v2v.is_connected:
+                    try:
+                        await self._v2v.send_asr_eos()
+                    except Exception as e:
+                        logger.debug(f"V2V send_asr_eos failed: {e}")
+                    if self.app.is_speaking:
+                        try:
+                            await self._v2v.abort()
+                        except Exception as e:
+                            logger.debug(f"V2V abort failed: {e}")
+                await self._v2v.disconnect()
+            except Exception as e:
+                logger.warning(f"V2V shutdown failed: {e}")
+            self._v2v = None
 
         if self._client:
             await self._client.disconnect()
@@ -441,6 +525,136 @@ class ConversationPlugin(Plugin):
         cb.on_emotion = self._on_emotion
         cb.on_robot_command = self._on_robot_command
 
+    # ── V2V callbacks (edge_llm_v2v backend) ──────────────────────────
+
+    def _setup_v2v_callbacks(self) -> None:
+        assert self._v2v is not None
+        self._v2v.on_asr_partial = self._on_v2v_asr_partial
+        self._v2v.on_asr_endpoint = self._on_v2v_asr_endpoint
+        self._v2v.on_asr_final = self._on_v2v_asr_final
+        self._v2v.on_tts_started = self._on_v2v_tts_started
+        self._v2v.on_tts_sentence_done = self._on_v2v_tts_sentence_done
+        self._v2v.on_tts_done = self._on_v2v_tts_done
+        self._v2v.on_tts_audio = self._on_v2v_tts_audio
+        self._v2v.on_vad_event = self._on_v2v_vad_event
+        self._v2v.on_error = self._on_v2v_error
+
+    async def _on_v2v_asr_partial(self, text: str, is_stable: bool) -> None:
+        if text and self._state == ConvState.IDLE:
+            self._set_state(ConvState.TRANSCRIBING)
+        self.app.events.emit(
+            "asr_partial", {"text": text, "is_stable": is_stable}
+        )
+
+    async def _on_v2v_asr_endpoint(self) -> None:
+        logger.debug("V2V asr_endpoint")
+
+    async def _on_v2v_asr_final(
+        self, text: str, session_complete: bool, duplicate_of_streamed: bool,
+    ) -> None:
+        logger.debug(
+            f"V2V asr_final: {text!r} session_complete={session_complete} "
+            f"duplicate_of_streamed={duplicate_of_streamed}"
+        )
+        if duplicate_of_streamed:
+            # Server already echoed this as it streamed in; do not re-process.
+            return
+        # Reset abort-dedup latch on a fresh utterance.
+        self._v2v_abort_in_flight = False
+        await self._process_and_send(text)
+
+    async def _on_v2v_tts_started(self, sentence: str) -> None:
+        self.app.is_speaking = True
+        self._set_state(ConvState.SPEAKING)
+        # Reset abort-dedup latch on a fresh speaking cycle.
+        self._v2v_abort_in_flight = False
+        self.app.events.emit("tts_started", {"sentence": sentence})
+
+    async def _on_v2v_tts_sentence_done(self, sentence: str) -> None:
+        logger.debug(f"V2V tts_sentence_done: {sentence[:40]!r}")
+
+    async def _on_v2v_tts_done(self) -> None:
+        # Finalize the speaking cycle — mirrors _finish_speaking() semantics
+        # without invoking the local TTS drain (no GStreamer pipeline here).
+        self.app.is_speaking = False
+        if self._wobbler:
+            self._wobbler.reset()
+        if self._state != ConvState.LISTENING:
+            self._set_state(ConvState.IDLE)
+        self.app.events.emit("tts_done", {})
+
+    async def _on_v2v_tts_audio(self, sample_rate: int, pcm: bytes) -> None:
+        # Warn once if the server sample rate doesn't match the local audio
+        # capture/playback sample rate. Wave 1: no resampling.
+        if (
+            sample_rate != self.app.config.sample_rate
+            and not self._v2v_sr_mismatch_logged
+        ):
+            logger.warning(
+                "V2V audio sample rate %d != local %d; no resampling in Wave 2",
+                sample_rate, self.app.config.sample_rate,
+            )
+            self._v2v_sr_mismatch_logged = True
+        # Push V2V PCM chunk into _audio_queue for the output pipeline to
+        # play. The V2V branch of _output_pipeline recognizes the
+        # ("v2v_audio", sample_rate, pcm) marker and dispatches to GStreamer.
+        try:
+            self._audio_queue.put_nowait(("v2v_audio", sample_rate, pcm))
+        except asyncio.QueueFull:
+            logger.warning("V2V audio queue full, dropping chunk")
+
+    async def _on_v2v_vad_event(self, event: str) -> None:
+        if event == "speech_start":
+            if self._v2v_abort_in_flight:
+                logger.debug("V2V speech_start: abort already in-flight, skip")
+                return
+            self._v2v_abort_in_flight = True
+            await self._fire_interrupt(notify_v2v=True)
+            if self._state == ConvState.SPEAKING:
+                self._set_state(ConvState.LISTENING)
+
+    async def _on_v2v_error(self, error: str) -> None:
+        logger.error(f"V2V error: {error}")
+        if self._state in (ConvState.THINKING, ConvState.SPEAKING, ConvState.TRANSCRIBING):
+            self._set_state(ConvState.IDLE)
+
+    async def _v2v_audio_uplink_loop(self) -> None:
+        """Forward mic chunks to V2V as PCM16 mono bytes.
+
+        AudioCapture yields float32 in [-1, 1]; V2V expects int16 LE bytes.
+        """
+        if not self._audio or not self._v2v:
+            return
+        logger.info("V2V audio uplink loop started")
+        try:
+            while self._running:
+                chunk = await self._audio.read_chunk(1024)
+                if chunk is None:
+                    await asyncio.sleep(0.01)
+                    continue
+                if isinstance(chunk, np.ndarray):
+                    if chunk.dtype != np.int16:
+                        pcm = np.clip(chunk * 32768.0, -32768, 32767).astype(np.int16)
+                    else:
+                        pcm = chunk
+                    payload = pcm.tobytes()
+                else:
+                    payload = bytes(chunk)
+                if not self._v2v.is_connected:
+                    await asyncio.sleep(0.05)
+                    continue
+                try:
+                    await self._v2v.send_audio(payload)
+                except Exception as e:
+                    logger.warning(f"V2V send_audio failed: {e}")
+                    await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("V2V audio uplink loop crashed")
+        finally:
+            logger.info("V2V audio uplink loop stopped")
+
     async def _on_stream_start(self, run_id: str) -> None:
         logger.debug(f"Stream started: {run_id}")
         self._current_run_id = run_id
@@ -461,10 +675,17 @@ class ConversationPlugin(Plugin):
             if hasattr(self, "_t_send") and self._t_send:
                 ttft = (time.perf_counter() - self._t_send) * 1000
                 logger.info(f"TTFT: {ttft:.0f}ms (send → first delta)")
-        try:
-            self._stream_text_queue.put_nowait(text)
-        except asyncio.QueueFull:
-            logger.warning("stream_text_queue full, dropping delta")
+        if self._v2v is not None:
+            # V2V mode: forward token directly to server-side SentenceBuffer.
+            try:
+                await self._v2v.send_text_delta(text)
+            except Exception as e:
+                logger.warning(f"V2V send_text_delta failed: {e}")
+        else:
+            try:
+                self._stream_text_queue.put_nowait(text)
+            except asyncio.QueueFull:
+                logger.warning("stream_text_queue full, dropping delta")
         self.app.events.emit("llm_delta", {"text": text, "run_id": run_id})
 
     async def _on_stream_end(self, full_text: str, run_id: str) -> None:
@@ -477,7 +698,13 @@ class ConversationPlugin(Plugin):
             self._t_send = None
         else:
             logger.info(f"Response complete ({len(full_text)} chars)")
-        await self._stream_text_queue.put(None)
+        if self._v2v is not None:
+            try:
+                await self._v2v.flush_tts()
+            except Exception as e:
+                logger.warning(f"V2V flush_tts failed: {e}")
+        else:
+            await self._stream_text_queue.put(None)
         self.app.events.emit("llm_end", {"full_text": full_text, "run_id": run_id})
 
     async def _on_stream_abort(self, reason: str, run_id: str) -> None:
@@ -487,7 +714,13 @@ class ConversationPlugin(Plugin):
             return
         logger.info(f"Stream aborted: {reason}")
         self._current_run_id = None
-        await self._stream_text_queue.put(None)
+        if self._v2v is not None:
+            try:
+                await self._v2v.abort()
+            except Exception as e:
+                logger.warning(f"V2V abort failed: {e}")
+        else:
+            await self._stream_text_queue.put(None)
         self.app.events.emit("llm_end", {"full_text": "", "run_id": run_id})
         # Ensure we recover to IDLE so deferred announcements can proceed
         if self._state in (ConvState.THINKING, ConvState.SPEAKING):
@@ -1777,6 +2010,12 @@ class ConversationPlugin(Plugin):
             if entry is None:
                 continue
 
+            # V2V raw PCM packet: ("v2v_audio", sample_rate, pcm_bytes)
+            if isinstance(entry, tuple) and len(entry) == 3 and entry[0] == "v2v_audio":
+                _, sr, pcm = entry
+                await self._play_v2v_pcm(sr, pcm)
+                continue
+
             item, prefetched_chunks = entry
 
             if self._paused:
@@ -1851,6 +2090,39 @@ class ConversationPlugin(Plugin):
             except Exception:
                 pass
             self._gst_playing = False
+
+    async def _play_v2v_pcm(self, sample_rate: int, pcm: bytes) -> None:
+        """Play one V2V PCM16 audio chunk via the existing GStreamer path.
+
+        No sentence-level fade or pre-buffer: V2V emits short chunks already.
+        """
+        if self._paused or self._interrupt_event.is_set():
+            return
+        if not pcm:
+            return
+        reachy = self.app.reachy
+        if not reachy or not getattr(getattr(reachy, "media", None), "audio", None):
+            return
+        try:
+            samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+        except Exception as e:
+            logger.warning(f"V2V PCM decode failed: {e}")
+            return
+        vol = self.app.config.audio_volume
+        if vol != 1.0:
+            samples = np.clip(samples * vol, -1.0, 1.0).astype(np.float32)
+        if not self._gst_playing:
+            try:
+                reachy.media.start_playing()
+            except Exception:
+                pass
+            self._gst_playing = True
+        try:
+            reachy.media.push_audio_sample(samples)
+        except Exception as e:
+            logger.warning(f"V2V push_audio_sample failed: {e}")
+        if self._wobbler:
+            self._wobbler.feed(samples)
 
     async def _finish_speaking(self) -> None:
         """Clean up after speaking is done."""
@@ -1935,11 +2207,15 @@ class ConversationPlugin(Plugin):
 
     # ── Interrupt ─────────────────────────────────────────────────────
 
-    async def _fire_interrupt(self) -> None:
+    async def _fire_interrupt(self, notify_v2v: bool = False) -> None:
         """Fire barge-in interrupt: stop playback, drain queues, notify server.
 
         Designed to be fast — network calls are fire-and-forget so the audio
         loop resumes listening immediately after barge-in.
+
+        When ``notify_v2v`` is True (V2V-driven VAD speech_start), an abort
+        frame is sent to the V2V service in addition to the LLM-client
+        interrupt.
         """
         logger.info("Firing interrupt")
         self._interrupt_event.set()
@@ -1963,6 +2239,11 @@ class ConversationPlugin(Plugin):
             self._spawn_task(
                 self._client.send_interrupt(),
                 name="conversation.send_interrupt",
+            )
+        if notify_v2v and self._v2v is not None:
+            self._spawn_task(
+                self._v2v.abort(),
+                name="conversation.v2v_abort",
             )
 
     # ── TTS + interruptible playback ──────────────────────────────────
