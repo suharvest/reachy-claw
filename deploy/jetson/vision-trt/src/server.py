@@ -31,6 +31,23 @@ _zmq = None
 _msgpack = None
 
 
+def _ws_enqueue_latest(queue, item) -> None:
+    """Put item into queue, dropping the oldest if full (latest-only).
+
+    Runs on the event loop thread, so non-thread-safe asyncio.Queue ops
+    are fine here.
+    """
+    if queue.full():
+        try:
+            queue.get_nowait()
+        except Exception:
+            pass
+    try:
+        queue.put_nowait(item)
+    except Exception:
+        pass
+
+
 class SmileCaptureTracker:
     """Track smile events and save face crops with per-person cooldown.
 
@@ -268,7 +285,11 @@ class VisionService:
         self.smile_tracker = None
         self._zmq_pub = None
         self._zmq_ctx = None
-        self._ws_clients: set = set()
+        # WS clients: WebSocket → asyncio.Queue (maxsize=1, latest-only).
+        # A per-client consumer task drains the queue and calls ws.send_text.
+        # The inference thread enqueues from a non-async context via
+        # loop.call_soon_threadsafe so we never block the camera loop.
+        self._ws_clients: dict = {}
         self._ws_lock = threading.Lock()
 
         # Stats
@@ -409,24 +430,6 @@ class VisionService:
         if capture_info:
             zmq_msg["capture"] = capture_info
 
-        ws_msg = {
-            "frame_id": frame_id,
-            "faces": [
-                {
-                    "bbox": r.bbox,
-                    "landmarks": r.landmarks,
-                    "emotion": r.emotion,
-                    "emotion_confidence": r.emotion_confidence,
-                    "identity": r.identity,
-                }
-                for r in results
-            ],
-            "stats": {
-                "fps": round(self._fps, 1),
-                "inference_ms": round(self._inference_ms, 1),
-            },
-        }
-
         # ZMQ PUB
         try:
             self._zmq_pub.send_multipart([
@@ -437,19 +440,36 @@ class VisionService:
             if self._frame_id <= 3 or self._frame_id % 1000 == 0:
                 logger.warning(f"ZMQ pub error: {e}")
 
-        # WebSocket broadcast
-        ws_json = json.dumps(ws_msg)
+        # WebSocket broadcast (skip serialization entirely if no clients).
+        # Each client has a maxsize=1 asyncio.Queue acting as a latest-only
+        # slot: a slow consumer gets older frames dropped instead of an
+        # unbounded backlog of run_coroutine_threadsafe futures.
         with self._ws_lock:
-            dead = set()
-            for ws in self._ws_clients:
-                try:
-                    asyncio.run_coroutine_threadsafe(
-                        ws.send_text(ws_json),
-                        self._loop,
-                    )
-                except Exception:
-                    dead.add(ws)
-            self._ws_clients -= dead
+            queues = list(self._ws_clients.values())
+        if queues:
+            ws_msg = {
+                "frame_id": frame_id,
+                "faces": [
+                    {
+                        "bbox": r.bbox,
+                        "landmarks": r.landmarks,
+                        "emotion": r.emotion,
+                        "emotion_confidence": r.emotion_confidence,
+                        "identity": r.identity,
+                    }
+                    for r in results
+                ],
+                "stats": {
+                    "fps": round(self._fps, 1),
+                    "inference_ms": round(self._inference_ms, 1),
+                },
+            }
+            ws_json = json.dumps(ws_msg)
+            loop = self._loop
+            for q in queues:
+                # Queue ops are not thread-safe, so schedule the put onto the
+                # event loop.
+                loop.call_soon_threadsafe(_ws_enqueue_latest, q, ws_json)
 
         # Push HW-encoded JPEG to streamer
         if self.streamer and self.capture:
@@ -811,11 +831,29 @@ async def import_faces(file: UploadFile = File(...)):
     return {"status": "imported", "faces": service.face_db.list_faces()}
 
 
+async def _ws_sender(websocket: WebSocket, queue: asyncio.Queue) -> None:
+    """Drain queue and send frames to the WebSocket client.
+
+    Lives for the lifetime of the connection. Exits on send failure or
+    cancellation; the /ws handler is responsible for unregistering.
+    """
+    try:
+        while True:
+            item = await queue.get()
+            await websocket.send_text(item)
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        return
+    except Exception as e:
+        logger.debug(f"WS sender error: {e}")
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
     with service._ws_lock:
-        service._ws_clients.add(websocket)
+        service._ws_clients[websocket] = queue
+    sender_task = asyncio.create_task(_ws_sender(websocket, queue))
     try:
         while True:
             await websocket.receive_text()  # keepalive
@@ -823,7 +861,12 @@ async def websocket_endpoint(websocket: WebSocket):
         pass
     finally:
         with service._ws_lock:
-            service._ws_clients.discard(websocket)
+            service._ws_clients.pop(websocket, None)
+        sender_task.cancel()
+        try:
+            await sender_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 @app.get("/stream")
