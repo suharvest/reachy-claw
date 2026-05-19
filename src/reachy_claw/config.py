@@ -108,7 +108,7 @@ class Config:
     barge_in_cooldown_ms: int = 80  # ignore barge-in for N ms after TTS starts (low: ReSpeaker AEC handles echo)
 
     # LLM backend (local Ollama, replaces gateway when set)
-    llm_backend: str = "gateway"  # "gateway" (OpenClaw) or "ollama"
+    llm_backend: str = "gateway"  # "gateway" (OpenClaw), "ollama", or "edge_llm_v2v"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3.5:0.8b"
     ollama_system_prompt: str = ""  # empty = use default
@@ -117,6 +117,20 @@ class Config:
     ollama_temperature: float = 0.7
     ollama_max_history: int = 3  # conversation turns to keep (0 = stateless)
     ollama_skill_dir: str = "skills"  # directory containing skill subdirs, each with SKILL.md
+
+    # ── Edge LLM (TensorRT-Edge-LLM OpenAI-compatible) ─────────
+    edge_llm_url: str = "http://localhost:8080"
+    edge_llm_model: str = ""  # empty = auto-discover via GET /v1/models
+    edge_llm_prefix_cache: bool = True
+    edge_llm_max_tokens: int = 80
+
+    # ── V2V (seeed-local-voice ASR+TTS+VAD WebSocket) ──────────
+    v2v_url: str = "ws://localhost:8621/v2v/stream"
+    v2v_asr_language: str = "auto"
+    v2v_tts_language: str = "auto"
+    v2v_vad: str = "silero"
+    v2v_vad_silence_ms: int = 700
+    v2v_multi_utterance: bool = True
 
     # VLM (Vision Language Model)
     enable_vlm: bool = False
@@ -266,6 +280,16 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("llm", "temperature"): "ollama_temperature",
     ("llm", "max_history"): "ollama_max_history",
     ("llm", "skill_dir"): "ollama_skill_dir",
+    ("llm", "edge_llm_url"): "edge_llm_url",
+    ("llm", "edge_llm_model"): "edge_llm_model",
+    ("llm", "edge_llm_prefix_cache"): "edge_llm_prefix_cache",
+    ("llm", "edge_llm_max_tokens"): "edge_llm_max_tokens",
+    ("v2v", "url"): "v2v_url",
+    ("v2v", "asr_language"): "v2v_asr_language",
+    ("v2v", "tts_language"): "v2v_tts_language",
+    ("v2v", "vad"): "v2v_vad",
+    ("v2v", "vad_silence_ms"): "v2v_vad_silence_ms",
+    ("v2v", "multi_utterance"): "v2v_multi_utterance",
     ("vlm", "enabled"): "enable_vlm",
     ("vlm", "model"): "vlm_model",
     ("vlm", "prompt"): "vlm_prompt",
@@ -322,6 +346,16 @@ _ENV_FIELD_MAP: dict[str, str] = {
     "SPEECH_SERVICE_URL": "speech_service_url",
     "SENSEVOICE_LANGUAGE": "sensevoice_language",
     "VAD_BACKEND": "vad_backend",
+    "CLAWD_EDGE_LLM_URL": "edge_llm_url",
+    "CLAWD_EDGE_LLM_MODEL": "edge_llm_model",
+    "CLAWD_EDGE_LLM_PREFIX_CACHE": "edge_llm_prefix_cache",
+    "CLAWD_EDGE_LLM_MAX_TOKENS": "edge_llm_max_tokens",
+    "CLAWD_V2V_URL": "v2v_url",
+    "CLAWD_V2V_ASR_LANGUAGE": "v2v_asr_language",
+    "CLAWD_V2V_TTS_LANGUAGE": "v2v_tts_language",
+    "CLAWD_V2V_VAD": "v2v_vad",
+    "CLAWD_V2V_VAD_SILENCE_MS": "v2v_vad_silence_ms",
+    "CLAWD_V2V_MULTI_UTTERANCE": "v2v_multi_utterance",
 }
 
 
