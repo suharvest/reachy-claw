@@ -189,7 +189,15 @@ class TRTEngine:
             if mode.name == "OUTPUT":
                 device, host, shape = self._bindings[name]
                 cuda.memcpy_dtoh_async(host, device, self._stream)
-                outputs[name] = host.reshape(shape).copy()
+                # Return a view into the pinned host buffer. Callers consume the
+                # outputs synchronously (within process_frame, before the next
+                # infer() reuses this buffer), and the parsers either flatten/
+                # copy the data (arcface/emotion call .flatten() which copies)
+                # or extract scalars into Python lists (SCRFD parser). The
+                # per-engine bindings are not shared across engines, so this is
+                # safe as long as access stays single-threaded — Fix 2 adds a
+                # pipeline-level lock to enforce that.
+                outputs[name] = host.reshape(shape)
 
         self._stream.synchronize()
         return outputs
