@@ -941,6 +941,15 @@ async def mjpeg_stream():
     """MJPEG stream for browsers."""
 
     async def generate():
+        # Heartbeat boundary part with empty body. This keeps the multipart
+        # HTTP stream "moving" through middlewares/proxies during brief
+        # upstream stalls so the client doesn't hit its idle timeout and
+        # tear down the connection. Browsers tolerate zero-length parts.
+        heartbeat = (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n"
+            b"Content-Length: 0\r\n\r\n\r\n"
+        )
         try:
             while True:
                 jpg = service.streamer.get_jpeg() if service.streamer else None
@@ -949,6 +958,11 @@ async def mjpeg_stream():
                         b"--frame\r\n"
                         b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
                     )
+                else:
+                    # No fresh frame and no usable last-known fallback.
+                    # Emit a heartbeat so the stream never goes silent for
+                    # more than ~100ms.
+                    yield heartbeat
                 await asyncio.sleep(0.1)  # ~10fps matches inference rate
         finally:
             if service.streamer and not service._ws_clients:
