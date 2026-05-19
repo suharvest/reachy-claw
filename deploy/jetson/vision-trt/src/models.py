@@ -4,6 +4,7 @@ Handles ONNX → TensorRT conversion (cached) and engine lifecycle.
 """
 
 import logging
+import mmap
 import os
 from pathlib import Path
 
@@ -57,8 +58,15 @@ class TRTEngine:
         import pycuda.driver as cuda
 
         runtime = trt.Runtime(trt_logger)
+        # mmap the engine file (read-only) instead of f.read() to avoid
+        # loading the entire serialized engine into the Python heap. The
+        # mmap object implements the buffer protocol, which TensorRT
+        # deserialize_cuda_engine accepts on TRT >= 8.5 (verified against
+        # JetPack 6.x ships TRT 10.x). deserialize_cuda_engine is
+        # synchronous, so the mmap stays valid for the duration of the call.
         with open(self._engine_path, "rb") as f:
-            self._engine = runtime.deserialize_cuda_engine(f.read())
+            with mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ) as mm:
+                self._engine = runtime.deserialize_cuda_engine(mm)
 
         if self._engine is None:
             logger.error("Failed to deserialize TRT engine")
