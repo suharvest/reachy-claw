@@ -834,17 +834,36 @@ async def import_faces(file: UploadFile = File(...)):
 async def _ws_sender(websocket: WebSocket, queue: asyncio.Queue) -> None:
     """Drain queue and send frames to the WebSocket client.
 
-    Lives for the lifetime of the connection. Exits on send failure or
-    cancellation; the /ws handler is responsible for unregistering.
+    Lives for the lifetime of the connection.
+
+    Exit paths:
+      - asyncio.CancelledError: endpoint is shutting us down; it will clean up
+        _ws_clients itself, so do nothing here (avoid double-pop race).
+      - WebSocketDisconnect: peer is gone; eagerly unregister so the inference
+        thread stops feeding an orphan queue. No need to close (already closed).
+      - Other Exception (e.g. send_text failure on a still-open socket): the
+        /ws handler may still be parked in receive_text(); proactively unregister
+        and try to close the socket so receive_text() raises and the handler
+        runs its own finally (pop is idempotent, so no double-clean issue).
     """
     try:
         while True:
             item = await queue.get()
             await websocket.send_text(item)
-    except (WebSocketDisconnect, asyncio.CancelledError):
-        return
+    except asyncio.CancelledError:
+        # Endpoint-driven shutdown; let it handle cleanup.
+        raise
+    except WebSocketDisconnect:
+        with service._ws_lock:
+            service._ws_clients.pop(websocket, None)
     except Exception as e:
         logger.debug(f"WS sender error: {e}")
+        with service._ws_lock:
+            service._ws_clients.pop(websocket, None)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @app.websocket("/ws")
