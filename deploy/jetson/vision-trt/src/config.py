@@ -73,7 +73,9 @@ class VisionConfig:
     EMOTION_WINDOW_SIZE: int = int(os.getenv("EMOTION_WINDOW_SIZE", "5"))
 
     # Performance
-    TARGET_FPS: int = int(os.getenv("TARGET_FPS", "10"))
+    # 5 Hz is enough for face / gesture tasks and roughly halves GPU duty
+    # cycle vs. the previous 10 FPS default.
+    TARGET_FPS: int = int(os.getenv("TARGET_FPS", "5"))
 
 
 config = VisionConfig()

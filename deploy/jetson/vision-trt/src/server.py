@@ -491,11 +491,10 @@ class VisionService:
 
     def run_loop(self):
         """Main inference loop (runs in thread)."""
-        # Explicit FPS cap: 5 Hz is enough for face / gesture tasks and
-        # halves GPU duty cycle vs. the previous 10 FPS default. The cap
-        # is a per-loop upper bound only — pull_inf may still block on
-        # the camera if frames arrive slower than 5 Hz.
-        target_fps = 5
+        # Explicit FPS cap from config.TARGET_FPS (default 5 Hz). The cap is
+        # a per-loop upper bound only — pull_inf may still block on the
+        # camera if frames arrive slower than the target rate.
+        target_fps = self.config.TARGET_FPS
         target_interval = 1.0 / target_fps
         logger.info(f"Inference loop started (target {target_fps} FPS)")
 
