@@ -207,13 +207,20 @@ class GstCameraCapture:
             f"v4l2src device={self._device} "
             "! tee name=t "
             # Inference: nvvidconv does YUY2→BGRx + resize in one shot (VIC HW)
-            "t. ! queue leaky=downstream max-size-buffers=2 "
+            # queue max-size-buffers=5: covers the ~108ms service-time gap
+            # between the 5 FPS inference loop (200ms cap, 89-94ms busy) and
+            # the 60 FPS camera (16.7ms/frame). At 5 buffers the tee can
+            # pre-stage enough resized frames so try_pull_sample never blocks
+            # past the cap window — eliminates 56-61ms pull_inf_ms starvation.
+            "t. ! queue leaky=downstream max-size-buffers=5 "
             f"! nvvidconv ! video/x-raw,format=BGRx,width={self._inf_width},"
             f"height={self._inf_height} "
             "! appsink name=inference_sink emit-signals=false "
             "drop=true max-buffers=1 sync=false "
-            # Stream: nvvidconv resize + HW JPEG encode
-            "t. ! queue leaky=downstream max-size-buffers=2 "
+            # Stream: nvvidconv resize + HW JPEG encode. Same 5-buffer depth
+            # keeps the MJPEG branch symmetric so it doesn't starve when the
+            # inference branch drains the tee fan-out.
+            "t. ! queue leaky=downstream max-size-buffers=5 "
             f"! nvvidconv ! video/x-raw(memory:NVMM),width={self._stream_width},"
             f"height={stream_height} "
             "! nvjpegenc "
@@ -230,10 +237,10 @@ class GstCameraCapture:
             f"! videoscale ! video/x-raw,width={self._inf_width},height={self._inf_height} "
             "! videoconvert ! video/x-raw,format=BGR "
             "! tee name=t "
-            "t. ! queue leaky=downstream max-size-buffers=2 "
+            "t. ! queue leaky=downstream max-size-buffers=5 "
             "! appsink name=inference_sink emit-signals=false "
             "drop=true max-buffers=1 sync=false "
-            "t. ! queue leaky=downstream max-size-buffers=2 "
+            "t. ! queue leaky=downstream max-size-buffers=5 "
             "! jpegenc quality=70 "
             "! appsink name=stream_sink emit-signals=false "
             "drop=true max-buffers=1 sync=false"
