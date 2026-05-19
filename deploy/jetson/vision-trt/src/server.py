@@ -687,7 +687,12 @@ async def enroll_face(name: str = Query(...)):
     if frame is None:
         return JSONResponse({"error": "No frame available"}, status_code=400)
 
-    results = service.pipeline.process_frame(frame)
+    # process_frame holds the pipeline lock (serializes with inference thread),
+    # so run it off the event loop to avoid blocking other HTTP requests.
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(
+        None, service.pipeline.process_frame, frame
+    )
     if not results:
         return JSONResponse({"error": "No face detected"}, status_code=400)
 
@@ -728,7 +733,10 @@ async def enroll_face_from_image(name: str = Form(...), image: UploadFile = File
     if frame is None:
         return JSONResponse({"error": "Invalid image"}, status_code=400)
 
-    results = service.pipeline.process_frame(frame)
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(
+        None, service.pipeline.process_frame, frame
+    )
     if not results:
         return JSONResponse({"error": "No face detected in image"}, status_code=400)
 

@@ -4,6 +4,7 @@ Processes a single BGR frame through the full vision pipeline.
 """
 
 import logging
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -57,12 +58,21 @@ class VisionPipeline:
         # Identity smoothing: bucket → (name, distance, frames_remaining)
         self._identity_cache: dict[int, tuple[str, float, int]] = {}
         self._frame_count = 0
+        # Serializes process_frame calls. The TRT engines share a single CUDA
+        # context + pinned host buffers, so the camera thread and HTTP enroll
+        # handlers must not run inference concurrently.
+        self._infer_lock = threading.Lock()
 
     def process_frame(self, frame: np.ndarray) -> list[FaceResult]:
         """Run full pipeline on a BGR frame.
 
-        Returns list of FaceResult for all detected faces.
+        Returns list of FaceResult for all detected faces. Thread-safe:
+        serialized across callers via an internal lock.
         """
+        with self._infer_lock:
+            return self._process_frame_locked(frame)
+
+    def _process_frame_locked(self, frame: np.ndarray) -> list[FaceResult]:
         self._frame_count += 1
         h, w = frame.shape[:2]
 
