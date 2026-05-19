@@ -384,6 +384,11 @@ class VisionService:
         def _f(v):
             return float(v) if v is not None else 0.0
 
+        # NOTE: 512-float embeddings are intentionally excluded from per-frame
+        # broadcasts. Downstream consumers (reachy-claw vision_client_plugin,
+        # browser dashboard) only need bbox/emotion/identity for control and
+        # display. Code paths that legitimately need the embedding (face
+        # enrollment) go through dedicated endpoints (/api/faces/enroll*).
         zmq_msg = {
             "timestamp": t0,
             "frame_id": frame_id,
@@ -393,7 +398,6 @@ class VisionService:
                     "bbox": [float(b) for b in r.bbox],
                     "landmarks": [[float(x) for x in pt] for pt in r.landmarks],
                     "confidence": _f(r.confidence),
-                    "embedding": r.embedding,  # already list[float] via .tolist()
                     "emotion": r.emotion,
                     "emotion_confidence": _f(r.emotion_confidence),
                     "identity": r.identity,
