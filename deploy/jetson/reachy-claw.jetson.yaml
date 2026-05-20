@@ -13,6 +13,11 @@ llm:
 # (asr_language=auto, vad=silero, vad_silence_ms=700, multi_utterance=true).
 v2v:
   url: ws://localhost:8621/v2v/stream
+  # Optional voice cloning. Leave commented out to use the OVS server
+  # default voice. Both fields are forwarded into the V2V config frame
+  # only when non-empty so older OVS builds keep their defaults.
+  # voice_id: "custom_voice_001"               # OVS-registered voice id
+  # voice_clone_sample: "/data/voices/sample.wav"  # optional clone sample
 
 # Note: with backend=edge_llm_v2v, top-level stt/tts/vad blocks below are
 # ignored at runtime (the server owns ASR/VAD/TTS). They are kept for now

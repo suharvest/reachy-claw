@@ -399,3 +399,57 @@ class TestRecvLoopErrorNotifications:
         assert client._connected is False
 
 
+# ── Voice cloning config frame (Wave 3) ────────────────────────────────
+
+
+class TestVoiceCloningConfig:
+    @pytest.mark.asyncio
+    async def test_config_frame_includes_voice_id_when_set(self):
+        async with FakeV2VServer() as srv:
+            cfg = V2VConfig(url=srv.url, voice_id="custom_001")
+            client = V2VClient(cfg)
+            await client.connect()
+            for _ in range(50):
+                if srv.received:
+                    break
+                await asyncio.sleep(0.01)
+            await client.disconnect()
+        kind, frame = srv.received[0]
+        assert kind == "json"
+        assert frame.get("voice_id") == "custom_001"
+
+    @pytest.mark.asyncio
+    async def test_config_frame_omits_voice_id_when_empty(self):
+        async with FakeV2VServer() as srv:
+            cfg = V2VConfig(url=srv.url)  # default voice_id=""
+            client = V2VClient(cfg)
+            await client.connect()
+            for _ in range(50):
+                if srv.received:
+                    break
+                await asyncio.sleep(0.01)
+            await client.disconnect()
+        kind, frame = srv.received[0]
+        assert kind == "json"
+        assert "voice_id" not in frame
+        assert "voice_clone_sample" not in frame
+
+    @pytest.mark.asyncio
+    async def test_config_frame_includes_clone_sample_when_set(self):
+        async with FakeV2VServer() as srv:
+            cfg = V2VConfig(
+                url=srv.url,
+                voice_id="cloned",
+                voice_clone_sample="/data/voices/sample.wav",
+            )
+            client = V2VClient(cfg)
+            await client.connect()
+            for _ in range(50):
+                if srv.received:
+                    break
+                await asyncio.sleep(0.01)
+            await client.disconnect()
+        _, frame = srv.received[0]
+        assert frame.get("voice_clone_sample") == "/data/voices/sample.wav"
+
+

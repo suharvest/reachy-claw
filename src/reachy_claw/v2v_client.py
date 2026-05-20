@@ -61,6 +61,11 @@ class V2VConfig:
     tts_voice: str | None = None
     tts_speed: float | None = None
     multi_utterance: bool = True
+    # Voice cloning hints (Wave 3). Forwarded into the config frame only
+    # when non-empty so the OVS server's defaults aren't disturbed for
+    # deployments that don't use cloning.
+    voice_id: str = ""
+    voice_clone_sample: str = ""
 
 
 _VadEvent = Literal["speech_start", "speech_end"]
@@ -124,6 +129,12 @@ class V2VClient:
             cfg_frame["tts_voice"] = self._config.tts_voice
         if self._config.tts_speed is not None:
             cfg_frame["tts_speed"] = self._config.tts_speed
+        # Voice cloning: include keys only when set so OVS deployments
+        # that don't know these fields keep their default voice.
+        if self._config.voice_id:
+            cfg_frame["voice_id"] = self._config.voice_id
+        if self._config.voice_clone_sample:
+            cfg_frame["voice_clone_sample"] = self._config.voice_clone_sample
         await self._ws.send(json.dumps(cfg_frame))
         self._connected = True
         self._recv_task = asyncio.create_task(self._recv_loop())

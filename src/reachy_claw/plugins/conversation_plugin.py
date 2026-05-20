@@ -260,6 +260,8 @@ class ConversationPlugin(Plugin):
                     vad=config.v2v_vad,
                     vad_silence_ms=config.v2v_vad_silence_ms,
                     multi_utterance=config.v2v_multi_utterance,
+                    voice_id=config.v2v_voice_id,
+                    voice_clone_sample=config.v2v_voice_clone_sample,
                 )
                 self._v2v = V2VClient(v2v_cfg)
                 self._setup_v2v_callbacks()

@@ -131,6 +131,13 @@ class Config:
     v2v_vad: str = "silero"
     v2v_vad_silence_ms: int = 700
     v2v_multi_utterance: bool = True
+    # Optional voice cloning (forwarded into the V2V config frame).
+    # voice_id    : id of an OVS-registered voice (cloned or built-in).
+    #               Empty string = leave to OVS server default.
+    # voice_clone_sample : optional path to a reference WAV the server
+    #               can use for on-the-fly cloning (where supported).
+    v2v_voice_id: str = ""
+    v2v_voice_clone_sample: str = ""
 
     # VLM (Vision Language Model)
     enable_vlm: bool = False
@@ -290,6 +297,8 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("v2v", "vad"): "v2v_vad",
     ("v2v", "vad_silence_ms"): "v2v_vad_silence_ms",
     ("v2v", "multi_utterance"): "v2v_multi_utterance",
+    ("v2v", "voice_id"): "v2v_voice_id",
+    ("v2v", "voice_clone_sample"): "v2v_voice_clone_sample",
     ("vlm", "enabled"): "enable_vlm",
     ("vlm", "model"): "vlm_model",
     ("vlm", "prompt"): "vlm_prompt",
@@ -356,6 +365,8 @@ _ENV_FIELD_MAP: dict[str, str] = {
     "CLAWD_V2V_VAD": "v2v_vad",
     "CLAWD_V2V_VAD_SILENCE_MS": "v2v_vad_silence_ms",
     "CLAWD_V2V_MULTI_UTTERANCE": "v2v_multi_utterance",
+    "CLAWD_V2V_VOICE_ID": "v2v_voice_id",
+    "CLAWD_V2V_VOICE_CLONE_SAMPLE": "v2v_voice_clone_sample",
 }
 
 
