@@ -59,6 +59,38 @@ class SentenceItem:
 _RESET_BUFFER = object()
 
 
+# scipy is optional — fall back to numpy linear interp if absent.
+try:
+    from scipy.signal import resample_poly as _scipy_resample_poly  # type: ignore
+except Exception:  # noqa: BLE001
+    _scipy_resample_poly = None  # type: ignore[assignment]
+
+
+def _resample_pcm_f32(samples: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
+    """Resample float32 mono PCM from src_sr to dst_sr.
+
+    Prefers scipy.signal.resample_poly (polyphase filter, integer ratio,
+    high quality). Falls back to numpy linear interpolation when scipy
+    is unavailable. Returns float32 ndarray.
+    """
+    if src_sr == dst_sr or samples.size == 0:
+        return samples
+    if _scipy_resample_poly is not None:
+        # reduce to coprime up/down ratio for cleaner polyphase
+        from math import gcd
+        g = gcd(int(dst_sr), int(src_sr)) or 1
+        up = int(dst_sr) // g
+        down = int(src_sr) // g
+        out = _scipy_resample_poly(samples, up, down).astype(np.float32, copy=False)
+        return out
+    # numpy linear-interp fallback (lower quality but always available)
+    duration = samples.size / float(src_sr)
+    n_out = max(1, int(round(duration * dst_sr)))
+    x_old = np.linspace(0.0, duration, num=samples.size, endpoint=False, dtype=np.float64)
+    x_new = np.linspace(0.0, duration, num=n_out, endpoint=False, dtype=np.float64)
+    return np.interp(x_new, x_old, samples).astype(np.float32)
+
+
 # ── Plugin ────────────────────────────────────────────────────────────
 
 
@@ -73,6 +105,11 @@ class ConversationPlugin(Plugin):
         self._v2v: V2VClient | None = None
         self._v2v_sr_mismatch_logged: bool = False
         self._v2v_abort_in_flight: bool = False
+        # First-audio-byte latency: t_asr_final captured on each new ASR
+        # final, t_first_audio_byte cleared at the same time and set on the
+        # first TTS PCM chunk for that turn. Logged once per turn.
+        self._t_asr_final: float | None = None
+        self._first_audio_logged_this_turn: bool = False
         # WS reconnect machinery (one task at a time, exponential backoff).
         self._v2v_reconnect_task: asyncio.Task | None = None
         self._v2v_reconnecting: bool = False
@@ -620,6 +657,9 @@ class ConversationPlugin(Plugin):
             return
         # Reset abort-dedup latch on a fresh utterance.
         self._v2v_abort_in_flight = False
+        # First-audio-byte metric: mark turn boundary.
+        self._t_asr_final = time.perf_counter()
+        self._first_audio_logged_this_turn = False
         # BUG 1: a new user utterance was accepted — clear the barge-in
         # latch so the upcoming TTS reply isn't muted by _play_v2v_pcm's
         # drop guard. _fire_interrupt() set _interrupt_event during the
@@ -656,16 +696,29 @@ class ConversationPlugin(Plugin):
 
     async def _on_v2v_tts_audio(self, sample_rate: int, pcm: bytes) -> None:
         # Warn once if the server sample rate doesn't match the local audio
-        # capture/playback sample rate. Wave 1: no resampling.
+        # capture/playback sample rate. Resampling itself happens at the
+        # _play_v2v_pcm entry (codex review: keep this side-effect free).
         if (
             sample_rate != self.app.config.sample_rate
             and not self._v2v_sr_mismatch_logged
         ):
             logger.warning(
-                "V2V audio sample rate %d != local %d; no resampling in Wave 2",
+                "V2V audio sample rate %d != local %d; will resample at playback",
                 sample_rate, self.app.config.sample_rate,
             )
             self._v2v_sr_mismatch_logged = True
+        # First-audio-byte latency: emit once per turn, parallel to TTFT.
+        if (
+            pcm
+            and not self._first_audio_logged_this_turn
+            and self._t_asr_final is not None
+        ):
+            delta_ms = (time.perf_counter() - self._t_asr_final) * 1000
+            logger.info(
+                "first-audio-byte latency: %.0fms (asr_final -> first PCM)",
+                delta_ms,
+            )
+            self._first_audio_logged_this_turn = True
         # Push V2V PCM chunk into _audio_queue for the output pipeline to
         # play. The V2V branch of _output_pipeline recognizes the
         # ("v2v_audio", sample_rate, pcm) marker and dispatches to GStreamer.
@@ -2242,6 +2295,9 @@ class ConversationPlugin(Plugin):
         """Play one V2V PCM16 audio chunk via the existing GStreamer path.
 
         No sentence-level fade or pre-buffer: V2V emits short chunks already.
+        If the server-side sample rate doesn't match the local playback rate,
+        resample here (scipy.signal.resample_poly preferred; numpy linear
+        interp fallback).
         """
         if self._paused or self._interrupt_event.is_set():
             return
@@ -2255,6 +2311,9 @@ class ConversationPlugin(Plugin):
         except Exception as e:
             logger.warning(f"V2V PCM decode failed: {e}")
             return
+        target_sr = self.app.config.sample_rate
+        if sample_rate != target_sr and samples.size:
+            samples = _resample_pcm_f32(samples, sample_rate, target_sr)
         vol = self.app.config.audio_volume
         if vol != 1.0:
             samples = np.clip(samples * vol, -1.0, 1.0).astype(np.float32)
