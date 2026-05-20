@@ -646,13 +646,27 @@ class ConversationPlugin(Plugin):
         # turn is still in flight. Matches conversational UX — don't queue
         # a second response on top of one we're still generating.
         if self._state == ConvState.THINKING:
-            logger.debug(
-                "V2V asr_final dropped: already THINKING (concurrent turn)"
+            preview = text[:50] if text else ""
+            logger.warning(
+                "V2V asr_final dropped while THINKING (concurrent turn): %r",
+                preview,
+            )
+            # Surface to UI so the user gets visible feedback that we heard
+            # them but are still composing the previous reply.
+            self.app.events.emit(
+                "utterance_dropped",
+                {"reason": "thinking_in_progress", "text": preview},
             )
             return
         if isinstance(self._client, EdgeLLMClient) and self._client.is_streaming:
-            logger.debug(
-                "V2V asr_final dropped: EdgeLLM stream still in flight"
+            preview = text[:50] if text else ""
+            logger.warning(
+                "V2V asr_final dropped: EdgeLLM stream still in flight: %r",
+                preview,
+            )
+            self.app.events.emit(
+                "utterance_dropped",
+                {"reason": "thinking_in_progress", "text": preview},
             )
             return
         # Reset abort-dedup latch on a fresh utterance.
