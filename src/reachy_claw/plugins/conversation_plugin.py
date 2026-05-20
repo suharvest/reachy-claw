@@ -775,15 +775,41 @@ class ConversationPlugin(Plugin):
         if code in ("ws_closed", "ws_send_failed", "ws_recv_exit"):
             # Cancel any in-flight LLM stream so its deltas don't pile up
             # against a disconnected V2V (send_text_delta would raise).
-            if (
-                isinstance(self._client, EdgeLLMClient)
-                and self._client.is_streaming
-            ):
+            # State-aware cancel:
+            #   THINKING  → LLM is generating tokens; stop it
+            #   SPEAKING  → LLM may still be tail-streaming AND local TTS
+            #               playback queue may hold buffered audio; stop both
+            #   other     → nothing to cancel
+            is_edge_llm = isinstance(self._client, EdgeLLMClient)
+            if self._state == ConvState.THINKING and is_edge_llm:
+                logger.info(
+                    "V2V reconnect: cancelling EdgeLLM stream (state=THINKING)"
+                )
                 try:
                     await self._client.send_interrupt()
                 except Exception as e:
                     logger.debug(f"EdgeLLM cancel during reconnect failed: {e}")
-            if self._state in (ConvState.THINKING, ConvState.SPEAKING):
+            elif self._state == ConvState.SPEAKING:
+                if is_edge_llm:
+                    logger.info(
+                        "V2V reconnect: cancelling EdgeLLM stream (state=SPEAKING)"
+                    )
+                    try:
+                        await self._client.send_interrupt()
+                    except Exception as e:
+                        logger.debug(
+                            f"EdgeLLM cancel during reconnect failed: {e}"
+                        )
+                # Clear local TTS playback so post-reconnect audio is fresh.
+                # notify_v2v=False because the WS is already gone.
+                try:
+                    await self._fire_interrupt(notify_v2v=False)
+                except Exception as e:
+                    logger.debug(f"Local TTS drain during reconnect failed: {e}")
+            if self._state in (
+                ConvState.THINKING, ConvState.SPEAKING,
+                ConvState.LISTENING, ConvState.TRANSCRIBING,
+            ):
                 self._set_state(ConvState.IDLE)
             self._schedule_v2v_reconnect()
             return
@@ -822,7 +848,16 @@ class ConversationPlugin(Plugin):
                     return
                 try:
                     await self._v2v.connect()
-                    logger.info("V2V reconnected")
+                    # Reset turn-level state so the fresh session starts
+                    # clean. The previous turn's latches/timestamps must not
+                    # leak into the post-reconnect first utterance.
+                    self._v2v_abort_in_flight = False
+                    self._first_audio_logged_this_turn = False
+                    self._t_asr_final = None
+                    self._interrupt_event.clear()
+                    logger.info(
+                        "V2V reconnect succeeded, turn state reset"
+                    )
                     return
                 except asyncio.CancelledError:
                     raise
