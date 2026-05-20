@@ -1,9 +1,23 @@
 llm:
-  backend: ollama
-  model: qwen3.5:2b-q4_K_M
-  base_url: http://localhost:11434
-  # max_history: 5
+  backend: edge_llm_v2v
+  # TensorRT-Edge-LLM OpenAI-compatible HTTP endpoint.
+  # TODO: edge-llm-chat-service is not yet bundled into deploy/jetson/.
+  #   When that container lands, point edge_llm_url at its host port and
+  #   pin edge_llm_model to the served model name (or leave blank for
+  #   auto-discovery via GET /v1/models).
+  edge_llm_url: http://localhost:8080
+  edge_llm_model: ""   # empty = auto-discover
 
+# V2V (ASR + VAD + TTS) is served by the existing Jetson speech container
+# at :8621. Other v2v_* fields fall back to config.py defaults
+# (asr_language=auto, vad=silero, vad_silence_ms=700, multi_utterance=true).
+v2v:
+  url: ws://localhost:8621/v2v/stream
+
+# Note: with backend=edge_llm_v2v, top-level stt/tts/vad blocks below are
+# ignored at runtime (the server owns ASR/VAD/TTS). They are kept for now
+# so falling back to backend=ollama via env override doesn't lose its
+# configuration.
 stt:
   backend: paraformer-streaming
   speech_service_url: http://localhost:8621
