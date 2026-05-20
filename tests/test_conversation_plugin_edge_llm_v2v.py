@@ -555,3 +555,104 @@ class TestAudioQueueMaxsizeBackendAware:
         app.reachy = mock_reachy
         plugin = ConversationPlugin(app)
         assert plugin._audio_queue.maxsize == 3
+
+
+# ── Reconnect path: WS-drop classification & turn-state reset ─────────
+
+
+class TestV2VReconnectPath:
+    """Codex review (Wave 2.5+): _on_v2v_error must classify the error
+    code, cancel the right side-effects per current state, and
+    _v2v_reconnect_loop must reset turn-level latches on success."""
+
+    @pytest.mark.asyncio
+    async def test_on_v2v_error_ws_closed_schedules_reconnect(self, v2v_app, monkeypatch):
+        plugin = _make_plugin(v2v_app)
+        plugin._state = ConvState.IDLE
+        scheduled = {"n": 0}
+
+        def _stub_schedule():
+            scheduled["n"] += 1
+
+        monkeypatch.setattr(plugin, "_schedule_v2v_reconnect", _stub_schedule)
+        await plugin._on_v2v_error("ws_closed: peer reset")
+        assert scheduled["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_on_v2v_error_business_resets_state_no_reconnect(
+        self, v2v_app, monkeypatch,
+    ):
+        plugin = _make_plugin(v2v_app)
+        plugin._state = ConvState.THINKING
+        scheduled = {"n": 0}
+        monkeypatch.setattr(
+            plugin, "_schedule_v2v_reconnect",
+            lambda: scheduled.__setitem__("n", scheduled["n"] + 1),
+        )
+        await plugin._on_v2v_error("backend_error: model OOM")
+        assert scheduled["n"] == 0
+        assert plugin._state == ConvState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_reconnect_in_thinking_cancels_edge_llm(self, v2v_app, monkeypatch):
+        from reachy_claw.edge_llm import EdgeLLMClient
+
+        plugin = _make_plugin(v2v_app)
+        plugin._state = ConvState.THINKING
+        plugin._client.is_streaming = True
+        plugin._client.__class__ = EdgeLLMClient  # isinstance check
+        monkeypatch.setattr(plugin, "_schedule_v2v_reconnect", lambda: None)
+        await plugin._on_v2v_error("ws_closed: gone")
+        plugin._client.send_interrupt.assert_awaited()
+        assert plugin._state == ConvState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_reconnect_in_speaking_cancels_both_llm_and_playback(
+        self, v2v_app, monkeypatch,
+    ):
+        from reachy_claw.edge_llm import EdgeLLMClient
+
+        plugin = _make_plugin(v2v_app)
+        plugin._state = ConvState.SPEAKING
+        plugin._client.is_streaming = True
+        plugin._client.__class__ = EdgeLLMClient
+        # Pre-load audio queue to verify drain.
+        plugin._audio_queue.put_nowait(("v2v_audio", 16000, b"\x00\x00"))
+        monkeypatch.setattr(plugin, "_schedule_v2v_reconnect", lambda: None)
+
+        await plugin._on_v2v_error("ws_recv_exit: eof")
+        plugin._client.send_interrupt.assert_awaited()
+        # _fire_interrupt drained the audio queue.
+        assert plugin._audio_queue.empty()
+        assert plugin._interrupt_event.is_set()
+        assert plugin._state == ConvState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_reconnect_success_resets_turn_state(self, v2v_app):
+        """Drive _v2v_reconnect_loop once: connect() returns immediately
+        and the loop body must wipe turn-level latches before exiting."""
+        plugin = _make_plugin(v2v_app)
+        # Dirty turn state simulating an interrupted utterance.
+        plugin._v2v_abort_in_flight = True
+        plugin._first_audio_logged_this_turn = True
+        plugin._t_asr_final = 12345.0
+        plugin._interrupt_event.set()
+
+        # Make sleep return instantly so the loop runs fast.
+        async def _no_sleep(_):
+            return
+
+        plugin._v2v.connect = AsyncMock()
+        import asyncio as _asyncio
+        orig_sleep = _asyncio.sleep
+        _asyncio.sleep = _no_sleep
+        try:
+            await plugin._v2v_reconnect_loop()
+        finally:
+            _asyncio.sleep = orig_sleep
+
+        plugin._v2v.connect.assert_awaited()
+        assert plugin._v2v_abort_in_flight is False
+        assert plugin._first_audio_logged_this_turn is False
+        assert plugin._t_asr_final is None
+        assert plugin._interrupt_event.is_set() is False

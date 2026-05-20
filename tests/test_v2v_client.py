@@ -329,3 +329,73 @@ class TestInboundDispatch:
                 await client.disconnect()
 
         assert got == [("hello", False, True)]
+
+
+# ── Disconnect / error notifications via on_error ──────────────────────
+
+
+class TestRecvLoopErrorNotifications:
+    """Wave 2.5+ reconnect path relies on on_error being invoked with a
+    transport-error code prefix (ws_recv_exit / ws_closed / ws_send_failed)
+    whenever the WS goes away or send fails."""
+
+    @pytest.mark.asyncio
+    async def test_recv_loop_natural_exit_triggers_ws_recv_exit(self):
+        """Server closes WS cleanly (no exception) -> on_error fires with
+        a ws_recv_exit prefix so plugin can schedule reconnect."""
+        async with FakeV2VServer() as srv:
+            cfg = V2VConfig(url=srv.url)
+            client = V2VClient(cfg)
+
+            errors: list[str] = []
+            done = asyncio.Event()
+
+            async def on_err(msg):
+                errors.append(msg)
+                done.set()
+
+            client.on_error = on_err
+            await client.connect()
+            # Server-side: close the connection cleanly (no exception in
+            # the recv-loop async-for iterator -> natural exit branch).
+            srv._server.close()
+            await srv._server.wait_closed()
+            try:
+                await asyncio.wait_for(done.wait(), timeout=2.0)
+            finally:
+                await client.disconnect()
+
+        assert errors, "on_error should be called when ws closes"
+        # Either ws_closed (from ConnectionClosed exc) or ws_recv_exit
+        # (natural async-for exit) is acceptable here; both signal a
+        # transport-layer disconnect to higher layers.
+        assert errors[0].startswith(("ws_recv_exit", "ws_closed"))
+
+    @pytest.mark.asyncio
+    async def test_send_audio_failure_triggers_ws_send_failed(self):
+        """ws.send() raising must surface as ws_send_failed via on_error."""
+        cfg = V2VConfig(url="ws://127.0.0.1:1")  # no server
+        client = V2VClient(cfg)
+        # Bypass connect() — inject a fake ws that raises on send.
+        from websockets.exceptions import ConnectionClosed
+
+        class FakeWS:
+            async def send(self, _):
+                raise ConnectionClosed(None, None)
+
+        client._ws = FakeWS()
+        client._connected = True
+
+        errors: list[str] = []
+
+        async def on_err(msg):
+            errors.append(msg)
+
+        client.on_error = on_err
+        with pytest.raises(ConnectionClosed):
+            await client.send_audio(b"\x00\x00")
+        assert any(e.startswith("ws_send_failed:") for e in errors)
+        # client must mark itself disconnected after a transport failure.
+        assert client._connected is False
+
+
