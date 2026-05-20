@@ -73,6 +73,11 @@ class ConversationPlugin(Plugin):
         self._v2v: V2VClient | None = None
         self._v2v_sr_mismatch_logged: bool = False
         self._v2v_abort_in_flight: bool = False
+        # VAD speech_start debounce (100ms) — guards against burst events
+        # from the server when the user pauses briefly mid-utterance. Distinct
+        # from `_v2v_abort_in_flight`, which dedupes the whole barge-in cycle.
+        self._v2v_last_speech_start_ts: float = 0.0
+        self._v2v_last_speech_end_ts: float = 0.0
         self._stt = None
         self._tts = None
         self._vad = None
@@ -658,6 +663,14 @@ class ConversationPlugin(Plugin):
 
     async def _on_v2v_vad_event(self, event: str) -> None:
         if event == "speech_start":
+            # 100ms debounce against bursty speech_start events (server may
+            # re-arm VAD during a short pause). The full-cycle dedupe still
+            # happens via `_v2v_abort_in_flight` below.
+            now = time.monotonic()
+            if now - self._v2v_last_speech_start_ts < 0.1:
+                logger.debug("V2V speech_start: debounced (<100ms)")
+                return
+            self._v2v_last_speech_start_ts = now
             if self._v2v_abort_in_flight:
                 logger.debug("V2V speech_start: abort already in-flight, skip")
                 return
@@ -665,6 +678,14 @@ class ConversationPlugin(Plugin):
             await self._fire_interrupt(notify_v2v=True)
             if self._state == ConvState.SPEAKING:
                 self._set_state(ConvState.LISTENING)
+        elif event == "speech_end":
+            # Record for metrics / diagnostics; do not mutate state machine.
+            # LLM kick-off is driven by asr_final, not speech_end.
+            self._v2v_last_speech_end_ts = time.monotonic()
+            if self._state in (ConvState.LISTENING, ConvState.TRANSCRIBING):
+                logger.debug("V2V speech_end (state=%s)", self._state.name)
+            else:
+                logger.debug("V2V speech_end ignored (state=%s)", self._state.name)
 
     async def _on_v2v_error(self, error: str) -> None:
         logger.error(f"V2V error: {error}")
