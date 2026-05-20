@@ -73,6 +73,9 @@ class ConversationPlugin(Plugin):
         self._v2v: V2VClient | None = None
         self._v2v_sr_mismatch_logged: bool = False
         self._v2v_abort_in_flight: bool = False
+        # WS reconnect machinery (one task at a time, exponential backoff).
+        self._v2v_reconnect_task: asyncio.Task | None = None
+        self._v2v_reconnecting: bool = False
         # VAD speech_start debounce (100ms) — guards against burst events
         # from the server when the user pauses briefly mid-utterance. Distinct
         # from `_v2v_abort_in_flight`, which dedupes the whole barge-in cycle.
@@ -394,6 +397,16 @@ class ConversationPlugin(Plugin):
         if self._audio:
             await self._audio.stop()
 
+        # Cancel any in-flight reconnect attempt before tearing down WS.
+        if self._v2v_reconnect_task and not self._v2v_reconnect_task.done():
+            self._v2v_reconnect_task.cancel()
+            try:
+                await self._v2v_reconnect_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._v2v_reconnect_task = None
+        self._v2v_reconnecting = False
+
         # V2V backend: send asr_eos + abort (if speaking), then disconnect
         # WebSocket before tearing down the LLM client.
         if self._v2v is not None:
@@ -689,8 +702,68 @@ class ConversationPlugin(Plugin):
 
     async def _on_v2v_error(self, error: str) -> None:
         logger.error(f"V2V error: {error}")
+        # WS-transport errors (recv loop exit or send failure) → schedule
+        # reconnect. Business-layer errors → reset transient state only.
+        code = error.split(":", 1)[0].strip() if ":" in error else error
+        if code in ("ws_closed", "ws_send_failed", "ws_recv_exit"):
+            # Cancel any in-flight LLM stream so its deltas don't pile up
+            # against a disconnected V2V (send_text_delta would raise).
+            if (
+                isinstance(self._client, EdgeLLMClient)
+                and self._client.is_streaming
+            ):
+                try:
+                    await self._client.send_interrupt()
+                except Exception as e:
+                    logger.debug(f"EdgeLLM cancel during reconnect failed: {e}")
+            if self._state in (ConvState.THINKING, ConvState.SPEAKING):
+                self._set_state(ConvState.IDLE)
+            self._schedule_v2v_reconnect()
+            return
+        # Business-layer error: keep WS, just unwind transient state.
         if self._state in (ConvState.THINKING, ConvState.SPEAKING, ConvState.TRANSCRIBING):
             self._set_state(ConvState.IDLE)
+
+    def _schedule_v2v_reconnect(self) -> None:
+        if self._v2v is None or not self._running:
+            return
+        if self._v2v_reconnecting:
+            return
+        if self._v2v_reconnect_task and not self._v2v_reconnect_task.done():
+            return
+        self._v2v_reconnecting = True
+        self._v2v_reconnect_task = asyncio.create_task(
+            self._v2v_reconnect_loop()
+        )
+
+    async def _v2v_reconnect_loop(self) -> None:
+        """Exponential backoff WS reconnect: 1s → 2s → 4s → 8s → 30s cap.
+
+        On a successful `connect()` the client re-sends its config frame
+        (see V2VClient.connect), so the server starts a fresh session and
+        we just reset the backoff and exit.
+        """
+        backoff = 1.0
+        try:
+            while self._running and self._v2v is not None:
+                logger.info("V2V reconnecting in %.1fs", backoff)
+                try:
+                    await asyncio.sleep(backoff)
+                except asyncio.CancelledError:
+                    raise
+                if not self._running or self._v2v is None:
+                    return
+                try:
+                    await self._v2v.connect()
+                    logger.info("V2V reconnected")
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning("V2V reconnect failed: %s", e)
+                    backoff = min(backoff * 2.0, 30.0)
+        finally:
+            self._v2v_reconnecting = False
 
     async def _v2v_audio_uplink_loop(self) -> None:
         """Forward mic chunks to V2V as PCM16 mono bytes.

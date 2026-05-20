@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal
 
 import websockets
+from websockets.exceptions import ConnectionClosed, WebSocketException
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +152,13 @@ class V2VClient:
         if not self.is_connected or self._ws is None:
             raise RuntimeError("V2VClient not connected")
         async with self._send_lock:
-            await self._ws.send(pcm16)
+            try:
+                await self._ws.send(pcm16)
+            except (ConnectionClosed, WebSocketException) as e:
+                self._connected = False
+                if self.on_error:
+                    await _maybe_await(self.on_error(f"ws_send_failed: {e}"))
+                raise
 
     async def send_text_delta(self, text: str) -> None:
         await self._send_json({"type": "text", "text": text})
@@ -171,10 +178,18 @@ class V2VClient:
         if not self.is_connected or self._ws is None:
             raise RuntimeError("V2VClient not connected")
         async with self._send_lock:
-            await self._ws.send(json.dumps(frame))
+            try:
+                await self._ws.send(json.dumps(frame))
+            except (ConnectionClosed, WebSocketException) as e:
+                self._connected = False
+                if self.on_error:
+                    await _maybe_await(self.on_error(f"ws_send_failed: {e}"))
+                raise
 
     async def _recv_loop(self) -> None:
         assert self._ws is not None
+        exit_code = "ws_recv_exit"
+        exit_detail = "loop ended"
         try:
             async for msg in self._ws:
                 if isinstance(msg, bytes):
@@ -183,11 +198,24 @@ class V2VClient:
                     await self._handle_text(msg)
         except asyncio.CancelledError:
             raise
+        except ConnectionClosed as e:
+            exit_code = "ws_closed"
+            exit_detail = str(e)
+            logger.error("V2V recv loop: ws closed: %s", e)
+        except WebSocketException as e:
+            exit_code = "ws_closed"
+            exit_detail = str(e)
+            logger.error("V2V recv loop: ws error: %s", e)
         except Exception as e:
+            exit_code = "ws_recv_exit"
+            exit_detail = str(e)
             logger.error("V2V recv loop terminated: %s", e)
+        finally:
             self._connected = False
-            if self.on_error:
-                await _maybe_await(self.on_error(str(e)))
+        # Notify caller (after marking disconnected) so it can decide to
+        # reconnect. Both natural EOF and exception paths funnel here.
+        if self.on_error:
+            await _maybe_await(self.on_error(f"{exit_code}: {exit_detail}"))
 
     async def _handle_binary(self, data: bytes) -> None:
         # First binary frame of the session: 4-byte LE uint32 SR header
