@@ -774,7 +774,31 @@ class ConversationPlugin(Plugin):
             # Record for metrics / diagnostics; do not mutate state machine.
             # LLM kick-off is driven by asr_final, not speech_end.
             self._v2v_last_speech_end_ts = time.monotonic()
-            if self._state in (ConvState.LISTENING, ConvState.TRANSCRIBING):
+            # In multi_utterance=True mode the OVS server keeps the ASR
+            # session open across utterances and only emits asr_final after
+            # an explicit asr_eos frame. Without this, partials never
+            # finalize and the LLM is never invoked. In multi_utterance=False
+            # mode the server auto-finalizes on VAD speech_end so we skip.
+            active_states = (
+                ConvState.LISTENING,
+                ConvState.TRANSCRIBING,
+                ConvState.THINKING,
+            )
+            if (
+                self._state in active_states
+                and self.app.config.v2v_multi_utterance
+                and self._v2v is not None
+                and self._v2v.is_connected
+            ):
+                try:
+                    await self._v2v.send_asr_eos()
+                    logger.debug(
+                        "V2V speech_end -> asr_eos sent (state=%s)",
+                        self._state.name,
+                    )
+                except Exception as e:
+                    logger.debug(f"V2V asr_eos send failed: {e}")
+            elif self._state in (ConvState.LISTENING, ConvState.TRANSCRIBING):
                 logger.debug("V2V speech_end (state=%s)", self._state.name)
             else:
                 logger.debug("V2V speech_end ignored (state=%s)", self._state.name)
