@@ -1,0 +1,32 @@
+services:
+  edge-llm:
+    image: ${EDGE_LLM_IMAGE:-edge-llm-chat-service:latest}
+    container_name: edge-llm-chat-service
+    runtime: nvidia
+    privileged: true
+    restart: unless-stopped
+    # TRT inference can need more than docker's default 64MB /dev/shm for
+    # intermediate buffers under concurrent requests.
+    shm_size: "512m"
+    environment:
+      EDGELLM_ENGINE_DIR: /workspace/Qwen3-4B-AWQ/engines-3072
+      EDGELLM_EXPECTED_TENSORRT: ${EDGELLM_EXPECTED_TENSORRT:-10.3.0.30}
+      EDGELLM_EXPECTED_ENGINE_COMMIT: ${EDGELLM_EXPECTED_ENGINE_COMMIT:-7d6579c8293c5cc62986238aa200ea9c7b57d50a}
+      EDGELLM_ENGINE_REPO: ${EDGELLM_ENGINE_REPO:-harvestsu/Qwen3-4B-AWQ-TensorRT-EdgeLLM-engine}
+      EDGELLM_ENGINE_REVISION: ${EDGELLM_ENGINE_REVISION:-main}
+      HF_ENDPOINT: ${HF_ENDPOINT:-}
+      EDGELLM_MODEL_NAME: Qwen/Qwen3-4B-AWQ
+      PORT: "8000"
+      WARMUP_TIMEOUT: ${WARMUP_TIMEOUT:-90}
+      WARMUP_INFERENCE_TIMEOUT: ${WARMUP_INFERENCE_TIMEOUT:-180}
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ${EDGELLM_WORKSPACE:-/home/harvest/edgellm-workspace}:/workspace
+      - /usr/local/cuda/lib64:/host-cuda:ro
+      - /usr/local/cuda/targets/aarch64-linux/lib:/host-cudla:ro
+      - /usr/lib/aarch64-linux-gnu/nvidia:/host-nvidia-libs:ro
+      - /lib/aarch64-linux-gnu:/host-libs:ro
+    ports:
+      - "11435:8000"
+    # Healthcheck is defined in the Dockerfile (start-period=900s) which already
+    # accommodates engine download + warmup inference on first run.
