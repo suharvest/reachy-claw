@@ -64,6 +64,15 @@ vision:
 dashboard:
   enabled: true
   port: 8640
+  # Containers to restart from the dashboard restart button.
+  # Order matters: vision-trt first (camera lock), edge-llm + voice
+  # independently, reachy-claw last (depends on others).
+  restart_containers:
+    - "vision-trt:true"             # wait_healthy: camera lock
+    - "edge-llm-chat-service:true"  # wait_healthy: long startup
+    - "deploy-speech-1:false"
+    - "reachy-daemon:false"
+    - "reachy-claw:false"
 
 plugins:
   face_tracker: true

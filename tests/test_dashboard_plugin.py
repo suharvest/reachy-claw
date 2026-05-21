@@ -299,3 +299,71 @@ def test_diary_default_prompt_includes_ha_paragraph():
     mod._DIARY_DEFAULT_PROMPT_CACHE = None  # reset cache
     text = _diary_default_prompt()
     assert "Home Assistant" in text or "sensors" in text
+
+
+# ── Restart container list parsing test ──────────────────────────────────
+
+
+def test_restart_containers_default(dashboard_config):
+    """Default dashboard_restart_containers keeps the original 3 containers."""
+    assert dashboard_config.dashboard_restart_containers == [
+        "vision-trt:true",
+        "reachy-daemon:false",
+        "reachy-claw:false",
+    ]
+
+
+def test_restart_containers_parsing_from_config():
+    """_restart_services should parse 'name:wait_healthy' entries from config."""
+    from reachy_claw.config import Config
+
+    cfg = Config(
+        standalone_mode=True,
+        dashboard_enabled=True,
+        enable_face_tracker=False,
+        enable_motion=False,
+        tts_backend="none",
+        stt_backend="whisper",
+        dashboard_restart_containers=[
+            "vision-trt:true",
+            "edge-llm-chat-service:true",
+            "deploy-speech-1:false",
+            "reachy-daemon:false",
+            "reachy-claw:false",
+            "  :true",        # blank name -> skipped
+            "no-colon",       # treated as wait_healthy=false
+        ],
+    )
+
+    # Mirror the parsing logic in DashboardPlugin._restart_services so we
+    # validate the contract without spinning up Docker.
+    raw = cfg.dashboard_restart_containers
+    containers: list[tuple[str, bool]] = []
+    for entry in raw:
+        parts = entry.split(":", 1)
+        name = parts[0].strip()
+        wait_healthy = (
+            parts[1].strip().lower() == "true" if len(parts) > 1 else False
+        )
+        if not name:
+            continue
+        containers.append((name, wait_healthy))
+
+    assert containers == [
+        ("vision-trt", True),
+        ("edge-llm-chat-service", True),
+        ("deploy-speech-1", False),
+        ("reachy-daemon", False),
+        ("reachy-claw", False),
+        ("no-colon", False),
+    ]
+
+
+def test_restart_containers_yaml_mapping_present():
+    """YAML mapping wires (dashboard, restart_containers) to the new field."""
+    from reachy_claw.config import _YAML_FIELD_MAP
+
+    assert (
+        _YAML_FIELD_MAP[("dashboard", "restart_containers")]
+        == "dashboard_restart_containers"
+    )

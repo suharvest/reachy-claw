@@ -1421,13 +1421,36 @@ class DashboardPlugin(Plugin):
         import aiohttp
 
         sock_path = "/var/run/docker.sock"
-        # Containers where we must wait for health before moving on. vision-trt
-        # is the only one with a strict startup-order requirement (camera lock).
-        containers = [
+        # Container list is configurable via dashboard_restart_containers.
+        # Each entry is "<name>:<wait_healthy>". wait_healthy=true means we
+        # poll the container's Docker healthcheck before moving to the next
+        # (use this for containers with startup-order constraints, e.g.
+        # vision-trt grabbing /dev/video0 before reachy-daemon).
+        default_containers: list[tuple[str, bool]] = [
             ("vision-trt", True),
             ("reachy-daemon", False),
             ("reachy-claw", False),
         ]
+        raw = getattr(self.app.config, "dashboard_restart_containers", None) or []
+        containers: list[tuple[str, bool]] = []
+        for entry in raw:
+            if not isinstance(entry, str):
+                logger.warning("dashboard_restart_containers entry not str: %r", entry)
+                continue
+            parts = entry.split(":", 1)
+            name = parts[0].strip()
+            wait_healthy = (
+                parts[1].strip().lower() == "true" if len(parts) > 1 else False
+            )
+            if not name:
+                continue
+            containers.append((name, wait_healthy))
+        if not containers:
+            logger.warning(
+                "dashboard_restart_containers empty/invalid, falling back to defaults"
+            )
+            containers = default_containers
+        logger.info("Dashboard restart container list: %s", containers)
 
         # When vision-trt runs on a different host, its container is not managed
         # by the local docker socket — skip it.

@@ -199,6 +199,20 @@ class Config:
     # Dashboard (exhibition UI)
     dashboard_enabled: bool = False
     dashboard_port: int = 8640
+    # Containers to restart from the dashboard "restart services" button.
+    # Each entry: "<container_name>:<wait_healthy>". wait_healthy=true means
+    # the next container won't start until this one passes its Docker
+    # healthcheck (only meaningful for containers with startup-order
+    # dependencies, e.g. vision-trt grabbing /dev/video0 before reachy-daemon).
+    # Default keeps the original 3-container behavior to avoid breaking
+    # existing deployments.
+    dashboard_restart_containers: list[str] = field(
+        default_factory=lambda: [
+            "vision-trt:true",
+            "reachy-daemon:false",
+            "reachy-claw:false",
+        ]
+    )
 
     # Plugin enable flags
     enable_face_tracker: bool = True  # auto-skips if deps missing
@@ -325,6 +339,7 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("conversation", "monologue_interval"): "monologue_interval",
 ("dashboard", "enabled"): "dashboard_enabled",
     ("dashboard", "port"): "dashboard_port",
+    ("dashboard", "restart_containers"): "dashboard_restart_containers",
     ("plugins", "face_tracker"): "enable_face_tracker",
     ("plugins", "motion"): "enable_motion",
     ("rest", "enabled"): "rest_enabled",
@@ -367,6 +382,7 @@ _ENV_FIELD_MAP: dict[str, str] = {
     "CLAWD_V2V_MULTI_UTTERANCE": "v2v_multi_utterance",
     "CLAWD_V2V_VOICE_ID": "v2v_voice_id",
     "CLAWD_V2V_VOICE_CLONE_SAMPLE": "v2v_voice_clone_sample",
+    "CLAWD_DASHBOARD_RESTART_CONTAINERS": "dashboard_restart_containers",
 }
 
 
@@ -470,6 +486,9 @@ def _apply_env(config: Config) -> None:
             value = float(value)
         elif isinstance(current, bool):
             value = value.lower() in ("1", "true", "yes")
+        elif isinstance(current, list):
+            # Comma-separated list, e.g. "vision-trt:true,reachy-daemon:false"
+            value = [item.strip() for item in value.split(",") if item.strip()]
         setattr(config, field_name, value)
 
 
