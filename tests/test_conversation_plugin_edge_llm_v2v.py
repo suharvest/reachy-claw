@@ -269,6 +269,65 @@ class TestV2VBargeIn:
         await asyncio.sleep(0)
         assert plugin._v2v.abort.await_count == first_calls
 
+    @pytest.mark.asyncio
+    async def test_speech_start_in_IDLE_does_not_abort(self, v2v_app):
+        """Regression (f2332c8): speech_start in IDLE must NOT abort.
+
+        Aborting in IDLE cancels the in-flight OVS ASR session, causing
+        asr_final to come back empty → "ASR never produces text".
+        """
+        plugin = _make_plugin(v2v_app)
+        plugin._state = ConvState.IDLE
+        plugin._fire_interrupt = AsyncMock()
+        await plugin._on_v2v_vad_event("speech_start")
+        # Let any (incorrectly) spawned tasks run.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert plugin._state == ConvState.LISTENING
+        plugin._fire_interrupt.assert_not_called()
+        plugin._v2v.abort.assert_not_called()
+        assert plugin._v2v_abort_in_flight is False
+
+    @pytest.mark.asyncio
+    async def test_speech_start_in_SPEAKING_does_abort(self, v2v_app):
+        """Regression (f2332c8) companion: SPEAKING path still aborts."""
+        plugin = _make_plugin(v2v_app)
+        plugin._state = ConvState.SPEAKING
+        await plugin._on_v2v_vad_event("speech_start")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert plugin._state == ConvState.LISTENING
+        assert plugin._v2v_abort_in_flight is True
+        plugin._v2v.abort.assert_awaited_once()
+
+
+# ── speech_end → asr_eos (multi_utterance) ───────────────────────────
+
+
+class TestV2VSpeechEndAsrEos:
+    @pytest.mark.asyncio
+    async def test_speech_end_sends_asr_eos_in_multi_utterance(self, v2v_app):
+        """Regression (606dbd3): multi_utterance=True needs explicit asr_eos."""
+        v2v_app.config.v2v_multi_utterance = True
+        plugin = _make_plugin(v2v_app)
+        plugin._state = ConvState.LISTENING
+        plugin._v2v.is_connected = True
+        before_ts = plugin._v2v_last_speech_end_ts
+        await plugin._on_v2v_vad_event("speech_end")
+        plugin._v2v.send_asr_eos.assert_awaited_once()
+        assert plugin._state == ConvState.LISTENING
+        assert plugin._v2v_last_speech_end_ts > before_ts
+
+    @pytest.mark.asyncio
+    async def test_speech_end_skips_asr_eos_when_multi_utterance_false(self, v2v_app):
+        """multi_utterance=False: OVS auto-finalizes, no asr_eos needed."""
+        v2v_app.config.v2v_multi_utterance = False
+        plugin = _make_plugin(v2v_app)
+        plugin._state = ConvState.LISTENING
+        plugin._v2v.is_connected = True
+        await plugin._on_v2v_vad_event("speech_end")
+        plugin._v2v.send_asr_eos.assert_not_called()
+
 
 # ── Error path ───────────────────────────────────────────────────────
 
