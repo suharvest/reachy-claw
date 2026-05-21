@@ -2354,18 +2354,35 @@ class ConversationPlugin(Plugin):
 
     async def _stop_gst_playback(self) -> None:
         """Stop GStreamer playback pipeline after audio has drained."""
-        if self._gst_playing and self.app.reachy:
+        if not self._gst_playing:
+            return
+        reachy = self.app.reachy
+        has_sdk_audio = bool(
+            reachy and getattr(getattr(reachy, "media", None), "audio", None)
+        )
+        if has_sdk_audio:
             try:
                 # Push several silence frames to flush ALSA pipeline and
                 # avoid the pop/click noise when stopping abruptly.
                 silence = np.zeros(1600, dtype=np.float32)
                 for _ in range(5):
-                    self.app.reachy.media.push_audio_sample(silence)
+                    reachy.media.push_audio_sample(silence)
                 await asyncio.sleep(0.4)
-                self.app.reachy.media.stop_playing()
+                reachy.media.stop_playing()
             except Exception:
                 pass
-            self._gst_playing = False
+        elif getattr(self, "_v2v_sd_stream", None) is not None:
+            try:
+                # Flush a short tail of silence then close the sounddevice stream.
+                silence = np.zeros(1600, dtype=np.float32)
+                await asyncio.to_thread(self._v2v_sd_stream.write, silence)
+                await asyncio.to_thread(self._v2v_sd_stream.stop)
+                await asyncio.to_thread(self._v2v_sd_stream.close)
+            except Exception as e:
+                logger.debug(f"V2V sd_stream close failed: {e}")
+            finally:
+                self._v2v_sd_stream = None
+        self._gst_playing = False
 
     def _stop_gst_playback_sync(self) -> None:
         """Stop GStreamer playback pipeline (sync, for interrupt path)."""
@@ -2382,14 +2399,13 @@ class ConversationPlugin(Plugin):
         No sentence-level fade or pre-buffer: V2V emits short chunks already.
         If the server-side sample rate doesn't match the local playback rate,
         resample here (scipy.signal.resample_poly preferred; numpy linear
-        interp fallback).
+        interp fallback). When the reachy_mini SDK runs with NO_MEDIA backend
+        (e.g. unixfd plugin unavailable in container), fall back to a direct
+        sounddevice stream on the configured audio device.
         """
         if self._paused or self._interrupt_event.is_set():
             return
         if not pcm:
-            return
-        reachy = self.app.reachy
-        if not reachy or not getattr(getattr(reachy, "media", None), "audio", None):
             return
         try:
             samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
@@ -2402,18 +2418,58 @@ class ConversationPlugin(Plugin):
         vol = self.app.config.audio_volume
         if vol != 1.0:
             samples = np.clip(samples * vol, -1.0, 1.0).astype(np.float32)
-        if not self._gst_playing:
+        reachy = self.app.reachy
+        has_sdk_audio = bool(
+            reachy and getattr(getattr(reachy, "media", None), "audio", None)
+        )
+        if has_sdk_audio:
+            if not self._gst_playing:
+                try:
+                    reachy.media.start_playing()
+                except Exception:
+                    pass
+                self._gst_playing = True
             try:
-                reachy.media.start_playing()
-            except Exception:
-                pass
-            self._gst_playing = True
-        try:
-            reachy.media.push_audio_sample(samples)
-        except Exception as e:
-            logger.warning(f"V2V push_audio_sample failed: {e}")
+                reachy.media.push_audio_sample(samples)
+            except Exception as e:
+                logger.warning(f"V2V push_audio_sample failed: {e}")
+        else:
+            # NO_MEDIA fallback: stream PCM directly via sounddevice. Init a
+            # persistent OutputStream on the first chunk; reuse across chunks
+            # to avoid stutter from per-chunk stream open/close.
+            await self._push_v2v_pcm_to_sd(samples, target_sr)
         if self._wobbler:
             self._wobbler.feed(samples)
+
+    async def _push_v2v_pcm_to_sd(self, samples: np.ndarray, sample_rate: int) -> None:
+        """Sounddevice fallback path for V2V PCM when SDK media is unavailable."""
+        try:
+            import sounddevice as sd
+        except Exception as e:
+            logger.debug(f"sounddevice import failed: {e}")
+            return
+        if getattr(self, "_v2v_sd_stream", None) is None:
+            try:
+                self._v2v_sd_stream = sd.OutputStream(
+                    samplerate=sample_rate,
+                    channels=1,
+                    dtype=np.float32,
+                    blocksize=0,  # let portaudio pick
+                )
+                self._v2v_sd_stream.start()
+                self._gst_playing = True  # reuse the same "speaking" latch
+                logger.info(
+                    f"V2V audio fallback: sounddevice OutputStream opened @ {sample_rate}Hz"
+                )
+            except Exception as e:
+                logger.warning(f"V2V sounddevice OutputStream open failed: {e}")
+                self._v2v_sd_stream = None
+                return
+        try:
+            # OutputStream.write is blocking — run in thread to keep event loop free.
+            await asyncio.to_thread(self._v2v_sd_stream.write, samples)
+        except Exception as e:
+            logger.warning(f"V2V sounddevice write failed: {e}")
 
     async def _finish_speaking(self) -> None:
         """Clean up after speaking is done."""
