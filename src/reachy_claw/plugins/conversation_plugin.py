@@ -753,12 +753,22 @@ class ConversationPlugin(Plugin):
                 logger.debug("V2V speech_start: debounced (<100ms)")
                 return
             self._v2v_last_speech_start_ts = now
-            if self._v2v_abort_in_flight:
-                logger.debug("V2V speech_start: abort already in-flight, skip")
-                return
-            self._v2v_abort_in_flight = True
-            await self._fire_interrupt(notify_v2v=True)
+            # Only barge-in (and notify server with abort) when the robot is
+            # currently speaking. Otherwise (IDLE / LISTENING / TRANSCRIBING /
+            # THINKING) we must NOT abort: doing so cancels the in-progress
+            # ASR session on the server and the resulting asr_final is
+            # discarded — manifests as "ASR never produces text".
             if self._state == ConvState.SPEAKING:
+                if self._v2v_abort_in_flight:
+                    logger.debug("V2V speech_start: abort already in-flight, skip")
+                    return
+                self._v2v_abort_in_flight = True
+                await self._fire_interrupt(notify_v2v=True)
+                self._set_state(ConvState.LISTENING)
+            elif self._state == ConvState.IDLE:
+                # User started speaking — transition to LISTENING; ASR
+                # session will accumulate partials and finalize on
+                # speech_end. No abort needed.
                 self._set_state(ConvState.LISTENING)
         elif event == "speech_end":
             # Record for metrics / diagnostics; do not mutate state machine.
