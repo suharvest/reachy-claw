@@ -1,11 +1,10 @@
 llm:
   backend: edge_llm_v2v
   # TensorRT-Edge-LLM OpenAI-compatible HTTP endpoint.
-  # TODO: edge-llm-chat-service is not yet bundled into deploy/jetson/.
-  #   When that container lands, point edge_llm_url at its host port and
-  #   pin edge_llm_model to the served model name (or leave blank for
-  #   auto-discovery via GET /v1/models).
-  edge_llm_url: http://localhost:8080
+  # Port 11435 is chosen to avoid colliding with ollama's default 11434.
+  # It matches the host port exposed by deploy/jetson/edge-llm/docker-compose.yml
+  # (container :8000 -> host :11435).
+  edge_llm_url: http://localhost:11435
   edge_llm_model: ""   # empty = auto-discover
 
 # V2V (ASR + VAD + TTS) is served by the existing Jetson speech container
@@ -55,7 +54,13 @@ reachy:
   spawn_daemon: false  # daemon runs as separate container
   connection_mode: localhost_only
   daemon_port: 38001
-  media_backend: gstreamer
+  # media_backend MUST be no_media on Jetson: the reachy-claw v1.20 container
+  # is missing the unixfd GStreamer plugin, so the SDK's LOCAL backend fails
+  # when constructing unixfdsrc and falls back to SIM (motors stop moving).
+  # NO_MEDIA skips the LOCAL audio/video path entirely; motors continue to
+  # work via the reachy-daemon FastAPI on :38001, and V2V TTS audio falls
+  # back to a sounddevice OutputStream (see ConversationPlugin._play_v2v_pcm).
+  media_backend: no_media
 
 vision:
   camera_source: sdk
