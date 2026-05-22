@@ -128,8 +128,17 @@ class Config:
     v2v_url: str = "ws://localhost:8621/v2v/stream"
     v2v_asr_language: str = "auto"
     v2v_tts_language: str = "auto"
-    v2v_vad: str = "silero"
+    # Server-side VAD selection. Default "none" → reachy-claw runs a
+    # client-side silero VAD locally (see _v2v_audio_uplink_loop) and
+    # gates the mic stream + drives asr_eos / barge-in itself. This
+    # matches OVS app_base.py original design: faster barge-in, no echo
+    # while TTS is playing, less load on the server.
+    v2v_vad: str = "none"
     v2v_vad_silence_ms: int = 700
+    # Client-side VAD tuning (only used when v2v_vad == "none").
+    v2v_client_vad_silence_ms: int = 400  # local silence → send asr_eos
+    v2v_client_vad_preroll_ms: int = 300  # ring buffer before speech_start
+    v2v_client_vad_threshold: float = 0.5  # silero score threshold
     v2v_multi_utterance: bool = True
     # Optional voice cloning (forwarded into the V2V config frame).
     # voice_id    : id of an OVS-registered voice (cloned or built-in).
@@ -310,6 +319,9 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("v2v", "tts_language"): "v2v_tts_language",
     ("v2v", "vad"): "v2v_vad",
     ("v2v", "vad_silence_ms"): "v2v_vad_silence_ms",
+    ("v2v", "client_vad_silence_ms"): "v2v_client_vad_silence_ms",
+    ("v2v", "client_vad_preroll_ms"): "v2v_client_vad_preroll_ms",
+    ("v2v", "client_vad_threshold"): "v2v_client_vad_threshold",
     ("v2v", "multi_utterance"): "v2v_multi_utterance",
     ("v2v", "voice_id"): "v2v_voice_id",
     ("v2v", "voice_clone_sample"): "v2v_voice_clone_sample",
@@ -379,6 +391,9 @@ _ENV_FIELD_MAP: dict[str, str] = {
     "CLAWD_V2V_TTS_LANGUAGE": "v2v_tts_language",
     "CLAWD_V2V_VAD": "v2v_vad",
     "CLAWD_V2V_VAD_SILENCE_MS": "v2v_vad_silence_ms",
+    "CLAWD_V2V_CLIENT_VAD_SILENCE_MS": "v2v_client_vad_silence_ms",
+    "CLAWD_V2V_CLIENT_VAD_PREROLL_MS": "v2v_client_vad_preroll_ms",
+    "CLAWD_V2V_CLIENT_VAD_THRESHOLD": "v2v_client_vad_threshold",
     "CLAWD_V2V_MULTI_UTTERANCE": "v2v_multi_utterance",
     "CLAWD_V2V_VOICE_ID": "v2v_voice_id",
     "CLAWD_V2V_VOICE_CLONE_SAMPLE": "v2v_voice_clone_sample",
