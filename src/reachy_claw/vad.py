@@ -61,7 +61,26 @@ class SileroVAD(VADBackend):
         self._load_model()
 
     def _find_onnx_model(self) -> str:
-        """Locate silero_vad.onnx from the silero_vad package."""
+        """Locate silero_vad.onnx.
+
+        Preference order:
+        1. Vendored copy at ``reachy_claw/assets/silero_vad.onnx`` — the
+           supported path. Avoids the silero-vad pypi package, which
+           declares torch as a runtime dep (~500MB) we never use because
+           inference runs through onnxruntime directly.
+        2. silero_vad pypi package data dir — fallback for dev envs
+           where someone explicitly installed silero-vad.
+        """
+        import os
+
+        # 1. Vendored
+        vendored = os.path.join(
+            os.path.dirname(__file__), "assets", "silero_vad.onnx"
+        )
+        if os.path.isfile(vendored):
+            return vendored
+
+        # 2. silero-vad pypi package fallback
         import importlib.resources
 
         try:
@@ -71,18 +90,16 @@ class SileroVAD(VADBackend):
         except Exception:
             pass
 
-        # Fallback: search site-packages
         import site
 
         for sp in site.getsitepackages() + [site.getusersitepackages()]:
             candidate = f"{sp}/silero_vad/data/silero_vad.onnx"
-            import os
-
             if os.path.isfile(candidate):
                 return candidate
 
         raise FileNotFoundError(
-            "silero_vad.onnx not found. Install: pip install silero-vad"
+            "silero_vad.onnx not found. Expected at "
+            f"{vendored} (vendored) or via `pip install silero-vad`."
         )
 
     def _load_model(self):

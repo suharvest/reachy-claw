@@ -14,7 +14,11 @@ ENV GST_V4L2_USE_LIBV4L2=1
 
 WORKDIR /app
 COPY . .
-RUN pip install --no-cache-dir silero-vad onnxruntime
+# Silero VAD runs through onnxruntime directly (see vad.py). The
+# onnx model is vendored at src/reachy_claw/assets/silero_vad.onnx
+# so we skip the silero-vad pypi package entirely — it would
+# otherwise pull torch (~500MB) as a declared runtime dep.
+RUN pip install --no-cache-dir onnxruntime
 RUN pip install --no-cache-dir -e ".[audio,mediapipe-vision]"
 
 CMD ["reachy-claw", "-v"]
