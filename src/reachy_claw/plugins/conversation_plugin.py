@@ -105,6 +105,11 @@ class ConversationPlugin(Plugin):
         self._v2v: V2VClient | None = None
         self._v2v_sr_mismatch_logged: bool = False
         self._v2v_abort_in_flight: bool = False
+        # Time-window debounce for barge-in abort. A boolean latch alone
+        # leaks across turns if the follow-up asr_final is dropped while
+        # THINKING (see _on_v2v_asr_final). 500ms window guards the cycle
+        # without permanent state.
+        self._v2v_last_abort_ts: float = 0.0
         # First-audio-byte latency: t_asr_final captured on each new ASR
         # final, t_first_audio_byte cleared at the same time and set on the
         # first TTS PCM chunk for that turn. Logged once per turn.
@@ -759,9 +764,21 @@ class ConversationPlugin(Plugin):
             # ASR session on the server and the resulting asr_final is
             # discarded — manifests as "ASR never produces text".
             if self._state == ConvState.SPEAKING:
-                if self._v2v_abort_in_flight:
-                    logger.debug("V2V speech_start: abort already in-flight, skip")
+                # 500ms time-window debounce. Earlier this was a boolean
+                # latch (`_v2v_abort_in_flight`) which could leak across
+                # turns when the next asr_final got dropped in THINKING,
+                # permanently blocking subsequent barge-ins. Time window
+                # self-heals.
+                now_ts = time.monotonic()
+                if now_ts - self._v2v_last_abort_ts < 0.5:
+                    logger.debug(
+                        "V2V speech_start: recent abort (<500ms), skip"
+                    )
                     return
+                self._v2v_last_abort_ts = now_ts
+                # Keep the in-flight flag for asr_final-side dedupe; the
+                # reset paths (_on_v2v_asr_final, _on_v2v_tts_started,
+                # drop-in-THINKING) clear it.
                 self._v2v_abort_in_flight = True
                 await self._fire_interrupt(notify_v2v=True)
                 self._set_state(ConvState.LISTENING)
