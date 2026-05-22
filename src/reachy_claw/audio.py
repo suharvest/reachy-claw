@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import queue
 from collections import deque
 from dataclasses import dataclass
 
@@ -35,6 +36,13 @@ class AudioCapture:
         self._vad = vad  # VADBackend instance (optional)
         self._chunk_queue: asyncio.Queue[np.ndarray] | None = None
         self._reader_thread = None
+        # Duplex stream state: shared sd.Stream for mic capture + V2V TTS
+        # playback. Routing both through one stream lets the USB device's
+        # firmware AEC lock its echo-cancel reference.
+        self._duplex_stream = None
+        self._playback_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=120)
+        self._duplex_channels = 2
+        self._loop: asyncio.AbstractEventLoop | None = None
 
         # Find the specified audio device
         if config.audio_device:
@@ -97,15 +105,268 @@ class AudioCapture:
             self.reachy.media.start_recording()
             logger.info("Started continuous Reachy media recording")
         else:
-            # Start background reader thread to prevent buffer overflow
+            # Try to open a single duplex sd.Stream so mic capture and V2V
+            # TTS playback share one ALSA endpoint — required for the USB
+            # device firmware AEC to lock its echo-cancel reference.
             self._chunk_queue = asyncio.Queue(maxsize=200)
             self._loop = asyncio.get_running_loop()
-            import threading
-            self._reader_thread = threading.Thread(
-                target=self._bg_reader_loop, args=(1024,), daemon=True
-            )
-            self._reader_thread.start()
-            logger.info("Started continuous local mic capture (background reader)")
+            if not self._try_open_duplex_stream(1024):
+                # Fallback: legacy background reader (capture only).
+                import threading
+                self._reader_thread = threading.Thread(
+                    target=self._bg_reader_loop, args=(1024,), daemon=True
+                )
+                self._reader_thread.start()
+                logger.info(
+                    "Duplex stream unavailable — falling back to capture-only BG reader"
+                )
+
+    def _try_open_duplex_stream(self, frames: int) -> bool:
+        """Open a single sd.Stream for capture+playback. Return True on success."""
+        try:
+            import sounddevice as sd
+        except Exception as e:
+            logger.debug(f"sounddevice import failed: {e}")
+            return False
+
+        # USB Audio (Reachy Mini Audio) is on ALSA card 0 but PortAudio in
+        # the container sometimes doesn't enumerate it. Try hw:0,0 first
+        # to bypass the broken enumeration, then discovered index, then
+        # PortAudio default.
+        candidates: list[object] = ["hw:0,0", "plughw:0,0"]
+        if self._device_id is not None:
+            candidates.append(self._device_id)
+        candidates.append(None)
+
+        last_err: Exception | None = None
+        for dev in candidates:
+            for ch in (2, 1):
+                try:
+                    stream = sd.Stream(
+                        samplerate=self.config.sample_rate,
+                        channels=(ch, ch),
+                        dtype=np.float32,
+                        blocksize=frames,
+                        latency="low",
+                        device=(dev, dev),
+                        callback=self._duplex_callback,
+                    )
+                    stream.start()
+                    self._duplex_stream = stream
+                    self._duplex_channels = ch
+                    self._duplex_device = dev
+                    logger.info(
+                        f"AudioCapture: duplex stream opened on device={dev!r} channels={ch}"
+                    )
+                    return True
+                except Exception as e:
+                    last_err = e
+                    logger.debug(
+                        f"Duplex stream open failed (device={dev!r} ch={ch}): {e}"
+                    )
+        logger.warning(f"Duplex stream: all device candidates failed: {last_err}")
+        return False
+
+    def _duplex_callback(self, indata, outdata, frames, time, status):
+        """sd.Stream callback: route mic to _chunk_queue, fill output from _playback_queue.
+
+        Must not raise — exceptions kill the stream. All paths are guarded.
+        """
+        try:
+            if status:
+                logger.debug(f"duplex stream status: {status}")
+        except Exception:
+            pass
+
+        # Capture path: stereo→mono, push to async queue
+        try:
+            if indata is not None and self._chunk_queue is not None and self._loop is not None:
+                if indata.ndim > 1 and indata.shape[1] > 1:
+                    chunk = indata.mean(axis=1).astype(np.float32, copy=True)
+                else:
+                    chunk = indata.flatten().astype(np.float32, copy=True)
+                # TEMP DEBUG: periodic capture energy
+                if not hasattr(self, "_duplex_cap_count"):
+                    self._duplex_cap_count = 0
+                self._duplex_cap_count += 1
+                if self._duplex_cap_count % 30 == 0:
+                    e = float(np.abs(chunk).mean())
+                    logger.info(
+                        f"duplex capture: count={self._duplex_cap_count} energy={e:.6f} "
+                        f"shape={indata.shape}"
+                    )
+                try:
+                    self._loop.call_soon_threadsafe(
+                        self._chunk_queue.put_nowait, chunk
+                    )
+                except Exception:
+                    # Queue full / loop closed — drop oldest then retry
+                    try:
+                        self._loop.call_soon_threadsafe(
+                            self._chunk_queue.get_nowait
+                        )
+                        self._loop.call_soon_threadsafe(
+                            self._chunk_queue.put_nowait, chunk
+                        )
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug(f"duplex callback capture error: {e}")
+
+        # Playback path: drain mono playback queue, upmix to native channels
+        try:
+            if outdata is None:
+                return
+            ch = outdata.shape[1] if outdata.ndim > 1 else 1
+            n_needed = frames
+            written = 0
+            while written < n_needed:
+                try:
+                    samples = self._playback_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if samples is None or len(samples) == 0:
+                    continue
+                # Truncate if it overflows the remaining output buffer
+                remaining = n_needed - written
+                if len(samples) > remaining:
+                    leftover = samples[remaining:]
+                    samples = samples[:remaining]
+                    # Push leftover back to the front by re-queuing it. queue.Queue
+                    # has no put-front; instead drain queue, prepend, refill.
+                    try:
+                        existing: list[np.ndarray] = [leftover]
+                        while True:
+                            try:
+                                existing.append(self._playback_queue.get_nowait())
+                            except queue.Empty:
+                                break
+                        for item in existing:
+                            try:
+                                self._playback_queue.put_nowait(item)
+                            except queue.Full:
+                                break
+                    except Exception:
+                        pass
+                if ch == 2:
+                    outdata[written:written + len(samples)] = np.stack(
+                        [samples, samples], axis=1
+                    )
+                else:
+                    outdata[written:written + len(samples), 0] = samples
+                written += len(samples)
+            if written < n_needed:
+                outdata[written:].fill(0)
+        except Exception as e:
+            logger.debug(f"duplex callback playback error: {e}")
+            try:
+                outdata.fill(0)
+            except Exception:
+                pass
+
+    def enqueue_playback(self, samples: np.ndarray) -> None:
+        """Queue mono float32 samples [-1, 1] for playback through the duplex stream.
+
+        Splits long buffers into ~1024-sample chunks; drops oldest if queue is full.
+        Fast — must not block the caller. Prefer ``enqueue_playback_async`` for
+        TTS streaming so backpressure preserves the head of long utterances.
+        """
+        if samples is None or len(samples) == 0:
+            return
+        try:
+            if samples.dtype != np.float32:
+                samples = samples.astype(np.float32, copy=False)
+            if samples.ndim > 1:
+                samples = samples.mean(axis=1).astype(np.float32, copy=False)
+            chunk_size = 1024
+            for i in range(0, len(samples), chunk_size):
+                buf = samples[i:i + chunk_size]
+                try:
+                    self._playback_queue.put_nowait(buf)
+                except queue.Full:
+                    try:
+                        self._playback_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self._playback_queue.put_nowait(buf)
+                    except queue.Full:
+                        pass
+        except Exception as e:
+            logger.debug(f"enqueue_playback error: {e}")
+
+    async def enqueue_playback_async(self, samples: np.ndarray) -> None:
+        """Async variant with backpressure: waits for queue room instead of
+        dropping oldest. Required for streaming TTS where the server emits
+        audio faster than realtime — without backpressure the queue overflows
+        and the head of long utterances gets clipped.
+        """
+        if samples is None or len(samples) == 0:
+            return
+        try:
+            if samples.dtype != np.float32:
+                samples = samples.astype(np.float32, copy=False)
+            if samples.ndim > 1:
+                samples = samples.mean(axis=1).astype(np.float32, copy=False)
+            chunk_size = 1024
+            # When the queue is full, wait ~1 ALSA period (≈ one chunk worth
+            # of playback time). Cap total wait to avoid hanging the output
+            # pipeline if the duplex callback dies.
+            period = chunk_size / max(self.config.sample_rate, 1)
+            max_wait_iters = max(int(2.0 / period), 1)  # ~2s ceiling
+            for i in range(0, len(samples), chunk_size):
+                buf = samples[i:i + chunk_size]
+                waited = 0
+                while waited < max_wait_iters:
+                    try:
+                        self._playback_queue.put_nowait(buf)
+                        break
+                    except queue.Full:
+                        await asyncio.sleep(period)
+                        waited += 1
+                else:
+                    # Last-resort drop — the consumer is stuck.
+                    logger.warning(
+                        "enqueue_playback_async: backpressure timeout, dropping chunk"
+                    )
+        except Exception as e:
+            logger.debug(f"enqueue_playback_async error: {e}")
+
+    def drain_playback(self) -> None:
+        """Drop all queued playback samples (e.g. for barge-in)."""
+        try:
+            while True:
+                try:
+                    self._playback_queue.get_nowait()
+                except queue.Empty:
+                    break
+        except Exception:
+            pass
+
+    async def await_playback_drained(self, timeout: float = 30.0) -> None:
+        """Wait until the playback queue has been consumed by the duplex callback.
+
+        Used on natural end-of-TTS so we don't truncate the tail of an
+        utterance. The duplex callback chips ~64ms per ALSA period at
+        16kHz/1024-frame blocksize; a few-second utterance drains in a
+        few seconds. Returns early on timeout to avoid hanging the
+        finish-speaking path forever.
+        """
+        deadline = asyncio.get_event_loop().time() + timeout
+        while True:
+            if self._playback_queue.empty():
+                # Queue is empty but the callback may still have one period
+                # of samples buffered for output; sleep one blocksize to let
+                # ALSA play it out before the caller stops the stream.
+                await asyncio.sleep(1024 / max(self.config.sample_rate, 1))
+                return
+            if asyncio.get_event_loop().time() >= deadline:
+                logger.warning(
+                    "await_playback_drained: timeout with %d chunks still queued",
+                    self._playback_queue.qsize(),
+                )
+                return
+            await asyncio.sleep(0.05)
 
     async def read_chunk(self, frames: int = 1024) -> np.ndarray | None:
         """Read one audio chunk. Non-blocking."""
@@ -135,10 +396,18 @@ class AudioCapture:
     async def stop(self) -> None:
         """Stop audio capture."""
         self._running = False
+        if self._duplex_stream is not None:
+            try:
+                self._duplex_stream.stop()
+                self._duplex_stream.close()
+            except Exception:
+                pass
+            self._duplex_stream = None
+            self.drain_playback()
         if self._reader_thread is not None:
             self._reader_thread.join(timeout=2.0)
             self._reader_thread = None
-            self._chunk_queue = None
+        self._chunk_queue = None
         if getattr(self, '_continuous', False) and self._has_reachy_audio:
             try:
                 self.reachy.media.stop_recording()
@@ -257,19 +526,47 @@ class AudioCapture:
         """Background thread: continuously read mic into asyncio queue."""
         import sounddevice as sd
 
-        try:
-            stream = sd.InputStream(
-                samplerate=self.config.sample_rate,
-                channels=2,  # ReSpeaker has 2 input channels
-                dtype=np.float32,
-                device=self._device_id,
-                blocksize=frames,
-            )
-            stream.start()
-            logger.debug(f"BG reader: started on device {self._device_id}")
-        except Exception as e:
-            logger.error(f"BG reader: failed to open mic: {e}")
+        # USB Audio (Reachy Mini Audio) is on ALSA card 0 but PortAudio in the
+        # container sometimes doesn't enumerate it (PulseAudio sink SUSPENDED
+        # → PA reports 0 channels → sd picks Jetson HDA which has no real
+        # mic attached → silence). Try ALSA hw strings first to bypass the
+        # broken enumeration, then fall back to discovered index, then default.
+        candidates: list[object] = ["hw:0,0", "plughw:0,0"]
+        if self._device_id is not None:
+            candidates.append(self._device_id)
+        candidates.append(None)
+
+        stream = None
+        used_device: object = None
+        last_err: Exception | None = None
+        for ch in (2, 1):  # try stereo first (ReSpeaker), fall back to mono
+            for dev in candidates:
+                try:
+                    stream = sd.InputStream(
+                        samplerate=self.config.sample_rate,
+                        channels=ch,
+                        dtype=np.float32,
+                        device=dev,
+                        blocksize=frames,
+                    )
+                    stream.start()
+                    used_device = dev
+                    logger.info(
+                        f"BG reader: started on device={dev!r} channels={ch}"
+                    )
+                    break
+                except Exception as e:
+                    last_err = e
+                    logger.debug(
+                        f"BG reader: open failed (device={dev!r} ch={ch}): {e}"
+                    )
+                    stream = None
+            if stream is not None:
+                break
+        if stream is None:
+            logger.error(f"BG reader: failed to open mic on any device: {last_err}")
             return
+        self._bg_used_device = used_device
 
         try:
             while self._running:

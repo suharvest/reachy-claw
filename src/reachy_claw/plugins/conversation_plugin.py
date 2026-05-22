@@ -778,10 +778,12 @@ class ConversationPlugin(Plugin):
         # Push V2V PCM chunk into _audio_queue for the output pipeline to
         # play. The V2V branch of _output_pipeline recognizes the
         # ("v2v_audio", sample_rate, pcm) marker and dispatches to GStreamer.
-        try:
-            self._audio_queue.put_nowait(("v2v_audio", sample_rate, pcm))
-        except asyncio.QueueFull:
-            logger.warning("V2V audio queue full, dropping chunk")
+        # Use `await put` so backpressure cascades up to the V2V WebSocket
+        # recv loop when the playback pipeline is saturated — TTS bursts
+        # on Jetson out-pace realtime playback, and `put_nowait` would
+        # otherwise drop scattered chunks across a long utterance
+        # (manifests as missing/garbled segments).
+        await self._audio_queue.put(("v2v_audio", sample_rate, pcm))
 
     async def _on_v2v_vad_event(self, event: str) -> None:
         if event == "speech_start":
@@ -2602,8 +2604,12 @@ class ConversationPlugin(Plugin):
         elif self._audio is not None:
             # NO_MEDIA: playback runs through AudioCapture's duplex stream.
             # Do NOT close the stream — that would also stop mic capture.
-            # Just drain the playback queue.
-            self._audio.drain_playback()
+            # On a natural end-of-utterance, WAIT for the queued PCM to be
+            # consumed by the duplex callback. Draining immediately would
+            # throw away seconds of pending TTS audio (the duplex callback
+            # only chips one ALSA period at a time, while V2V pushes the
+            # entire utterance in a burst before emitting tts_done).
+            await self._audio.await_playback_drained()
         self._gst_playing = False
 
     def _stop_gst_playback_sync(self) -> None:
@@ -2665,10 +2671,12 @@ class ConversationPlugin(Plugin):
             # NO_MEDIA: route PCM through the shared duplex stream owned by
             # AudioCapture. Mic capture + TTS playback live on the same
             # sd.Stream so the USB device's firmware AEC can lock its
-            # echo-cancel reference.
+            # echo-cancel reference. Use the async backpressure path so
+            # long utterances don't lose the head when TTS emits faster
+            # than the ALSA callback consumes.
             if self._audio is not None:
-                self._audio.enqueue_playback(samples)
                 self._gst_playing = True
+                await self._audio.enqueue_playback_async(samples)
         if self._wobbler:
             self._wobbler.feed(samples)
 
