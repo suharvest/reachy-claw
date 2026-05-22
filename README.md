@@ -261,6 +261,8 @@ bash deploy/jetson/kiosk/install.sh
 This installs a GNOME autostart entry that waits for the dashboard to be ready, then opens Chromium in kiosk mode.
 
 See `deploy/jetson/` for Dockerfiles and compose config.
+The current pinned image tag is `reachy-claw:v1.21` (see
+[CHANGELOG.md](CHANGELOG.md) for what changed).
 
 ## Edge Speech Service
 
