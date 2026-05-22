@@ -664,6 +664,13 @@ class ConversationPlugin(Plugin):
                 "utterance_dropped",
                 {"reason": "thinking_in_progress", "text": preview},
             )
+            # Multi-turn guard: even though we drop this utterance, the
+            # preceding speech_start already set the abort latch and the
+            # interrupt event. If we don't clear them here, the *next*
+            # speech_start may be debounced incorrectly and the next TTS
+            # cycle muted by the stale interrupt -> conversation freezes.
+            self._v2v_abort_in_flight = False
+            self._interrupt_event.clear()
             return
         if isinstance(self._client, EdgeLLMClient) and self._client.is_streaming:
             preview = text[:50] if text else ""
@@ -675,6 +682,10 @@ class ConversationPlugin(Plugin):
                 "utterance_dropped",
                 {"reason": "thinking_in_progress", "text": preview},
             )
+            # Same multi-turn guard as the THINKING path above — clear the
+            # abort/interrupt state we set on the triggering speech_start.
+            self._v2v_abort_in_flight = False
+            self._interrupt_event.clear()
             return
         # Reset abort-dedup latch on a fresh utterance.
         self._v2v_abort_in_flight = False
