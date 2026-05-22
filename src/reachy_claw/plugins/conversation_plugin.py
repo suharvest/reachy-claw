@@ -262,10 +262,18 @@ class ConversationPlugin(Plugin):
             if config.llm_backend == "edge_llm_v2v":
                 from ..llm import DEFAULT_SYSTEM_PROMPT
 
+                # Allow operator override via [llm] system_prompt in TOML
+                # (mapped to config.ollama_system_prompt). Falls back to the
+                # built-in default when unset.
+                sys_prompt = (
+                    config.ollama_system_prompt.strip()
+                    if config.ollama_system_prompt
+                    else DEFAULT_SYSTEM_PROMPT
+                )
                 edge_cfg = EdgeLLMConfig(
                     base_url=config.edge_llm_url,
                     model=config.edge_llm_model,
-                    system_prompt=DEFAULT_SYSTEM_PROMPT,
+                    system_prompt=sys_prompt,
                     max_tokens=config.edge_llm_max_tokens,
                     prefix_cache=config.edge_llm_prefix_cache,
                 )

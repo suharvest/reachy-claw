@@ -497,6 +497,7 @@ class DashboardPlugin(Plugin):
 
         elif msg_type == "set_prompt":
             from ..llm import DEFAULT_SYSTEM_PROMPT, MONOLOGUE_SYSTEM_PROMPT, INTERPRETER_SYSTEM_PROMPT, OllamaClient
+            from ..edge_llm import EdgeLLMClient
 
             mode = data.get("mode")
             prompt = data.get("prompt", "").strip()
@@ -514,20 +515,35 @@ class DashboardPlugin(Plugin):
             else:
                 return
 
-            # Hot-apply: if OllamaClient is active in matching mode, update live
+            # Hot-apply: update the running LLM client's system_prompt so the
+            # next turn picks up the new prompt without a restart.
             conv = self.app.get_plugin("conversation")
-            if conv and hasattr(conv, "_client") and isinstance(conv._client, OllamaClient):
-                current_mode = conv._mode_manager.current.name if getattr(conv, "_mode_manager", None) else "conversation"
+            client = getattr(conv, "_client", None) if conv else None
+            current_mode = (
+                conv._mode_manager.current.name
+                if conv and getattr(conv, "_mode_manager", None)
+                else "conversation"
+            )
+            if isinstance(client, OllamaClient):
                 if mode == "interpreter" and current_mode == "interpreter":
                     interp_default = INTERPRETER_SYSTEM_PROMPT.format(
                         source_lang=self.app.config.interpreter_source_lang,
                         target_lang=self.app.config.interpreter_target_lang,
                     )
-                    conv._client._config.system_prompt = prompt or interp_default
+                    client._config.system_prompt = prompt or interp_default
                 elif (mode == "monologue" and current_mode == "monologue") or (mode == "conversation" and current_mode == "conversation"):
-                    conv._client._config.system_prompt = prompt or (
+                    client._config.system_prompt = prompt or (
                         MONOLOGUE_SYSTEM_PROMPT if mode == "monologue" else DEFAULT_SYSTEM_PROMPT
                     )
+            elif isinstance(client, EdgeLLMClient) and mode == "conversation":
+                # edge_llm_v2v: only the conversation prompt is relevant
+                # (monologue / interpreter / diary go through their own
+                # code paths that re-read config at start).
+                client._config.system_prompt = prompt or DEFAULT_SYSTEM_PROMPT
+                # The TRT prefix cache was saved against the OLD system
+                # prompt; invalidate so the next turn re-saves with the
+                # new one.
+                client._system_prompt_cache_saved = False
 
             field_map = {
                 "conversation": "ollama_system_prompt",
