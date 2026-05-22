@@ -722,7 +722,12 @@ class ConversationPlugin(Plugin):
         self.app.is_speaking = False
         if self._wobbler:
             self._wobbler.reset()
-        if self._state != ConvState.LISTENING:
+        # Only roll back to IDLE when nothing else is in progress.
+        # LISTENING (user already started talking) and THINKING (a new
+        # LLM turn is generating) must NOT be clobbered by a stale
+        # tts_done belonging to the previous reply — that would erase
+        # the next turn's state and stall the conversation.
+        if self._state not in (ConvState.LISTENING, ConvState.THINKING):
             self._set_state(ConvState.IDLE)
         self.app.events.emit("tts_done", {})
 
