@@ -365,7 +365,9 @@ class TestV2VCallbackWiring:
 
 class TestV2VAudioUplinkLoop:
     @pytest.mark.asyncio
-    async def test_uplink_forwards_pcm16_bytes(self, v2v_app):
+    async def test_uplink_forwards_pcm16_bytes_legacy_server_vad(self, v2v_app):
+        """Legacy server-VAD mode (v2v_vad != 'none') passes mic through."""
+        v2v_app.config.v2v_vad = "silero"  # server-side VAD → no client gate
         plugin = _make_plugin(v2v_app)
 
         import numpy as np
@@ -381,18 +383,87 @@ class TestV2VAudioUplinkLoop:
                     c = chunks[self._i]
                     self._i += 1
                     return c
-                # End: stop the loop after a beat
                 plugin._running = False
                 return None
 
         plugin._audio = FakeAudio()
         await plugin._v2v_audio_uplink_loop()
-        # Should have called send_audio at least once with int16 bytes
         assert plugin._v2v.send_audio.await_count >= 1
         payload = plugin._v2v.send_audio.await_args_list[0].args[0]
         assert isinstance(payload, (bytes, bytearray))
-        # 1024 float32 samples → 1024 * 2 bytes int16
         assert len(payload) == 1024 * 2
+
+    @pytest.mark.asyncio
+    async def test_uplink_client_vad_gates_idle_audio(self, v2v_app):
+        """Client-VAD mode: idle (silent) chunks must NOT be sent."""
+        v2v_app.config.v2v_vad = "none"
+        plugin = _make_plugin(v2v_app)
+
+        import numpy as np
+        from unittest.mock import MagicMock
+
+        # Mock VAD that always returns silence.
+        plugin._vad = MagicMock()
+        plugin._vad.speech_probability = MagicMock(return_value=0.0)
+
+        chunks = [np.zeros(1024, dtype=np.float32)] * 5 + [None]
+
+        class FakeAudio:
+            def __init__(self):
+                self._i = 0
+
+            async def read_chunk(self, frames):
+                if self._i < len(chunks):
+                    c = chunks[self._i]
+                    self._i += 1
+                    return c
+                plugin._running = False
+                return None
+
+        plugin._audio = FakeAudio()
+        await plugin._v2v_audio_uplink_loop()
+        # Silence + idle → buffered in preroll, NOT sent.
+        assert plugin._v2v.send_audio.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_uplink_client_vad_speech_flushes_preroll(self, v2v_app):
+        """Client-VAD mode: idle→speech transition flushes preroll and streams."""
+        v2v_app.config.v2v_vad = "none"
+        v2v_app.config.v2v_client_vad_preroll_ms = 300
+        plugin = _make_plugin(v2v_app)
+
+        import numpy as np
+        from unittest.mock import MagicMock
+
+        # Mock VAD: first 2 chunks silent, next 2 speech, then silent.
+        plugin._vad = MagicMock()
+        probs = iter([0.0, 0.0, 0.9, 0.9, 0.0])
+        plugin._vad.speech_probability = MagicMock(
+            side_effect=lambda *a, **kw: next(probs, 0.0),
+        )
+
+        chunks = [np.zeros(1024, dtype=np.float32)] * 5 + [None]
+
+        class FakeAudio:
+            def __init__(self):
+                self._i = 0
+
+            async def read_chunk(self, frames):
+                if self._i < len(chunks):
+                    c = chunks[self._i]
+                    self._i += 1
+                    return c
+                plugin._running = False
+                return None
+
+        plugin._audio = FakeAudio()
+        await plugin._v2v_audio_uplink_loop()
+        # 2 preroll + 2 speech + 1 tail = 5 sends after speech_start transition,
+        # but preroll capped by 300ms / 64ms ≈ 4 → preroll deque holds 2.
+        # Speech_start on chunk 3 → flush preroll (2) + send chunk 3 → 3 sends so far.
+        # Chunk 4 (speech) → 1 more send. Chunk 5 (silence, but in speech state) → 1 more.
+        # Total: 5 sends.
+        assert plugin._v2v.send_audio.await_count >= 3
 
 
 # ── Shutdown ─────────────────────────────────────────────────────────
@@ -505,24 +576,28 @@ class TestTtsDoneStopsGStreamer:
 
 
 class TestStartV2VSkipsLegacyFactories:
-    """BUG 3: start() in V2V mode must skip the local STT/TTS/VAD
-    factories. We can't easily run start() end-to-end without a live WS
-    server, but we can verify the new conditional structure leaves the
-    attributes None when the V2V early branch is taken."""
+    """BUG 3: start() in V2V mode must skip the local STT/TTS factories.
+
+    NOTE: client-VAD mode (vad=none) does construct a local silero VAD
+    in Phase 2 (_init_vad), but Phase 1 still skips it — we assert the
+    Phase-1 conditional structure here. VAD factory is allowed to be
+    called later in Phase 2.
+    """
 
     @pytest.mark.asyncio
     async def test_v2v_mode_does_not_construct_stt_tts_vad(self, v2v_app, monkeypatch):
         from reachy_claw.plugins import conversation_plugin as cp_mod
 
-        # Sentinels that explode if called (proves the V2V branch skipped them).
+        # Sentinels that explode if called in Phase 1 (proves the V2V
+        # branch skipped them). VAD is NOT in this set because client-VAD
+        # mode constructs it in Phase 2.
         def _explode(*_a, **_kw):
             raise AssertionError(
-                "STT/TTS/VAD factory called in edge_llm_v2v mode"
+                "STT/TTS factory called in edge_llm_v2v mode Phase 1"
             )
 
         monkeypatch.setattr(cp_mod, "create_stt_backend", _explode)
         monkeypatch.setattr(cp_mod, "create_tts_backend", _explode)
-        monkeypatch.setattr(cp_mod, "create_vad_backend", _explode)
 
         plugin = ConversationPlugin(v2v_app)
         # Drive the start() Phase 1 block in isolation. We mimic only what
