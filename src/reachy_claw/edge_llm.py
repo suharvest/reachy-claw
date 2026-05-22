@@ -252,6 +252,43 @@ class EdgeLLMClient:
             payload["prefix_cache"] = True
 
         full_text = ""
+        # Streaming-safe emotion-tag stripper. LLM tokens often split a
+        # tag across deltas (e.g. "[", "curious", "]"), so the per-delta
+        # regex .sub() misses them and the tag leaks into V2V TTS. Buffer
+        # text once we see a "[" until the matching "]" arrives, then
+        # decide: looks like an emotion tag → drop; anything else → flush
+        # as plain text.
+        tag_buf = ""
+
+        def _consume(delta_in: str) -> str:
+            nonlocal tag_buf
+            if self._config.skip_emotion_extraction:
+                return delta_in
+            out_chars: list[str] = []
+            for ch in delta_in:
+                if tag_buf:
+                    tag_buf += ch
+                    if ch == "]":
+                        # Emit only if it doesn't look like a tag —
+                        # tags are [word] with no spaces/punctuation.
+                        inner = tag_buf[1:-1]
+                        if inner and all(
+                            c.isalnum() or c == "_" for c in inner
+                        ):
+                            pass  # drop emotion tag
+                        else:
+                            out_chars.append(tag_buf)
+                        tag_buf = ""
+                    elif len(tag_buf) > 32:
+                        # Runaway: not a tag, flush as plain text.
+                        out_chars.append(tag_buf)
+                        tag_buf = ""
+                elif ch == "[":
+                    tag_buf = "["
+                else:
+                    out_chars.append(ch)
+            return "".join(out_chars)
+
         try:
             async with self._http.stream(
                 "POST", "/v1/chat/completions", json=payload,
@@ -291,16 +328,21 @@ class EdgeLLMClient:
                     if delta:
                         full_text += delta
                         if self.callbacks.on_stream_delta:
-                            clean_token = (
-                                delta if self._config.skip_emotion_extraction
-                                else _EMOTION_RE.sub("", delta)
-                            )
+                            clean_token = _consume(delta)
                             if clean_token:
                                 await _maybe_await(
                                     self.callbacks.on_stream_delta(clean_token, run_id)
                                 )
                     if choice.get("finish_reason"):
                         break
+            # End of stream: if we held a partial "[..." that never closed,
+            # flush it as plain text — it wasn't an emotion tag after all.
+            if tag_buf and self.callbacks.on_stream_delta:
+                pending = tag_buf
+                tag_buf = ""
+                await _maybe_await(
+                    self.callbacks.on_stream_delta(pending, run_id)
+                )
         except asyncio.CancelledError:
             if self.callbacks.on_stream_abort:
                 await _maybe_await(
