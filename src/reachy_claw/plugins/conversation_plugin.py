@@ -2621,9 +2621,24 @@ class ConversationPlugin(Plugin):
                 name="conversation.send_interrupt",
             )
         if notify_v2v and self._v2v is not None:
+            # abort tells the server to stop generating; flush_tts clears
+            # any sentence/PCM that's already queued server-side. Without
+            # the flush, residual tokens buffered before the abort hit
+            # can synthesize fresh TTS that resumes playback after the
+            # local drain — the classic "barge-in but it keeps talking"
+            # bug.
+            async def _abort_and_flush() -> None:
+                try:
+                    await self._v2v.abort()
+                except Exception as e:
+                    logger.debug(f"V2V abort failed: {e}")
+                try:
+                    await self._v2v.flush_tts()
+                except Exception as e:
+                    logger.debug(f"V2V flush_tts after abort failed: {e}")
             self._spawn_task(
-                self._v2v.abort(),
-                name="conversation.v2v_abort",
+                _abort_and_flush(),
+                name="conversation.v2v_abort_and_flush",
             )
 
     # ── TTS + interruptible playback ──────────────────────────────────
