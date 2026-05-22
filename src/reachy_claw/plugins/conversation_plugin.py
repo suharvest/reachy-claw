@@ -123,6 +123,14 @@ class ConversationPlugin(Plugin):
         # from `_v2v_abort_in_flight`, which dedupes the whole barge-in cycle.
         self._v2v_last_speech_start_ts: float = 0.0
         self._v2v_last_speech_end_ts: float = 0.0
+        # Client-side VAD gate state (used in V2V mode when v2v_vad="none").
+        # Mirrors OVS app_base.py: idle holds a preroll ring buffer; on local
+        # speech_start we flush the ring + start streaming; on local silence
+        # we send asr_eos and go back to idle.
+        self._client_vad_state: str = "idle"  # "idle" or "speech"
+        self._client_vad_silence_acc_ms: float = 0.0
+        self._client_vad_eos_sent: bool = False
+        self._client_vad_preroll: collections.deque[bytes] = collections.deque()
         self._stt = None
         self._tts = None
         self._vad = None
@@ -229,7 +237,18 @@ class ConversationPlugin(Plugin):
 
         async def _init_vad():
             if config.llm_backend == "edge_llm_v2v":
-                logger.info("Skipping local VAD init (edge_llm_v2v delegates VAD to V2V)")
+                # Client-VAD mode: run silero locally even in V2V mode.
+                # _vad is None at this point (Phase 1 skipped the factory),
+                # so build a silero backend here just for the uplink gate.
+                if self._vad is None:
+                    self._vad = create_vad_backend(
+                        backend=config.vad_backend, config=config,
+                    )
+                await asyncio.to_thread(self._vad.preload)
+                logger.info(
+                    "Local VAD (client-VAD mode for V2V): %s",
+                    config.vad_backend,
+                )
                 return
             await asyncio.to_thread(self._vad.preload)
             logger.info(f"VAD backend: {config.vad_backend}")
@@ -937,41 +956,203 @@ class ConversationPlugin(Plugin):
             self._v2v_reconnecting = False
 
     async def _v2v_audio_uplink_loop(self) -> None:
-        """Forward mic chunks to V2V as PCM16 mono bytes.
+        """Forward mic chunks to V2V as PCM16 mono bytes with client-side VAD gate.
+
+        When ``v2v_vad == "none"`` (default), reachy-claw runs a local
+        silero VAD over each mic chunk:
+
+        * idle    → buffer chunk into preroll ring; do NOT send to server
+        * speech  → stream chunks to server; on local silence ≥ silence_ms
+                    emit ``asr_eos`` and go back to idle
+        * idle → speech transition while robot is SPEAKING → fire local
+                 barge-in immediately (abort + drain), without waiting for
+                 server-side VAD.
+
+        When ``v2v_vad != "none"`` (legacy), behaves as a thin forwarder
+        (server runs VAD).
 
         AudioCapture yields float32 in [-1, 1]; V2V expects int16 LE bytes.
         """
         if not self._audio or not self._v2v:
             return
-        logger.info("V2V audio uplink loop started")
+        config = self.app.config
+        client_vad_enabled = (
+            getattr(config, "v2v_vad", "none") == "none"
+            and self._vad is not None
+        )
+        sample_rate = int(getattr(config, "sample_rate", 16000) or 16000)
+        silence_ms_threshold = float(
+            getattr(config, "v2v_client_vad_silence_ms", 400)
+        )
+        preroll_ms = float(getattr(config, "v2v_client_vad_preroll_ms", 300))
+        vad_threshold = float(
+            getattr(config, "v2v_client_vad_threshold", 0.5)
+        )
+
+        # Reset gate state on (re)entry.
+        self._client_vad_state = "idle"
+        self._client_vad_silence_acc_ms = 0.0
+        self._client_vad_eos_sent = False
+        self._client_vad_preroll = collections.deque()
+
+        logger.info(
+            "V2V audio uplink loop started (client_vad=%s, silence_ms=%.0f, "
+            "preroll_ms=%.0f, threshold=%.2f)",
+            client_vad_enabled, silence_ms_threshold, preroll_ms, vad_threshold,
+        )
+
+        async def _send(payload: bytes) -> bool:
+            """Return True on success, False on connection drop."""
+            if not self._v2v or not self._v2v.is_connected:
+                return False
+            try:
+                await self._v2v.send_audio(payload)
+                return True
+            except Exception as e:
+                logger.warning(f"V2V send_audio failed: {e}")
+                await asyncio.sleep(0.1)
+                return False
+
         try:
             while self._running:
                 chunk = await self._audio.read_chunk(1024)
                 if chunk is None:
                     await asyncio.sleep(0.01)
                     continue
+
+                # Convert to int16 PCM bytes (with 4× boost preserved).
                 if isinstance(chunk, np.ndarray):
                     if chunk.dtype != np.int16:
-                        pcm = np.clip(chunk * 32768.0, -32768, 32767).astype(np.int16)
+                        boosted = np.clip(chunk * 4.0, -1.0, 1.0)
+                        pcm = np.clip(
+                            boosted * 32768.0, -32768, 32767,
+                        ).astype(np.int16)
+                        # Use boosted float for VAD inference too (matches
+                        # what we send to the server so triggers align).
+                        vad_audio = boosted.astype(np.float32, copy=False)
                     else:
                         pcm = chunk
+                        vad_audio = (
+                            chunk.astype(np.float32) / 32768.0
+                        )
                     payload = pcm.tobytes()
+                    n_samples = int(pcm.shape[0])
                 else:
                     payload = bytes(chunk)
+                    n_samples = max(1, len(payload) // 2)
+                    vad_audio = np.frombuffer(
+                        payload, dtype=np.int16,
+                    ).astype(np.float32) / 32768.0
+
                 if not self._v2v.is_connected:
                     await asyncio.sleep(0.05)
                     continue
+
+                # Legacy: no client VAD → straight passthrough.
+                if not client_vad_enabled:
+                    await _send(payload)
+                    continue
+
+                chunk_ms = (n_samples / float(sample_rate)) * 1000.0
+                # Maintain preroll ring buffer size (in chunks).
+                preroll_max = max(
+                    1, int(round(preroll_ms / max(chunk_ms, 1.0))),
+                )
+                if self._client_vad_preroll.maxlen != preroll_max:
+                    # Re-create deque with correct maxlen, preserving items.
+                    self._client_vad_preroll = collections.deque(
+                        self._client_vad_preroll, maxlen=preroll_max,
+                    )
+
+                # Run silero (CPU, ~1-2ms per 64ms chunk).
                 try:
-                    await self._v2v.send_audio(payload)
+                    prob = await asyncio.to_thread(
+                        self._vad.speech_probability, vad_audio, sample_rate,
+                    )
                 except Exception as e:
-                    logger.warning(f"V2V send_audio failed: {e}")
-                    await asyncio.sleep(0.1)
+                    logger.debug(f"client VAD inference failed: {e}")
+                    prob = 0.0
+                is_speech = prob >= vad_threshold
+
+                if self._client_vad_state == "idle":
+                    if is_speech:
+                        # idle → speech: flush preroll, then stream chunk.
+                        self._client_vad_state = "speech"
+                        self._client_vad_silence_acc_ms = 0.0
+                        self._client_vad_eos_sent = False
+                        # Local barge-in: if robot is SPEAKING, kill TTS
+                        # and notify V2V (server still runs sentence-level
+                        # TTS even with vad=none).
+                        if self._state == ConvState.SPEAKING:
+                            try:
+                                await self._local_speech_start_barge_in()
+                            except Exception as e:
+                                logger.debug(
+                                    f"local barge-in fire failed: {e}"
+                                )
+                        # Flush preroll first.
+                        while self._client_vad_preroll:
+                            pre = self._client_vad_preroll.popleft()
+                            if not await _send(pre):
+                                break
+                        await _send(payload)
+                    else:
+                        # Still silent: stash in preroll, do NOT send.
+                        self._client_vad_preroll.append(payload)
+                else:  # state == "speech"
+                    # Stream the chunk regardless (tail captures trailing silence).
+                    await _send(payload)
+                    if is_speech:
+                        self._client_vad_silence_acc_ms = 0.0
+                    else:
+                        self._client_vad_silence_acc_ms += chunk_ms
+                        if (
+                            self._client_vad_silence_acc_ms
+                            >= silence_ms_threshold
+                            and not self._client_vad_eos_sent
+                        ):
+                            try:
+                                if self._v2v and self._v2v.is_connected:
+                                    await self._v2v.send_asr_eos()
+                                    logger.debug(
+                                        "client VAD: silence %.0fms → asr_eos",
+                                        self._client_vad_silence_acc_ms,
+                                    )
+                            except Exception as e:
+                                logger.debug(
+                                    f"client VAD asr_eos send failed: {e}"
+                                )
+                            self._client_vad_eos_sent = True
+                            self._client_vad_state = "idle"
+                            self._client_vad_silence_acc_ms = 0.0
+                            self._client_vad_preroll.clear()
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("V2V audio uplink loop crashed")
         finally:
             logger.info("V2V audio uplink loop stopped")
+
+    async def _local_speech_start_barge_in(self) -> None:
+        """Fire barge-in when client-side VAD detects user speech while SPEAKING.
+
+        Mirrors the SPEAKING branch of ``_on_v2v_vad_event("speech_start")``
+        but is driven by local silero instead of server VAD. Uses the same
+        500ms time-window dedupe so a rapid sequence of speech_start
+        triggers doesn't spam the server.
+        """
+        now_ts = time.monotonic()
+        if now_ts - self._v2v_last_abort_ts < 0.5:
+            logger.debug(
+                "client VAD speech_start: recent abort (<500ms), skip"
+            )
+            return
+        self._v2v_last_abort_ts = now_ts
+        self._v2v_last_speech_start_ts = now_ts
+        self._v2v_abort_in_flight = True
+        logger.info("client VAD speech_start → local barge-in")
+        await self._fire_interrupt(notify_v2v=True)
+        self._set_state(ConvState.LISTENING)
 
     async def _on_stream_start(self, run_id: str) -> None:
         logger.debug(f"Stream started: {run_id}")
@@ -2054,6 +2235,20 @@ class ConversationPlugin(Plugin):
             logger.info("(no speech detected)")
             self.app.events.emit("asr_final", {"text": ""})
             self._set_state(ConvState.IDLE)
+            # OVS multi_utterance=False quirk: speech_end always marks
+            # the ASR session closed server-side, regardless of whether
+            # asr_final has content. For non-empty finals OVS also closes
+            # the WS (which triggers our auto-reconnect), but for empty
+            # finals the WS stays open while the session silently rejects
+            # further audio — manifests as "robot stops hearing me after
+            # one quiet turn". Force a reconnect to get a fresh session.
+            if (
+                self._v2v is not None
+                and not self.app.config.v2v_multi_utterance
+                and self._v2v.is_connected
+            ):
+                logger.debug("Empty asr_final in multi_utterance=False: forcing V2V reconnect")
+                self._schedule_v2v_reconnect()
             return
 
         # During diary narration, suppress conversation/monologue/interpreter responses.
@@ -2404,26 +2599,26 @@ class ConversationPlugin(Plugin):
                 reachy.media.stop_playing()
             except Exception:
                 pass
-        elif getattr(self, "_v2v_sd_stream", None) is not None:
-            try:
-                # Flush a short tail of silence then close the sounddevice stream.
-                silence = np.zeros(1600, dtype=np.float32)
-                await asyncio.to_thread(self._v2v_sd_stream.write, silence)
-                await asyncio.to_thread(self._v2v_sd_stream.stop)
-                await asyncio.to_thread(self._v2v_sd_stream.close)
-            except Exception as e:
-                logger.debug(f"V2V sd_stream close failed: {e}")
-            finally:
-                self._v2v_sd_stream = None
+        elif self._audio is not None:
+            # NO_MEDIA: playback runs through AudioCapture's duplex stream.
+            # Do NOT close the stream — that would also stop mic capture.
+            # Just drain the playback queue.
+            self._audio.drain_playback()
         self._gst_playing = False
 
     def _stop_gst_playback_sync(self) -> None:
-        """Stop GStreamer playback pipeline (sync, for interrupt path)."""
-        if self._gst_playing and self.app.reachy:
-            try:
-                self.app.reachy.media.stop_playing()
-            except Exception:
-                pass
+        """Stop playback pipeline (sync, for interrupt path)."""
+        if self._gst_playing:
+            if self.app.reachy and getattr(
+                getattr(self.app.reachy, "media", None), "audio", None
+            ):
+                try:
+                    self.app.reachy.media.stop_playing()
+                except Exception:
+                    pass
+            elif self._audio is not None:
+                # NO_MEDIA: drain shared duplex playback queue (don't close stream).
+                self._audio.drain_playback()
             self._gst_playing = False
 
     async def _play_v2v_pcm(self, sample_rate: int, pcm: bytes) -> None:
@@ -2467,42 +2662,15 @@ class ConversationPlugin(Plugin):
             except Exception as e:
                 logger.warning(f"V2V push_audio_sample failed: {e}")
         else:
-            # NO_MEDIA fallback: stream PCM directly via sounddevice. Init a
-            # persistent OutputStream on the first chunk; reuse across chunks
-            # to avoid stutter from per-chunk stream open/close.
-            await self._push_v2v_pcm_to_sd(samples, target_sr)
+            # NO_MEDIA: route PCM through the shared duplex stream owned by
+            # AudioCapture. Mic capture + TTS playback live on the same
+            # sd.Stream so the USB device's firmware AEC can lock its
+            # echo-cancel reference.
+            if self._audio is not None:
+                self._audio.enqueue_playback(samples)
+                self._gst_playing = True
         if self._wobbler:
             self._wobbler.feed(samples)
-
-    async def _push_v2v_pcm_to_sd(self, samples: np.ndarray, sample_rate: int) -> None:
-        """Sounddevice fallback path for V2V PCM when SDK media is unavailable."""
-        try:
-            import sounddevice as sd
-        except Exception as e:
-            logger.debug(f"sounddevice import failed: {e}")
-            return
-        if getattr(self, "_v2v_sd_stream", None) is None:
-            try:
-                self._v2v_sd_stream = sd.OutputStream(
-                    samplerate=sample_rate,
-                    channels=1,
-                    dtype=np.float32,
-                    blocksize=0,  # let portaudio pick
-                )
-                self._v2v_sd_stream.start()
-                self._gst_playing = True  # reuse the same "speaking" latch
-                logger.info(
-                    f"V2V audio fallback: sounddevice OutputStream opened @ {sample_rate}Hz"
-                )
-            except Exception as e:
-                logger.warning(f"V2V sounddevice OutputStream open failed: {e}")
-                self._v2v_sd_stream = None
-                return
-        try:
-            # OutputStream.write is blocking — run in thread to keep event loop free.
-            await asyncio.to_thread(self._v2v_sd_stream.write, samples)
-        except Exception as e:
-            logger.warning(f"V2V sounddevice write failed: {e}")
 
     async def _finish_speaking(self) -> None:
         """Clean up after speaking is done."""
