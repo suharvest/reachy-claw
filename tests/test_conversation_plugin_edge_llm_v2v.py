@@ -715,3 +715,92 @@ class TestV2VReconnectPath:
         assert plugin._first_audio_logged_this_turn is False
         assert plugin._t_asr_final is None
         assert plugin._interrupt_event.is_set() is False
+
+
+# ── Multi-turn abort recovery after dropped ASR final ────────────────
+
+
+class TestV2VMultiTurnAbortRecovery:
+    """Regression: V2V barge-in must keep working across turns even when
+    a follow-up asr_final gets dropped because the previous LLM turn is
+    still THINKING.
+
+    Failure mode before the fix:
+      1. Turn N speaking -> speech_start aborts (latch=True, interrupt set)
+      2. New utterance asr_final arrives while THINKING -> dropped, latch
+         not cleared.
+      3. Turn N+1 speech_start -> debounced by the stale latch, no abort
+         fires; conversation stalls.
+    """
+
+    @pytest.mark.asyncio
+    async def test_speech_start_abort_resets_after_dropped_asr_final(
+        self, v2v_app,
+    ):
+        plugin = _make_plugin(v2v_app)
+
+        # Turn N: speaking -> user barges in -> abort fires.
+        plugin._state = ConvState.SPEAKING
+        plugin.app.is_speaking = True
+        await plugin._on_v2v_vad_event("speech_start")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        first_aborts = plugin._v2v.abort.await_count
+        assert first_aborts >= 1
+        assert plugin._v2v_abort_in_flight is True
+        assert plugin._interrupt_event.is_set()
+        assert plugin._state == ConvState.LISTENING
+
+        # Pretend the LLM kicked off a new turn — we're now THINKING and
+        # the next asr_final arrives concurrently and gets dropped.
+        plugin._state = ConvState.THINKING
+        await plugin._on_v2v_asr_final("hello again", False, False)
+        # Drop path must clear both flags so next barge-in works.
+        assert plugin._v2v_abort_in_flight is False
+        assert plugin._interrupt_event.is_set() is False
+
+        # Move past the 500ms time-window debounce.
+        plugin._v2v_last_abort_ts -= 1.0
+
+        # Turn N+1: speaking again -> new barge-in must fire abort.
+        plugin._state = ConvState.SPEAKING
+        plugin.app.is_speaking = True
+        # Bump the per-event 100ms speech_start debounce too.
+        plugin._v2v_last_speech_start_ts -= 1.0
+        await plugin._on_v2v_vad_event("speech_start")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert plugin._v2v.abort.await_count > first_aborts
+        assert plugin._state == ConvState.LISTENING
+
+    @pytest.mark.asyncio
+    async def test_tts_done_keeps_state_when_new_turn_in_flight(
+        self, v2v_app,
+    ):
+        """tts_done from the previous reply must NOT erase THINKING or
+        LISTENING state belonging to the next turn."""
+        plugin = _make_plugin(v2v_app)
+
+        # User already started the next turn; LISTENING must survive.
+        plugin._state = ConvState.LISTENING
+        await plugin._on_v2v_tts_done()
+        assert plugin._state == ConvState.LISTENING
+
+        # Next LLM turn already kicked off; THINKING must survive too.
+        plugin._state = ConvState.THINKING
+        await plugin._on_v2v_tts_done()
+        assert plugin._state == ConvState.THINKING
+
+    @pytest.mark.asyncio
+    async def test_fire_interrupt_with_v2v_calls_abort_then_flush_tts(
+        self, v2v_app,
+    ):
+        """Fix D: both abort and flush_tts must be invoked so server-side
+        TTS queue can't resume after the local drain."""
+        plugin = _make_plugin(v2v_app)
+        await plugin._fire_interrupt(notify_v2v=True)
+        # Background task is spawned via _spawn_task; let it run.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        plugin._v2v.abort.assert_awaited()
+        plugin._v2v.flush_tts.assert_awaited()
