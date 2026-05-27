@@ -10,7 +10,7 @@
 
 services:
   speech:
-    image: seeed-local-voice:jetson-v1.14-hotswap-20260521
+    image: seeed-local-voice:jetson-v1.16-race-fixes-slim
     build:
       context: ..
       dockerfile: deploy/docker/Dockerfile.jetson

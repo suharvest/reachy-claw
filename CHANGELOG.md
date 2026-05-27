@@ -55,7 +55,7 @@ docker compose --profile openclaw up -d   # or your usual profile
 ```
 
 The reachy-claw container expects:
-- `deploy-speech-1` (OVS, jetson-v1.14-hotswap-20260522 or newer) at `localhost:8621`
+- `deploy-speech-1` (OVS, jetson-v1.16-race-fixes-slim or newer) at `localhost:8621`
 - `edge-llm-chat-service` (Qwen3-4B-AWQ or compatible) at `localhost:11435`
 - `reachy-daemon` at `localhost:38001`
 
