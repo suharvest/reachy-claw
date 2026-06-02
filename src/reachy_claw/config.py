@@ -107,6 +107,11 @@ class Config:
     barge_in_silero_threshold: float = 0.5  # stricter VAD threshold during playback
     barge_in_cooldown_ms: int = 80  # ignore barge-in for N ms after TTS starts (low: ReSpeaker AEC handles echo)
 
+    # Conversation backend selection (plugin, not LLM):
+    #   "slv"    → thin ovs_agent-backed ConversationPlugin (SLV+edge_llm+runner)
+    #   "legacy" → original dual-pipeline ConversationPlugin
+    conversation_backend: str = "slv"
+
     # LLM backend (local Ollama, replaces gateway when set)
     llm_backend: str = "gateway"  # "gateway" (OpenClaw), "ollama", or "edge_llm_v2v"
     ollama_base_url: str = "http://localhost:11434"
@@ -301,6 +306,7 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("behavior", "play_emotions"): "play_emotions",
     ("behavior", "idle_animations"): "idle_animations",
     ("behavior", "standalone_mode"): "standalone_mode",
+    ("conversation", "backend"): "conversation_backend",
     ("llm", "backend"): "llm_backend",
     ("llm", "model"): "ollama_model",
     ("llm", "base_url"): "ollama_base_url",

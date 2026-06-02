@@ -312,7 +312,14 @@ async def async_main(config: Config) -> int:
 
             app.register(FaceTrackerPlugin(app))
 
-    from reachy_claw.plugins.conversation_plugin import ConversationPlugin
+    # Conversation backend selection (additive, reversible):
+    #   "slv"    → thin ovs_agent-backed plugin (SLV + edge_llm + runner)
+    #   "legacy" → the original 3281-line dual-pipeline plugin
+    conv_backend = getattr(config, "conversation_backend", "slv")
+    if conv_backend == "legacy":
+        from reachy_claw.plugins.conversation_plugin import ConversationPlugin
+    else:
+        from reachy_claw.plugins.conversation_plugin_slv import ConversationPlugin
 
     app.register(ConversationPlugin(app))
 
