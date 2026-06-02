@@ -1,0 +1,43 @@
+# Client-loop (SLV) production override — additive, non-destructive.
+#
+# Deploys the FINAL full ReachyClawApp image (:slv-v2) with the thin
+# conversation_plugin_slv backend + ovs_agent baked in. Motors OFF.
+#
+# Usage (NOTE: deliberately OMITS docker-compose.dev.yml so the on-device
+#   source bind-mount does NOT shadow the image's baked code):
+#   docker compose -p reachy \
+#     -f docker-compose.yml -f docker-compose.slv.yml \
+#     up -d --no-deps reachy-claw
+#
+# Why a fresh DATA_DIR (reachy-data-slv): the production reachy-data dir
+# holds a STALE runtime-overrides.yaml (conversation.mode=conversation,
+# edge_llm_model='', vad_silence_ms=1200, ...) that Layer-2 config loading
+# would merge OVER the mounted reachy-claw.yaml. Pointing at a fresh empty
+# data dir means NO stale override is found, so the mounted slv config wins.
+# The original reachy-data (reachy.db, daily-logs) is left untouched for
+# clean rollback to the previous image (clientloop-test / v1.20).
+services:
+  reachy-claw:
+    image: sensecraft-missionpack.seeed.cn/solution/reachy-claw:slv-v2
+    volumes:
+      # Mount the SLV device config over the baked /app/reachy-claw.yaml.
+      - ./reachy-claw.jetson.slv.yaml:/app/reachy-claw.yaml:ro
+      # Fresh isolated persistent data dir (no stale runtime-overrides).
+      - /home/recomputer/reachy-data-slv/reachy-claw:/app/data
+      - /dev/shm:/dev/shm
+      - /run/udev:/run/udev:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - DATA_DIR=/app/data
+      - HOST_DATA_DIR=/home/recomputer/reachy-data-slv
+      - REACHY_MOTOR_ENABLED=false   # flip to true once a physical Reachy is attached
+      - VISION_SERVICE_URL=tcp://127.0.0.1:8631
+      # Explicit localhost wiring for SLV engine + edge-llm (also in config).
+      - CLAWD_V2V_URL=ws://localhost:8621/v2v/stream
+      - CLAWD_EDGE_LLM_URL=http://localhost:11435/v1
+      - CLAWD_EDGE_LLM_MODEL=Qwen/Qwen3-4B-AWQ
+      - REACHY_DAEMON_PORT=38001
+    # Base healthcheck targets :8641/health (old app). The full slv app serves
+    # the dashboard on :8640 per config; disable the spurious base healthcheck.
+    healthcheck:
+      disable: true
