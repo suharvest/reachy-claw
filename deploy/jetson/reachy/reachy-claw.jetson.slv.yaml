@@ -15,8 +15,8 @@
 # ── Conversation backend selection (plugin, not the LLM) ──────────────
 conversation:
   backend: slv          # → reachy_claw.plugins.conversation_plugin_slv
-  mode: monologue       # autonomous self-talk when idle (monologue_trigger)
-  monologue_interval: 5.0
+  mode: conversation    # listen + respond (set "monologue" for idle self-talk)
+  monologue_interval: 30.0
 
 # ── LLM (edge-llm / TensorRT-Edge-LLM, OpenAI-compatible) ─────────────
 # The SLV plugin reads edge_llm_url + edge_llm_model. It appends /v1 itself
