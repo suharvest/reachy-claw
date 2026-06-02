@@ -2,13 +2,14 @@
 name = "reachy-claw"
 version = "0.1.0"
 description = "Low-latency voice assistant for Reachy Mini — powered by sherpa-onnx and OpenClaw"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "reachy-mini>=1.2.0",
     "websockets>=12.0",
     "numpy>=1.24",
     "httpx>=0.27.0",
     "pyyaml>=6.0",
+    "openvoicestream-agent",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +49,7 @@ dashboard = [
 
 [project.scripts]
 reachy-claw = "reachy_claw.main:main"
+reachy-claw-clientloop = "reachy_claw.clientloop.run:main"
 
 [project.entry-points."reachy_mini_apps"]
 reachy_claw = "reachy_claw.reachy_app:ClawdReachyMiniApp"
@@ -64,6 +66,9 @@ override-dependencies = [
     "gstreamer-msvc-runtime>=1.28.1; sys_platform == 'win32'",
     "gstreamer-libs>=1.28.1; sys_platform == 'win32'",
 ]
+
+[tool.uv.sources]
+openvoicestream-agent = { path = "../seeed-local-voice/agent", editable = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
