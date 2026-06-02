@@ -1,0 +1,102 @@
+# reachy client-loop agent config — embodied companion voice controller.
+#
+# Mirrors apps/voice_arm/config.yaml. The tool-calling LLM <-> tool loop
+# runs CLIENT-SIDE (ovs_agent.tools.runner.stream_with_tools); the SLV
+# engine is a plain ASR/TTS pass-through. server_loop is ABSENT (false).
+
+# SLV engine (pass-through ASR/TTS). Local engine on :8621.
+slv_url: "ws://${VOICE_SERVICE_HOST:-localhost}:${VOICE_SERVICE_PORT:-8621}/v2v/stream"
+
+slv_config:
+  asr_language: "${STT_LANGUAGE:-zh}"
+  tts_language: "zh"
+  tts_speaker_id: ${TTS_SID:-52}
+  tts_speed: ${TTS_SPEED:-1.0}
+  sample_rate: 16000
+  vad: "silero"
+  vad_silence_ms: 600
+  multi_utterance: true
+
+# Always-on pipeline (no wake word for this slice — mic feeds ASR directly).
+pipeline_mode: "always_on"
+default_mode: "chat"
+wake_sources: []
+
+# ── LLM: tool-capable, points at the local CLIENT-LOOP backend. ──
+# edge_llm backend speaks OpenAI chat-completions, so a local ollama
+# OpenAI-compatible endpoint works. qwen2.5:14b emits structured
+# tool_calls at temperature 0.
+llm_backend: "edge_llm"
+llm_base_url: "${LLM_BASE_URL:-http://localhost:11434/v1}"
+llm_api_key: "${LLM_API_KEY:-ollama}"
+llm_model: "${LLM_MODEL:-qwen2.5:14b}"
+llm_first_token_timeout_s: 30.0
+llm_stream_idle_timeout_s: 60.0
+
+# ── Tool calling — required for the client-loop runner to advertise
+# the Reachy tools and drive the LLM <-> tool loop. ──
+tools_enabled: true
+# Empty allowlist = expose every tool registered by plugins
+# (ReachyToolsPlugin registers move_head + play_emotion).
+tools_default_allowlist: []
+tools_max_iterations: 3
+
+# server_loop deliberately omitted (defaults false) → CLIENT-LOOP.
+
+system_prompt: |
+  You are the voice brain of a small companion robot called Reachy.
+  The user speaks aloud and you reply via TTS, and you can MOVE the
+  robot by calling tools.
+
+  Behaviour:
+  - When the user asks you to LOOK in a direction, call move_head with
+    yaw/pitch in DEGREES. Positive yaw = left, negative yaw = right
+    (range -45..45); positive pitch = up, negative pitch = down
+    (range -30..30). Examples:
+      User: "向左看"   → call move_head(yaw=30, pitch=0)
+      User: "look up"  → call move_head(yaw=0, pitch=20)
+      User: "看右边"   → call move_head(yaw=-30, pitch=0)
+  - When the user asks about ANTENNAE specifically, call move_antennas
+    with left/right in DEGREES (positive = up). Example:
+      User: "抬起天线" → call move_antennas(left=40, right=40)
+  - When the user asks you to express a FEELING, call play_emotion with
+    a slug ('happy', 'sad', 'curious', 'excited', 'thinking', 'confused',
+    'surprised', 'angry', 'neutral'). Examples:
+      User: "开心一点" → call play_emotion(emotion="happy")
+      User: "look sad" → call play_emotion(emotion="sad")
+  - When the user asks you to DANCE, call dance with a routine name
+    (one of: 'celebrate', 'curious_look', 'lobster', 'nod', 'wiggle').
+    Example:
+      User: "跳个舞"   → call dance(dance_name="celebrate")
+  - Always FIRST emit a one-word spoken acknowledgement in the user's
+    language ("好的，" / "OK,") then call the matching tool. After the
+    tool returns, emit a short confirmation (one sentence max).
+  - If the user is just chatting and asks for no motion or emotion,
+    reply normally without calling any tool.
+
+  /no_think
+
+mode_overrides:
+  chat:
+    temperature: 0.0
+
+log_level: "INFO"
+
+# Extension blocks under metadata so the Config dataclass accepts the
+# YAML (unknown TOP-LEVEL keys are dropped).
+metadata:
+  reachy:
+    # ── Reachy SDK connection knobs (consumed by ReachyMotionPlugin). ──
+    # The SDK connects to a reachy daemon. host is implicitly the daemon
+    # host (localhost for the Mac MuJoCo sim and for the on-device
+    # Jetson daemon). daemon_port selects which daemon:
+    #   * Mac sim (run_sim_daemon.py) → SDK default 8000.
+    #   * Jetson on-device daemon     → 38001 (set REACHY_DAEMON_PORT).
+    host: "${REACHY_HOST:-localhost}"
+    daemon_port: ${REACHY_DAEMON_PORT:-8000}
+    connection_mode: "${REACHY_CONNECTION_MODE:-auto}"  # auto | localhost_only | network
+    media_backend: "${REACHY_MEDIA_BACKEND:-default}"   # forced no_media on macOS
+    connect_timeout_s: ${REACHY_CONNECT_TIMEOUT:-5.0}
+    emotion_intensity: ${REACHY_EMOTION_INTENSITY:-0.7}
+    # Runtime kill-switch mirror (CompanionRobotApp.motor_enabled).
+    motor_enabled: ${REACHY_MOTOR_ENABLED:-true}
