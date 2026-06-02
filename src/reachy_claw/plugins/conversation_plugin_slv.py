@@ -26,11 +26,13 @@ import logging
 import re
 import time
 import uuid
-from typing import Any, Coroutine
+from typing import Any, AsyncIterator, Coroutine
 
 import numpy as np
 
+from ovs_agent.audio.vad_gate import vad_gated
 from ovs_agent.llm.edge_llm import EdgeLLMBackend
+from ovs_agent.vad import create_vad
 from ovs_agent.session import Session
 from ovs_agent.slv_client import (
     ASRFinal,
@@ -158,6 +160,16 @@ class ConversationPlugin(Plugin):
         self._monologue_task: asyncio.Task | None = None
         self._monologue_last_ts: float = 0.0
 
+        # Stream-safe TTS tag stripper state (reset per turn via
+        # ``_reset_tag_stripper``). LLM tokens often split an emotion /
+        # context tag across deltas (e.g. "[", "happy", "]"), so a
+        # per-token regex misses them and the raw "[happy]" / "[Faces: ...]"
+        # leaks into the SLV engine TTS and is spoken aloud. We buffer from
+        # "[" until the matching "]" and DROP the tag (eating one trailing
+        # space) before any text reaches ``send_text``.
+        self._tag_buf: str = ""
+        self._tag_eat_space: bool = False
+
         # Barge-in tuning (defaults per spec / ovs_agent app_base).
         self._barge_in_enabled = bool(getattr(config, "barge_in_enabled", True))
         self._barge_in_min_chars = int(getattr(config, "barge_in_min_chars", 2))
@@ -194,8 +206,12 @@ class ConversationPlugin(Plugin):
             "asr_language": getattr(config, "v2v_asr_language", "auto"),
             "tts_language": getattr(config, "v2v_tts_language", "zh"),
             "sample_rate": int(getattr(config, "sample_rate", 16000) or 16000),
-            # Server-side VAD (per spec / voice_arm): silero + 600ms silence.
-            "vad": "silero",
+            # Server VAD OFF: the CLIENT drives turn boundaries via asr_eos
+            # (see _v2v_audio_uplink_loop → vad_gated). This lets us forward
+            # the ~300ms pre-roll BEFORE speech onset (first word no longer
+            # swallowed) and fire barge-in on local speech onset without
+            # depending on engine ASR partials during TTS.
+            "vad": getattr(config, "v2v_vad", "none"),
             "vad_silence_ms": int(getattr(config, "v2v_vad_silence_ms", 600)),
             "multi_utterance": True,
         }
@@ -331,41 +347,149 @@ class ConversationPlugin(Plugin):
 
     # ── mic uplink (reachy audio → SLV) ──────────────────────────────
 
+    async def _mic_chunks(self) -> "AsyncIterator[bytes]":
+        """Async iterator of PCM16-LE mono bytes from reachy's AudioCapture.
+
+        Applies reachy's 4× mic boost (matching what the engine + VAD see),
+        honours ``_paused``, and yields ``bytes`` so it composes with the
+        shared ``ovs_agent.audio.vad_gate.vad_gated`` segmenter. Idle polling
+        gaps (``read_chunk`` returns ``None``) are swallowed here, not yielded.
+        """
+        assert self._audio is not None
+        while self._running:
+            chunk = await self._audio.read_chunk(1024)
+            if chunk is None:
+                await asyncio.sleep(0.01)
+                continue
+            if self._paused:
+                continue
+            if isinstance(chunk, np.ndarray):
+                if chunk.dtype != np.int16:
+                    boosted = np.clip(chunk * 4.0, -1.0, 1.0)
+                    pcm = np.clip(
+                        boosted * 32768.0, -32768, 32767
+                    ).astype(np.int16)
+                else:
+                    pcm = chunk
+                yield pcm.tobytes()
+            else:
+                yield bytes(chunk)
+
     async def _v2v_audio_uplink_loop(self) -> None:
-        """Forward mic chunks to SLV as PCM16 mono bytes (server VAD)."""
+        """Forward mic chunks to SLV with a CLIENT-side VAD gate.
+
+        Server VAD is OFF (``v2v.vad: none``). A local VAD
+        (``ovs_agent.vad.create_vad`` → silero, energy fallback) drives the
+        shared segmenter ``ovs_agent.audio.vad_gate.vad_gated``, which:
+
+        * buffers idle audio into a ~``preroll_ms`` ring (NOT forwarded),
+        * on speech onset emits ``speech_start`` then replays the pre-roll
+          ring (so the engine gets the ~300-400ms BEFORE speech onset and
+          the first word is no longer swallowed),
+        * streams live audio while speaking,
+        * on trailing silence emits ``speech_end`` → we drive ``asr_eos`` so
+          the engine finalizes the clean, pre-roll-led utterance.
+
+        A ``speech_start`` while the robot is SPEAKING/BARGED_IN (and audio
+        is playing) triggers barge-in immediately — independent of whether
+        the engine emits ASR partials during TTS.
+        """
         if not self._audio or not self._slv:
             return
-        logger.info("SLV audio uplink loop started (server VAD)")
+
+        config = self.app.config
+        sample_rate = int(getattr(config, "sample_rate", 16000) or 16000)
+        chunk_ms = int(
+            round((1024 / float(sample_rate)) * 1000.0)
+        )  # AudioCapture reads 1024-frame chunks
+        preroll_ms = int(getattr(config, "v2v_client_vad_preroll_ms", 300))
+        silence_ms = int(getattr(config, "v2v_client_vad_silence_ms", 400))
+        threshold = getattr(config, "v2v_client_vad_threshold", None)
+        # silero (accurate) with automatic energy fallback. The threshold
+        # default differs per backend, so pass None unless overridden.
         try:
-            while self._running:
-                chunk = await self._audio.read_chunk(1024)
-                if chunk is None:
-                    await asyncio.sleep(0.01)
-                    continue
-                if self._paused:
-                    continue
-                if isinstance(chunk, np.ndarray):
-                    if chunk.dtype != np.int16:
-                        boosted = np.clip(chunk * 4.0, -1.0, 1.0)
-                        pcm = np.clip(
-                            boosted * 32768.0, -32768, 32767
-                        ).astype(np.int16)
-                    else:
-                        pcm = chunk
-                    payload = pcm.tobytes()
-                else:
-                    payload = bytes(chunk)
-                try:
-                    await self._slv.send_audio(payload)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("SLV send_audio failed: %s", e)
-                    await asyncio.sleep(0.05)
+            vad = create_vad(
+                "silero", sample_rate=sample_rate, threshold=threshold
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("silero VAD unavailable (%s); using energy VAD", e)
+            vad = create_vad(
+                "energy", sample_rate=sample_rate, threshold=threshold
+            )
+
+        logger.info(
+            "SLV audio uplink loop started (client VAD=%s, chunk_ms=%d, "
+            "preroll_ms=%d, silence_ms=%d)",
+            getattr(vad, "name", "?"), chunk_ms, preroll_ms, silence_ms,
+        )
+
+        try:
+            async for event, payload in vad_gated(
+                self._mic_chunks(),
+                vad,
+                chunk_ms=chunk_ms,
+                preroll_ms=preroll_ms,
+                silence_ms=silence_ms,
+            ):
+                if not self._running:
+                    break
+                if event == "speech_start":
+                    # Barge-in on local speech onset while speaking — does
+                    # NOT depend on the engine emitting ASR partials.
+                    await self._maybe_barge_in_on_speech_start()
+                elif event == "audio" and payload is not None:
+                    try:
+                        await self._slv.send_audio(payload)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("SLV send_audio failed: %s", e)
+                        await asyncio.sleep(0.05)
+                elif event == "speech_end":
+                    try:
+                        await self._slv.asr_eos()
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug("SLV asr_eos failed: %s", e)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("SLV audio uplink loop crashed")
         finally:
             logger.info("SLV audio uplink loop stopped")
+
+    async def _maybe_barge_in_on_speech_start(self) -> None:
+        """Fire barge-in when client VAD detects speech onset while the robot
+        is mid-utterance. Mirrors ``_maybe_barge_in`` (the ASR-partial path)
+        but is driven by local VAD, so it doesn't wait for engine partials.
+        """
+        if not self._barge_in_enabled:
+            return
+        if self._state not in (ConvState.SPEAKING, ConvState.BARGED_IN):
+            return
+        if not self._gst_playing:
+            return
+        # Echo guard: ignore onsets that land too soon after TTS start (our
+        # own playback leaking back into the mic).
+        elapsed_ms = (time.monotonic() - self._speaking_since_ts) * 1000.0
+        if elapsed_ms < self._barge_in_min_speaking_ms:
+            return
+        logger.info(
+            "BARGE-IN: client-VAD speech onset (%.0fms into speech)", elapsed_ms
+        )
+        self._set_state(ConvState.BARGED_IN)
+        await self._cancel_turn()
+        if self._audio is not None:
+            stop = getattr(self._audio, "stop_playback", None)
+            if callable(stop):
+                try:
+                    await stop()
+                except Exception:  # noqa: BLE001
+                    logger.debug("audio.stop_playback failed", exc_info=True)
+        await self._stop_gst_playback()
+        if self._slv is not None:
+            try:
+                await self._slv.abort()
+            except Exception:  # noqa: BLE001
+                logger.debug("slv.abort during barge-in failed", exc_info=True)
+        self._set_state(ConvState.LISTENING)
 
     # ── SLV event loop ───────────────────────────────────────────────
 
@@ -508,7 +632,7 @@ class ConversationPlugin(Plugin):
         sent_any_text = False
         completed = False
         cancelled = False
-        emo_buf = [""]  # cross-token buffer so split tags ([ + sad + ]) match
+        self._reset_tag_stripper()  # fresh stripper state per turn
 
         ctx = ToolCallCtx(
             session=self._session,
@@ -521,10 +645,14 @@ class ConversationPlugin(Plugin):
             if not tok:
                 return
             full_text_parts.append(tok)
-            await self._slv.send_text(tok)
-            sent_any_text = True
-            self.app.events.emit("llm_delta", {"text": tok, "run_id": run_id})
-            self._scan_emotion(tok, emo_buf)
+            # Strip emotion / [Faces: ...] tags (also queues the emotion)
+            # BEFORE the text reaches the SLV engine TTS, so tags are never
+            # spoken aloud. Only clean text goes to send_text.
+            clean = self._strip_tags_for_tts(tok)
+            if clean:
+                await self._slv.send_text(clean)
+                sent_any_text = True
+            self.app.events.emit("llm_delta", {"text": clean, "run_id": run_id})
 
         async def _on_pre(pre_text: str) -> None:
             nonlocal sent_any_text
@@ -578,12 +706,21 @@ class ConversationPlugin(Plugin):
             return
         finally:
             if completed and not cancelled:
+                # Flush any buffered partial '[...' tail (unterminated tag is
+                # real text) to TTS before the final flush.
+                tail = self._flush_tag_stripper()
+                if tail:
+                    try:
+                        await self._slv.send_text(tail)
+                        sent_any_text = True
+                    except Exception:  # noqa: BLE001
+                        logger.debug("tail send_text failed", exc_info=True)
                 try:
                     await self._slv.flush_tts()
                 except Exception:  # noqa: BLE001
                     logger.debug("slv.flush_tts failed", exc_info=True)
 
-        full_text = "".join(full_text_parts)
+        full_text = _EMOTION_TAG_RE.sub("", "".join(full_text_parts))
         self.app.events.emit("llm_end", {"full_text": full_text, "run_id": run_id})
 
     def _scan_emotion(self, tok: str, buf: list[str]) -> None:
@@ -607,6 +744,80 @@ class ConversationPlugin(Plugin):
         # pending there's nothing to keep.
         tail = buf[0][last_end:]
         buf[0] = tail if "[" in tail else ""
+
+    # ── stream-safe TTS tag stripper ─────────────────────────────────
+
+    def _reset_tag_stripper(self) -> None:
+        """Reset the per-turn tag-stripper buffer + eat-space latch."""
+        self._tag_buf = ""
+        self._tag_eat_space = False
+
+    def _strip_tags_for_tts(self, tok: str) -> str:
+        """Strip emotion / vision-context tags from a streaming token.
+
+        Stateful (carries ``self._tag_buf`` + ``self._tag_eat_space`` across
+        tokens) so a tag split across deltas ('[', 'happy', ']') is held back
+        and DROPPED instead of being spoken. Folds the old ``_scan_emotion``
+        behavior in: a dropped emotion tag ([happy] / [emotion:happy]) still
+        fires ``queue_emotion`` + emits the ``emotion`` event so motion /
+        dashboard keep working. Echoed ``[Faces: ...]`` context tags are
+        dropped without firing an emotion. After a dropped tag we eat one
+        following whitespace char so "[happy] hi" → "hi".
+
+        Returns the clean text safe to feed to ``send_text``. Call
+        ``_flush_tag_stripper`` at turn end to recover any unterminated tail.
+        """
+        out_chars: list[str] = []
+        for ch in tok:
+            if self._tag_eat_space:
+                self._tag_eat_space = False
+                if ch in (" ", "\t"):
+                    continue
+            if self._tag_buf:
+                self._tag_buf += ch
+                if ch == "]":
+                    inner = self._tag_buf[1:-1]
+                    is_vision_tag = inner.lower().startswith("faces:")
+                    # Emotion tag is "[word]" or "[emotion:word]".
+                    emo_body = inner
+                    if inner.lower().startswith("emotion:"):
+                        emo_body = inner.split(":", 1)[1]
+                    is_emotion_tag = (
+                        not is_vision_tag
+                        and bool(emo_body)
+                        and all(c.isalnum() or c == "_" for c in emo_body)
+                    )
+                    if is_emotion_tag:
+                        emo = emo_body.strip()
+                        if emo:
+                            self.app.events.emit("emotion", {"emotion": emo})
+                            self.app.emotions.queue_emotion(emo)
+                        self._tag_eat_space = True
+                    elif is_vision_tag:
+                        self._tag_eat_space = True
+                    else:
+                        out_chars.append(self._tag_buf)
+                    self._tag_buf = ""
+                elif len(self._tag_buf) > 64:
+                    # Runaway: not a tag, flush as plain text.
+                    out_chars.append(self._tag_buf)
+                    self._tag_buf = ""
+            elif ch == "[":
+                self._tag_buf = "["
+            else:
+                out_chars.append(ch)
+        return "".join(out_chars)
+
+    def _flush_tag_stripper(self) -> str:
+        """Flush a buffered unterminated '[...' tail as plain text.
+
+        If the stream ended mid-buffer the held text was never a tag, so
+        return it (so a trailing partial isn't silently dropped) and reset.
+        """
+        pending = self._tag_buf
+        self._tag_buf = ""
+        self._tag_eat_space = False
+        return pending
 
     def _build_system_prompt(self) -> str:
         config = self.app.config
@@ -742,7 +953,7 @@ class ConversationPlugin(Plugin):
         self.app.emotions.queue_emotion("thinking")
 
         full_text_parts: list[str] = []
-        emo_buf = [""]
+        self._reset_tag_stripper()  # fresh stripper state per turn
         ctx = ToolCallCtx(
             session=self._session,
             event_bus=self.app.events,
@@ -753,9 +964,10 @@ class ConversationPlugin(Plugin):
             if not tok:
                 return
             full_text_parts.append(tok)
-            await self._slv.send_text(tok)
-            self.app.events.emit("llm_delta", {"text": tok, "run_id": run_id})
-            self._scan_emotion(tok, emo_buf)
+            clean = self._strip_tags_for_tts(tok)
+            if clean:
+                await self._slv.send_text(clean)
+            self.app.events.emit("llm_delta", {"text": clean, "run_id": run_id})
 
         # Synthetic self-prompt message — monologue has no user turn.
         synthetic = "(You glance around the exhibition and think out loud.)"
@@ -775,6 +987,9 @@ class ConversationPlugin(Plugin):
                 on_assistant_token=_on_tok,
                 llm_kwargs={"session": mono_session},
             )
+            tail = self._flush_tag_stripper()
+            if tail:
+                await self._slv.send_text(tail)
             await self._slv.flush_tts()
         except asyncio.CancelledError:
             try:
@@ -784,7 +999,7 @@ class ConversationPlugin(Plugin):
             raise
         except Exception:
             logger.exception("monologue turn failed")
-        full_text = "".join(full_text_parts)
+        full_text = _EMOTION_TAG_RE.sub("", "".join(full_text_parts))
         self._monologue_last_ts = time.monotonic()
         self.app.events.emit("observation", {"text": full_text})
         self.app.events.emit("llm_end", {"full_text": full_text, "run_id": run_id})
