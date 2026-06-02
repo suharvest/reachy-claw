@@ -1,0 +1,17 @@
+# Reachy Mini — auto-reconnect reachy-daemon when the servo serial bus appears.
+#
+# Why: reachy-mini-daemon scans `--serialport auto` ONCE at container start. If
+# the robot is plugged in (or power-cycled) AFTER the daemon is already running,
+# the daemon never picks up the new /dev/ttyACM*, the SDK `/ws/sdk` handshake
+# times out, and reachy-claw is stuck "Waiting for connection". The manual fix
+# is `docker restart reachy-daemon`. This rule does that AUTOMATICALLY the moment
+# the Reachy Mini servo controller enumerates, so plug/replug "just works".
+#
+# Match strategy: the servo bus is a CH343 USB-serial bridge (VID 1a86 / PID
+# 55d3) exposed as /dev/ttyACM0 — the exact port `--serialport auto` opens.
+#   ID_VENDOR_ID=1a86  ID_MODEL_ID=55d3  (udevadm info -q property -n /dev/ttyACM0)
+#
+# systemd-run --no-block: launch the restart as a transient unit so udevd is
+# never blocked. The tty 'add' fires once /dev/ttyACM0 exists, and the daemon's
+# own stop+start gives ample settle time before it re-scans the port.
+ACTION=="add", SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="1a86", ENV{ID_MODEL_ID}=="55d3", RUN+="/usr/bin/systemd-run --no-block /usr/bin/docker restart reachy-daemon"
