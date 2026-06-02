@@ -53,19 +53,26 @@ v2v:
   url: ws://localhost:8621/v2v/stream
   asr_language: auto
   tts_language: zh
-  # Server-side VAD: silero engine, 600ms trailing silence → end of utterance.
-  # client_vad is OFF by design — the SLV plugin runs NO local VAD (vad=None
-  # in AudioCapture); the SLV server owns turn detection. Leaving these here
-  # documents intent; client_vad_* keys are inert when vad: silero.
-  vad: silero
-  vad_silence_ms: 600
+  # Server VAD OFF — the CLIENT drives turn detection. The SLV plugin runs a
+  # local VAD (silero, energy fallback) over the mic uplink and:
+  #   * forwards a ~preroll_ms ring captured BEFORE speech onset (so the
+  #     first word is not swallowed),
+  #   * sends asr_eos after client_vad_silence_ms of trailing silence so the
+  #     engine finalizes the clean utterance,
+  #   * fires barge-in on local speech onset during TTS (no dependence on the
+  #     engine emitting ASR partials while speaking).
+  vad: none
+  vad_silence_ms: 600        # inert when vad: none (server VAD disabled)
+  client_vad_preroll_ms: 300 # audio retained ahead of speech onset
+  client_vad_silence_ms: 400 # trailing silence → client asr_eos
+  # client_vad_threshold: 0.5 # silero score; omit to use backend default
   multi_utterance: true
   # voice_id: ""        # leave empty → SLV server default voice
 
 # ── Audio ─────────────────────────────────────────────────────────────
 audio:
   device: "Reachy Mini Audio"
-  volume: 5.0
+  volume: 3.5
   sample_rate: 16000
 
 # ── Barge-in (SLV plugin uses ASRPartial-during-SPEAKING mechanism) ──
@@ -78,7 +85,10 @@ reachy:
   spawn_daemon: false        # daemon runs as its own container
   connection_mode: localhost_only
   daemon_port: 38001         # SDK connects to localhost:38001
-  media_backend: gstreamer
+  # no_media → has_sdk_audio False → V2V TTS plays via the AudioCapture
+  # duplex (enqueue_playback_async), which owns the USB ALSA endpoint.
+  # SDK gstreamer would fight the duplex for the device.
+  media_backend: no_media
 
 # ── Vision (remote TRT/Hailo tracker over ZMQ) ───────────────────────
 vision:
