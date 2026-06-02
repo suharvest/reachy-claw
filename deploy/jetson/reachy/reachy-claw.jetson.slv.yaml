@@ -1,0 +1,98 @@
+# Reachy Claw — Jetson deployment config (SLV conversation backend).
+#
+# This config drives the FULL ReachyClawApp (reachy-claw -v) with the new
+# thin ovs_agent-backed conversation plugin (conversation_plugin_slv).
+#
+# Pipeline:
+#   * conversation_backend: slv  → selects conversation_plugin_slv (main.py)
+#   * SLV engine (ASR+TTS pass-through) over WebSocket  → ws://localhost:8621/v2v/stream
+#   * edge-llm (TensorRT-Edge-LLM, OpenAI-compatible)   → http://localhost:11435/v1
+#   * server-side VAD: silero, 600ms trailing silence
+#
+# Every endpoint below is also env-overridable (CLAWD_V2V_URL,
+# CLAWD_EDGE_LLM_URL, CLAWD_EDGE_LLM_MODEL, CLAWD_V2V_VAD, ...).
+
+# ── Conversation backend selection (plugin, not the LLM) ──────────────
+conversation:
+  backend: slv          # → reachy_claw.plugins.conversation_plugin_slv
+  mode: monologue       # autonomous self-talk when idle (monologue_trigger)
+  monologue_interval: 5.0
+
+# ── LLM (edge-llm / TensorRT-Edge-LLM, OpenAI-compatible) ─────────────
+# The SLV plugin reads edge_llm_url + edge_llm_model. It appends /v1 itself
+# if missing, but we set it explicitly to be unambiguous.
+llm:
+  backend: edge_llm_v2v
+  edge_llm_url: http://localhost:11435/v1
+  edge_llm_model: Qwen/Qwen3-4B-AWQ
+  # System prompt for the SLV conversation turn. Maps to ollama_system_prompt,
+  # which conversation_plugin_slv._build_system_prompt() reads as the base
+  # prompt (it appends "/no_think" automatically for qwen3, but we include it
+  # here too so an operator reading the prompt sees the full intent).
+  system_prompt: |
+    You are Reachy, a cute robot at an exhibition. Always reply in English. No emoji.
+    Reply in ONE short sentence (max 12 words). Be warm but brief — no filler, no lists, no follow-up questions unless asked.
+    Names in [Faces: ...] are people you see, not your name.
+    Never repeat or mention the [Faces: ...] tag in your reply.
+    End with exactly one tag: [happy] [sad] [thinking] [surprised] [curious]
+    Example: "Welcome! Glad you stopped by. [happy]"
+    /no_think
+  # Monologue (idle self-talk) prompt → ollama_monologue_prompt.
+  monologue_prompt: |
+    Your name is Reachy. You are a cheerful cute robot at an exhibition, mumbling happily to yourself. Always reply in English.
+    Reply with ONE short sentence (max 15 words), then exactly ONE emotion tag. Nothing else.
+    You love people and get excited when someone shows up. Stay upbeat and warm — find the bright side of everything.
+    Names in [Faces: ...] are people you see. Use their name or "you" when talking about someone.
+    Never repeat or mention the [Faces: ...] tag in your reply.
+    You MUST end with one of: [happy] [sad] [thinking] [surprised] [curious] [excited] [laugh]
+    /no_think
+
+# ── SLV engine (seeed-local-voice V2V pass-through: ASR + TTS) ────────
+# The SLV plugin reads v2v_url + v2v_vad + v2v_vad_silence_ms.
+v2v:
+  url: ws://localhost:8621/v2v/stream
+  asr_language: auto
+  tts_language: zh
+  # Server-side VAD: silero engine, 600ms trailing silence → end of utterance.
+  # client_vad is OFF by design — the SLV plugin runs NO local VAD (vad=None
+  # in AudioCapture); the SLV server owns turn detection. Leaving these here
+  # documents intent; client_vad_* keys are inert when vad: silero.
+  vad: silero
+  vad_silence_ms: 600
+  multi_utterance: true
+  # voice_id: ""        # leave empty → SLV server default voice
+
+# ── Audio ─────────────────────────────────────────────────────────────
+audio:
+  device: "Reachy Mini Audio"
+  volume: 5.0
+  sample_rate: 16000
+
+# ── Barge-in (SLV plugin uses ASRPartial-during-SPEAKING mechanism) ──
+barge_in:
+  enabled: true
+
+# ── Reachy daemon (separate container) ───────────────────────────────
+reachy:
+  serialport: auto
+  spawn_daemon: false        # daemon runs as its own container
+  connection_mode: localhost_only
+  daemon_port: 38001         # SDK connects to localhost:38001
+  media_backend: gstreamer
+
+# ── Vision (remote TRT/Hailo tracker over ZMQ) ───────────────────────
+vision:
+  tracker: remote
+  service_url: tcp://127.0.0.1:8631
+  emotion_threshold: 0.6
+  emotion_cooldown: 5.0
+
+# ── Dashboard (exhibition UI) ────────────────────────────────────────
+dashboard:
+  enabled: true
+  port: 8640
+
+# ── Autonomous plugins ───────────────────────────────────────────────
+plugins:
+  face_tracker: true
+  motion: true

@@ -1,0 +1,110 @@
+# SLV variant of the reachy-claw image — the FULL ReachyClawApp.
+#
+# Identical to Dockerfile.reachy-claw (FULL app, CMD `reachy-claw -v`, all
+# autonomous plugins: motion / face_tracker / vision_client / rest /
+# daily_log / dashboard + the conversation plugin), with ONE addition:
+#   * vendors + pre-installs the openvoicestream-agent wheel (ovs_agent),
+#     which is a PATH dep in pyproject (editable ../seeed-local-voice/agent)
+#     and is NOT on PyPI. It must be pre-installed before `pip install .[...]`
+#     and `--find-links /tmp/vendor` added so the reachy-claw dep resolves.
+#
+# The conversation backend is selected at runtime by main.py via the
+# `conversation_backend: slv|legacy` config flag (default slv → the thin
+# ovs_agent-backed conversation_plugin_slv.ConversationPlugin). No Dockerfile
+# change is needed to switch — it's purely config-driven.
+#
+# Build context = clawd-reachy-mini repo root. The vendored wheel lives at
+# deploy/jetson/reachy/vendor/ and is re-included via the matching
+# Dockerfile.reachy-claw.slv.dockerignore.
+
+# ── Builder ──────────────────────────────────────────────────────────
+FROM python:3.12-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential meson pkg-config \
+    libcairo2-dev libgirepository1.0-dev gobject-introspection \
+    portaudio19-dev libasound2-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# 1) Copy only dependency metadata first (cache-friendly)
+COPY pyproject.toml README.md ./
+# Minimal stub so pip can resolve the package
+RUN mkdir -p src/reachy_claw && echo '__version__ = "0.0.0"' > src/reachy_claw/__init__.py
+
+# 1b) Vendor the ovs_agent wheel. pyproject lists `openvoicestream-agent`
+#     as a dep (path/editable in dev). It is not on PyPI, so it must be
+#     resolvable from the local wheel via --find-links below.
+COPY deploy/jetson/reachy/vendor/openvoicestream_agent-*.whl /tmp/vendor/
+RUN pip install --no-cache-dir --prefix=/install /tmp/vendor/openvoicestream_agent-*.whl
+
+# 2) Install all dependencies (cached unless pyproject.toml changes).
+#    --find-links /tmp/vendor lets pip resolve openvoicestream-agent (the
+#    non-PyPI path dep) from the vendored wheel.
+RUN pip install --no-cache-dir --prefix=/install onnxruntime
+RUN pip install --no-cache-dir --prefix=/install --find-links /tmp/vendor \
+    ".[audio,mediapipe-vision,remote-vision,dashboard]"
+
+# Install silero-vad WITHOUT torch — only need the Python wrapper + ONNX model
+RUN pip install --no-cache-dir --prefix=/install silero-vad --no-deps
+
+# Purge heavy transitive deps not needed at runtime:
+# - torch/torchaudio (silero-vad dep, replaced by pure onnxruntime)
+# - jaxlib/jax (mediapipe dep, only needed for training)
+# - unused mediapipe modules (we only use face_detection)
+# Note: matplotlib/pillow are required by mediapipe.python.solutions.__init__
+#       (drawing_utils imports matplotlib.pyplot at import time)
+# Note: scipy is needed by reachy-mini SDK (scipy.spatial.transform.Rotation)
+RUN rm -rf /install/lib/python3.12/site-packages/torch* \
+           /install/lib/python3.12/site-packages/nvidia* \
+           /install/lib/python3.12/site-packages/triton* \
+           /install/lib/python3.12/site-packages/sympy* \
+           /install/lib/python3.12/site-packages/mpmath* \
+           /install/lib/python3.12/site-packages/jax* \
+           /install/lib/python3.12/site-packages/ml_dtypes* \
+           /install/lib/python3.12/site-packages/opt_einsum* \
+           /install/lib/python3.12/site-packages/pip*
+
+# Note: Cannot safely purge mediapipe/modules subdirs — mediapipe.python.solutions.__init__
+# imports all solutions (hands, pose, etc) which depend on modules like objectron.
+# The space savings from tflite assets (~20-30MB) are minimal vs breaking import chain.
+
+# Strip test assets, type stubs, and bytecode from installed packages
+RUN find /install -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true \
+ && find /install -type d -name 'tests' -exec rm -rf {} + 2>/dev/null || true \
+ && find /install -type d -name 'test' -exec rm -rf {} + 2>/dev/null || true \
+ && find /install -type f -name '*.pyi' -delete 2>/dev/null || true \
+ && find /install -type f -name '*.pyc' -delete 2>/dev/null || true
+
+# 3) Copy full source (only this layer changes on code updates)
+COPY . .
+
+# ── Runtime ──────────────────────────────────────────────────────────
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgirepository-1.0-1 gir1.2-glib-2.0 \
+    libportaudio2 ffmpeg libasound2 \
+    libgl1 libglib2.0-0 \
+    gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-alsa \
+    gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+    alsa-utils \
+    libv4l-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Fix: v4l2src gets stuck at PAUSED→PLAYING inside Docker without libv4l2
+ENV GST_V4L2_USE_LIBV4L2=1
+
+# Copy installed packages from builder (large, cached)
+COPY --from=builder /install /usr/local
+
+# Copy source code (small, changes frequently)
+COPY --from=builder /build /app
+
+WORKDIR /app
+RUN pip install --no-cache-dir --no-deps -e .
+
+# FULL app entrypoint (all autonomous plugins). Conversation backend is
+# config-driven (conversation_backend: slv → conversation_plugin_slv).
+CMD ["reachy-claw", "-v"]

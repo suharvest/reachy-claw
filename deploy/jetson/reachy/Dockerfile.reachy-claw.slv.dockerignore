@@ -1,0 +1,25 @@
+# Dockerfile-specific ignore for the client-loop image (BuildKit honors
+# <dockerfile-path>.dockerignore). Mirrors the root .dockerignore but
+# RE-INCLUDES the vendored ovs_agent wheel under deploy/jetson/reachy/vendor
+# so the build context can install it.
+.git
+.github
+.claude
+.venv
+__pycache__
+*.pyc
+tests
+test-results
+docs
+*.md
+!README.md
+.pre-commit-config.yaml
+.gitignore
+uv.lock
+
+# Exclude the deploy tree EXCEPT the vendored wheel we need.
+deploy
+!deploy/jetson
+!deploy/jetson/reachy
+!deploy/jetson/reachy/vendor
+!deploy/jetson/reachy/vendor/*.whl
