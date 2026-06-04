@@ -8,11 +8,15 @@ working). Reuses the fake-SLV harness style from
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from reachy_claw.config import Config
 from reachy_claw.app import ReachyClawApp
+from reachy_claw.plugins import conversation_plugin_slv
 from reachy_claw.plugins.conversation_plugin_slv import ConversationPlugin
+from ovs_agent.slv_client import ASRFinal
 
 
 class FakeSLV:
@@ -20,10 +24,32 @@ class FakeSLV:
 
     def __init__(self):
         self.text_chunks: list[str] = []
+        self.flushed = False
+        self.aborted = False
 
     async def send_text(self, text: str):
         if text:
             self.text_chunks.append(text)
+
+    async def flush_tts(self):
+        self.flushed = True
+
+    async def abort(self):
+        self.aborted = True
+
+
+class FakeMotion:
+    name = "motion"
+
+    def __init__(self):
+        self.opened: list[float | None] = []
+        self.locked: list[float | None] = []
+
+    def open_interaction_window(self, duration=None):
+        self.opened.append(duration)
+
+    def center_and_lock_tracking(self, duration=None):
+        self.locked.append(duration)
 
 
 @pytest.fixture
@@ -116,3 +142,149 @@ class TestTagStripper:
         await _feed(slv_plugin, ["Hello ", "[part", "ial"])
         spoken = "".join(slv_plugin._slv.text_chunks)
         assert spoken == "Hello [partial"
+
+
+class TestSlvModeSwitching:
+    def test_switch_mode_queues_mode_entry_gesture(self, slv_plugin):
+        emotions: list[str] = []
+        slv_plugin.app.emotions.queue_emotion = lambda e: emotions.append(e)
+
+        slv_plugin.switch_mode("conversation")
+        slv_plugin.switch_mode("interpreter")
+        slv_plugin.switch_mode("monologue")
+
+        assert emotions == ["happy", "listening", "curious"]
+
+    @pytest.mark.asyncio
+    async def test_switch_to_monologue_updates_config_and_starts_timer(self, slv_plugin):
+        slv_plugin._running = True
+
+        slv_plugin.switch_mode("monologue")
+
+        assert slv_plugin.app.config.conversation_mode == "monologue"
+        assert slv_plugin._monologue_task is not None
+        assert not slv_plugin._monologue_task.done()
+
+        task = slv_plugin._monologue_task
+        slv_plugin.switch_mode("conversation")
+        await asyncio.sleep(0)
+
+        assert slv_plugin.app.config.conversation_mode == "conversation"
+        assert slv_plugin._monologue_task is None
+        assert task.cancelled()
+
+    def test_interpreter_mode_uses_translation_prompt(self, slv_plugin):
+        slv_plugin.app.config.interpreter_source_lang = "Chinese"
+        slv_plugin.app.config.interpreter_target_lang = "English"
+
+        slv_plugin.switch_mode("interpreter")
+
+        prompt = slv_plugin._build_system_prompt()
+        assert "translation machine" in prompt
+        assert "Chinese to English" in prompt
+        assert "cute robot at an exhibition" not in prompt
+
+
+class TestSlvInteractionWindow:
+    @pytest.mark.asyncio
+    async def test_asr_final_opens_motion_interaction_window(self, slv_plugin, monkeypatch):
+        motion = FakeMotion()
+        slv_plugin.app._plugins.append(motion)
+        slv_plugin._running = True
+
+        def fake_spawn(coro, *, name):
+            coro.close()
+
+            class DoneTask:
+                def done(self):
+                    return True
+
+            return DoneTask()
+
+        monkeypatch.setattr(slv_plugin, "_spawn_task", fake_spawn)
+
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("hello", session_complete=False)
+        )
+
+        assert motion.opened == [None]
+
+    @pytest.mark.asyncio
+    async def test_barge_in_centers_and_locks_motion(self, slv_plugin):
+        motion = FakeMotion()
+        slv_plugin.app._plugins.append(motion)
+        slv_plugin._state = conversation_plugin_slv.ConvState.SPEAKING
+        slv_plugin._gst_playing = True
+        slv_plugin._speaking_since_ts = 0.0
+
+        await slv_plugin._maybe_barge_in("hello")
+
+        assert motion.locked == [None]
+
+
+class TestSlvMonologue:
+    @pytest.mark.asyncio
+    async def test_monologue_queues_angle_specific_micro_gesture(
+        self, slv_plugin, monkeypatch
+    ):
+        emotions: list[str] = []
+        slv_plugin.app.emotions.queue_emotion = lambda e: emotions.append(e)
+
+        async def fake_stream_with_tools(*args, **kwargs):
+            await kwargs["on_assistant_token"]("I notice something new.")
+            return "I notice something new."
+
+        monkeypatch.setattr(
+            conversation_plugin_slv, "stream_with_tools", fake_stream_with_tools
+        )
+        slv_plugin._llm = object()
+
+        await slv_plugin._run_monologue()
+
+        assert emotions == ["thinking", "curious"]
+
+    @pytest.mark.asyncio
+    async def test_monologue_adds_variation_and_sampling(self, slv_plugin, monkeypatch):
+        calls: list[dict] = []
+
+        async def fake_stream_with_tools(*args, **kwargs):
+            messages = args[1]
+            calls.append({"messages": messages, "kwargs": kwargs})
+            await kwargs["on_assistant_token"]("I notice something new. [curious]")
+            return "I notice something new. [curious]"
+
+        monkeypatch.setattr(
+            conversation_plugin_slv, "stream_with_tools", fake_stream_with_tools
+        )
+        slv_plugin._llm = object()
+
+        await slv_plugin._run_monologue()
+        await slv_plugin._run_monologue()
+
+        prompts = [call["messages"][-1]["content"] for call in calls]
+        assert prompts[0] != prompts[1]
+        assert "Avoid repeating recent lines" in prompts[1]
+        assert calls[0]["kwargs"]["llm_kwargs"]["temperature"] == 0.8
+        assert calls[0]["kwargs"]["llm_kwargs"]["top_p"] == 0.9
+
+    @pytest.mark.asyncio
+    async def test_monologue_does_not_speak_bare_emotion_word(self, slv_plugin, monkeypatch):
+        emotions: list[str] = []
+        slv_plugin.app.emotions.queue_emotion = lambda e: emotions.append(e)
+
+        async def fake_stream_with_tools(*args, **kwargs):
+            await kwargs["on_assistant_token"]("I'm glad to meet everyone! ")
+            await kwargs["on_assistant_token"]("excited")
+            return "I'm glad to meet everyone! excited"
+
+        monkeypatch.setattr(
+            conversation_plugin_slv, "stream_with_tools", fake_stream_with_tools
+        )
+        slv_plugin._llm = object()
+
+        await slv_plugin._run_monologue()
+
+        spoken = "".join(slv_plugin._slv.text_chunks)
+        assert spoken == "I'm glad to meet everyone! "
+        assert "excited" not in spoken
+        assert emotions == ["thinking", "curious", "excited"]

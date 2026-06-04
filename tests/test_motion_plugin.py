@@ -26,6 +26,7 @@ _CHP = "reachy_mini.utils.create_head_pose"
 class TestExecuteExpression:
     def test_expression_with_head_and_antenna(self, app, mock_reachy):
         plugin = MotionPlugin(app)
+        plugin.open_interaction_window(1.0)
         expr = RobotExpression(
             head=HeadPose(yaw=10, pitch=5, roll=3, duration=0.5),
             antenna=AntennaMotion(left=20, right=-20, duration=0.3),
@@ -40,8 +41,9 @@ class TestExecuteExpression:
         assert call_kwargs["duration"] == 0.5
         assert "antennas" in call_kwargs
 
-    def test_expression_head_only(self, app, mock_reachy):
+    def test_expression_head_only_inside_interaction_window(self, app, mock_reachy):
         plugin = MotionPlugin(app)
+        plugin.open_interaction_window(1.0)
         expr = RobotExpression(
             head=HeadPose(yaw=10, duration=0.5),
             description="head only",
@@ -53,6 +55,20 @@ class TestExecuteExpression:
         mock_reachy.goto_target.assert_called_once()
         call_kwargs = mock_reachy.goto_target.call_args.kwargs
         assert "antennas" not in call_kwargs
+
+    def test_expression_head_suppressed_without_interaction_window(
+        self, app, mock_reachy
+    ):
+        plugin = MotionPlugin(app)
+        expr = RobotExpression(
+            head=HeadPose(yaw=10, duration=0.5),
+            description="head only",
+        )
+
+        with patch(_CHP, return_value=np.eye(4)):
+            plugin._execute_expression(expr)
+
+        mock_reachy.goto_target.assert_not_called()
 
     def test_expression_antenna_only(self, app, mock_reachy):
         plugin = MotionPlugin(app)
@@ -89,6 +105,7 @@ class TestMotionLoop:
     @pytest.mark.asyncio
     async def test_processes_queued_emotion(self, app, mock_reachy):
         plugin = MotionPlugin(app)
+        plugin.open_interaction_window(1.0)
         app.register(plugin)
 
         # Queue an emotion
@@ -106,7 +123,7 @@ class TestMotionLoop:
         assert mock_reachy.goto_target.called
 
     @pytest.mark.asyncio
-    async def test_idle_animation_fires_after_interval(self, app, mock_reachy):
+    async def test_idle_animation_does_not_move_head_without_interaction(self, app, mock_reachy):
         app.config.idle_animations = True
         app.config.motion_idle_animation_interval = 0.05  # very short
         app.is_speaking = False
@@ -120,8 +137,7 @@ class TestMotionLoop:
             plugin._running = False
             await task
 
-        # Idle animation should have fired at least once
-        assert mock_reachy.goto_target.called
+        assert not mock_reachy.goto_target.called
 
     @pytest.mark.asyncio
     async def test_no_idle_during_speaking(self, app, mock_reachy):
@@ -147,12 +163,30 @@ class TestMotionLoop:
 
 class TestHeadTrackingLoop:
     @pytest.mark.asyncio
-    async def test_tracks_face_target(self, app, mock_reachy):
+    async def test_ignores_face_target_without_interaction_window(self, app, mock_reachy):
         app.config.motion_head_tracking_poll_interval = 0.02
         plugin = MotionPlugin(app)
         plugin._running = True
 
-        # Publish a strong face target
+        app.head_targets.publish(
+            HeadTarget(yaw=20.0, pitch=-10.0, confidence=0.9, source="face")
+        )
+
+        with patch(_CHP, return_value=np.eye(4)):
+            task = asyncio.create_task(plugin._head_tracking_loop())
+            await asyncio.sleep(0.1)
+            plugin._running = False
+            await task
+
+        assert not mock_reachy.set_target_head_pose.called
+
+    @pytest.mark.asyncio
+    async def test_tracks_face_target_inside_interaction_window(self, app, mock_reachy):
+        app.config.motion_head_tracking_poll_interval = 0.02
+        plugin = MotionPlugin(app)
+        plugin._running = True
+        plugin.open_interaction_window(1.0)
+
         app.head_targets.publish(
             HeadTarget(yaw=20.0, pitch=-10.0, confidence=0.9, source="face")
         )
@@ -163,8 +197,38 @@ class TestHeadTrackingLoop:
             plugin._running = False
             await task
 
-        # Should have called set_target_head_pose at least once
         assert mock_reachy.set_target_head_pose.called
+
+    @pytest.mark.asyncio
+    async def test_center_lock_suppresses_face_tracking(self, app, mock_reachy):
+        app.config.motion_head_tracking_poll_interval = 0.02
+        plugin = MotionPlugin(app)
+        plugin._running = True
+        plugin.open_interaction_window(1.0)
+        plugin._current_yaw = 18.0
+        plugin._current_pitch = -6.0
+        plugin._current_roll = 4.0
+        plugin._current_body_yaw = 25.0
+
+        app.head_targets.publish(
+            HeadTarget(yaw=20.0, pitch=-10.0, confidence=0.9, source="face")
+        )
+
+        with patch(_CHP, return_value=np.eye(4)):
+            plugin.center_and_lock_tracking(1.0)
+            assert plugin._current_yaw == 0.0
+            assert plugin._current_pitch == 0.0
+            assert plugin._current_roll == 0.0
+            assert plugin._current_body_yaw == 0.0
+
+            mock_reachy.reset_mock()
+            task = asyncio.create_task(plugin._head_tracking_loop())
+            await asyncio.sleep(0.1)
+            plugin._running = False
+            await task
+
+        assert not mock_reachy.set_target_head_pose.called
+        assert not mock_reachy.set_target_body_yaw.called
 
     @pytest.mark.asyncio
     async def test_freezes_during_speaking(self, app, mock_reachy):

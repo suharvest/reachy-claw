@@ -306,17 +306,15 @@ class EmotionMapper:
 
     def get_idle_expression(self) -> RobotExpression:
         """Generate a subtle idle animation."""
-        yaw = random.uniform(-5, 5)
-        pitch = random.uniform(-3, 3)
-        roll = random.uniform(-3, 3)
+        center_mag = random.uniform(2, 4)
+        center = center_mag if random.random() >= 0.5 else -center_mag
         return RobotExpression(
-            head=HeadPose(yaw=yaw, pitch=pitch, roll=roll, duration=2.0),
             antenna_anim=AntennaAnimation(
-                center=random.uniform(-5, 5),
-                amplitude=random.uniform(3, 8),
-                frequency=random.uniform(0.3, 0.7),
+                center=center,
+                amplitude=random.uniform(2, 5),
+                frequency=random.uniform(0.16, 0.28),
                 phase_offset=random.uniform(0, math.pi),
-                duration=2.5,
+                duration=random.uniform(4, 6),
             ),
             description="Idle breathing",
         )

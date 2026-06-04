@@ -61,6 +61,22 @@ def test_event_bus_on_app(dashboard_app):
     assert isinstance(dashboard_app.events, EventBus)
 
 
+def test_chinese_conversation_mind_label_is_first_person():
+    """Chinese live dashboard should say 我说了, not Reachy 的 说."""
+    i18n = (
+        Path(__file__).parents[1]
+        / "src"
+        / "reachy_claw"
+        / "plugins"
+        / "dashboard_static"
+        / "i18n.js"
+    ).read_text(encoding="utf-8")
+
+    assert '"mind.possessive": ""' in i18n
+    assert '"mind.says": "我说了"' in i18n
+    assert '"mind.possessive": "Reachy 的"' not in i18n
+
+
 @pytest.mark.asyncio
 async def test_dashboard_broadcast_robot_state(dashboard_app):
     """Test that _broadcast_robot_state produces correct JSON shape."""

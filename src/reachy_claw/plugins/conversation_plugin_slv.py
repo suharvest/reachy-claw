@@ -56,6 +56,36 @@ logger = logging.getLogger(__name__)
 # Strip reachy emotion tags ([happy] / [emotion:happy]) from the spoken
 # text. Identical to the legacy plugin's tag scanner.
 _EMOTION_TAG_RE = re.compile(r"\[(?:emotion:)?(\w+)\]\s*")
+_EMOTION_WORDS = {
+    "happy",
+    "sad",
+    "thinking",
+    "surprised",
+    "curious",
+    "excited",
+    "laugh",
+}
+_BARE_EMOTION_RE = re.compile(
+    r"^(\s*[.!?。！？…]*\s*)(" + "|".join(sorted(_EMOTION_WORDS)) + r")\s*$",
+    re.IGNORECASE,
+)
+_TRAILING_BARE_EMOTION_RE = re.compile(
+    r"\s+(" + "|".join(sorted(_EMOTION_WORDS)) + r")\s*$",
+    re.IGNORECASE,
+)
+_MONOLOGUE_ANGLES = (
+    "notice one concrete thing in the room",
+    "wonder what a nearby visitor might be thinking",
+    "react to the current mood or facial expression",
+    "share a tiny hopeful thought about meeting people",
+    "make a playful observation without repeating yourself",
+)
+_MONOLOGUE_GESTURES = ("curious", "thinking", "surprised", "happy", "laugh")
+_MODE_ENTRY_GESTURES = {
+    "conversation": "happy",
+    "monologue": "curious",
+    "interpreter": "listening",
+}
 
 
 # Relocated from llm.py (do NOT delete llm.py — this is an additive copy so
@@ -159,6 +189,8 @@ class ConversationPlugin(Plugin):
         # conversation_mode is "monologue", mirroring the legacy plugin).
         self._monologue_task: asyncio.Task | None = None
         self._monologue_last_ts: float = 0.0
+        self._monologue_turn_idx = 0
+        self._recent_monologue_lines: list[str] = []
 
         # Stream-safe TTS tag stripper state (reset per turn via
         # ``_reset_tag_stripper``). LLM tokens often split an emotion /
@@ -291,6 +323,62 @@ class ConversationPlugin(Plugin):
 
     async def on_rest_end(self) -> None:
         self._paused = False
+
+    # ── mode switching ──────────────────────────────────────────────
+
+    def switch_mode(self, mode: str) -> None:
+        """Hot-switch the SLV backend's lightweight mode state.
+
+        SLV does not use the legacy ModeManager, but dashboard and persisted
+        config still expect conversation_mode to reflect real runtime behavior.
+        """
+        if mode not in {"conversation", "monologue", "interpreter"}:
+            raise ValueError(f"unknown conversation mode: {mode}")
+        prev = getattr(self.app.config, "conversation_mode", "conversation")
+        self.app.config.conversation_mode = mode
+        if mode == "conversation":
+            self._barge_in_enabled = True
+            self.app.config.barge_in_enabled = True
+        elif mode == "interpreter":
+            self._barge_in_enabled = False
+            self.app.config.barge_in_enabled = False
+
+        if mode == "monologue":
+            self._ensure_monologue_timer()
+        else:
+            self._cancel_monologue_timer()
+
+        self._queue_mode_gesture(_MODE_ENTRY_GESTURES[mode])
+        self.app.events.emit("mode_change", {"mode": mode, "prev": prev})
+        logger.info("Conversation mode switched to: %s", mode)
+
+    def _queue_mode_gesture(self, emotion: str) -> None:
+        self.app.emotions.queue_emotion(emotion)
+
+    def _open_motion_interaction_window(self) -> None:
+        motion = self.app.get_plugin("motion")
+        if motion and hasattr(motion, "open_interaction_window"):
+            motion.open_interaction_window()
+
+    def _center_and_lock_motion(self) -> None:
+        motion = self.app.get_plugin("motion")
+        if motion and hasattr(motion, "center_and_lock_tracking"):
+            motion.center_and_lock_tracking()
+
+    def _ensure_monologue_timer(self) -> None:
+        if not self._running:
+            return
+        if self._monologue_task is not None and not self._monologue_task.done():
+            return
+        self._monologue_last_ts = time.monotonic()
+        self._monologue_task = asyncio.create_task(
+            self._monologue_timer_loop(), name="slv-monologue-timer"
+        )
+
+    def _cancel_monologue_timer(self) -> None:
+        if self._monologue_task is not None and not self._monologue_task.done():
+            self._monologue_task.cancel()
+        self._monologue_task = None
 
     # ── config helpers ──────────────────────────────────────────────
 
@@ -474,6 +562,7 @@ class ConversationPlugin(Plugin):
         logger.info(
             "BARGE-IN: client-VAD speech onset (%.0fms into speech)", elapsed_ms
         )
+        self._center_and_lock_motion()
         self._set_state(ConvState.BARGED_IN)
         await self._cancel_turn()
         if self._audio is not None:
@@ -541,6 +630,7 @@ class ConversationPlugin(Plugin):
             self._last_asr_final = text
             self._last_asr_final_ts = time.monotonic()
             self._monologue_last_ts = time.monotonic()
+            self._open_motion_interaction_window()
             self.app.events.emit("asr_final", {"text": text})
             self._turn_task = self._spawn_task(
                 self._drive_turn(text), name="slv-turn"
@@ -587,6 +677,7 @@ class ConversationPlugin(Plugin):
         logger.info(
             "BARGE-IN: partial=%r (%.0fms into speech)", partial_text, elapsed_ms
         )
+        self._center_and_lock_motion()
         self._set_state(ConvState.BARGED_IN)
         await self._cancel_turn()
         if self._audio is not None:
@@ -639,6 +730,12 @@ class ConversationPlugin(Plugin):
             event_bus=self.app.events,
             config=self.app.config,
         )
+        allowed_tools = (
+            set()
+            if getattr(self.app.config, "conversation_mode", "conversation")
+            == "interpreter"
+            else None
+        )
 
         async def _on_tok(tok: str) -> None:
             nonlocal sent_any_text
@@ -675,7 +772,7 @@ class ConversationPlugin(Plugin):
                 messages,
                 session=self._session,
                 registry=self._registry,
-                allowed_tools=None,  # expose every registered tool
+                allowed_tools=allowed_tools,
                 ctx=ctx,
                 max_iterations=int(getattr(cfg, "tools_max_iterations", 5)),
                 on_assistant_token=_on_tok,
@@ -821,6 +918,23 @@ class ConversationPlugin(Plugin):
 
     def _build_system_prompt(self) -> str:
         config = self.app.config
+        mode = getattr(config, "conversation_mode", "conversation")
+        if mode == "interpreter":
+            from ..llm import INTERPRETER_SYSTEM_PROMPT
+
+            base = (
+                getattr(config, "interpreter_prompt", "")
+                or INTERPRETER_SYSTEM_PROMPT.format(
+                    source_lang=getattr(
+                        config, "interpreter_source_lang", "Chinese"
+                    ),
+                    target_lang=getattr(
+                        config, "interpreter_target_lang", "English"
+                    ),
+                )
+            )
+            return "\n".join([base, "/no_think"])
+
         base = getattr(config, "ollama_system_prompt", "") or DEFAULT_SYSTEM_PROMPT
         vision = self._get_vision_context()
         parts = [base, "/no_think"]  # /no_think REQUIRED for qwen3
@@ -965,12 +1079,13 @@ class ConversationPlugin(Plugin):
                 return
             full_text_parts.append(tok)
             clean = self._strip_tags_for_tts(tok)
+            clean = self._strip_bare_emotion_for_tts(clean)
             if clean:
                 await self._slv.send_text(clean)
             self.app.events.emit("llm_delta", {"text": clean, "run_id": run_id})
 
-        # Synthetic self-prompt message — monologue has no user turn.
-        synthetic = "(You glance around the exhibition and think out loud.)"
+        synthetic, gesture = self._compose_monologue_user_prompt(vision)
+        self._queue_mode_gesture(gesture)
         # Use a throwaway session so the monologue doesn't pollute the
         # dialogue history.
         mono_session = Session()
@@ -985,9 +1100,14 @@ class ConversationPlugin(Plugin):
                 allowed_tools=set(),  # monologue: no tools
                 ctx=ctx,
                 on_assistant_token=_on_tok,
-                llm_kwargs={"session": mono_session},
+                llm_kwargs={
+                    "session": mono_session,
+                    "temperature": 0.8,
+                    "top_p": 0.9,
+                },
             )
             tail = self._flush_tag_stripper()
+            tail = self._strip_bare_emotion_for_tts(tail)
             if tail:
                 await self._slv.send_text(tail)
             await self._slv.flush_tts()
@@ -999,10 +1119,50 @@ class ConversationPlugin(Plugin):
             raise
         except Exception:
             logger.exception("monologue turn failed")
-        full_text = _EMOTION_TAG_RE.sub("", "".join(full_text_parts))
+        full_text = self._strip_trailing_bare_emotion(
+            _EMOTION_TAG_RE.sub("", "".join(full_text_parts))
+        )
+        if full_text:
+            self._recent_monologue_lines.append(full_text.strip())
+            self._recent_monologue_lines = self._recent_monologue_lines[-3:]
         self._monologue_last_ts = time.monotonic()
         self.app.events.emit("observation", {"text": full_text})
         self.app.events.emit("llm_end", {"full_text": full_text, "run_id": run_id})
+
+    def _compose_monologue_user_prompt(self, vision: str) -> tuple[str, str]:
+        idx = self._monologue_turn_idx
+        self._monologue_turn_idx += 1
+        angle = _MONOLOGUE_ANGLES[idx % len(_MONOLOGUE_ANGLES)]
+        gesture = _MONOLOGUE_GESTURES[idx % len(_MONOLOGUE_GESTURES)]
+        parts = [
+            "(You glance around the exhibition and think out loud.)",
+            f"Angle: {angle}.",
+            f"Moment: idle monologue #{idx + 1}.",
+        ]
+        if vision:
+            parts.append(f"Current view: {vision}.")
+        else:
+            parts.append("Current view: no clear visitor detail right now.")
+        if self._recent_monologue_lines:
+            recent = " | ".join(self._recent_monologue_lines[-3:])
+            parts.append(f"Avoid repeating recent lines: {recent}")
+        return "\n".join(parts), gesture
+
+    def _strip_bare_emotion_for_tts(self, text: str) -> str:
+        if not text:
+            return text
+        match = _BARE_EMOTION_RE.match(text)
+        if not match:
+            return text
+        prefix, emotion = match.groups()
+        emotion = emotion.lower()
+        self.app.events.emit("emotion", {"emotion": emotion})
+        self.app.emotions.queue_emotion(emotion)
+        return prefix if prefix.strip() else ""
+
+    @staticmethod
+    def _strip_trailing_bare_emotion(text: str) -> str:
+        return _TRAILING_BARE_EMOTION_RE.sub("", text).rstrip()
 
     # ── audio playback (reachy GStreamer path, unchanged) ────────────
 

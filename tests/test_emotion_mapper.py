@@ -136,22 +136,25 @@ class TestEmotionQueue:
 
 
 class TestIdleExpression:
-    def test_idle_expression_has_head_and_antenna(self):
+    def test_idle_expression_is_slow_subtle_antenna_breathing(self):
         em = EmotionMapper()
         expr = em.get_idle_expression()
-        assert expr.head is not None
-        # Idle now uses antenna_anim for organic movement
+        assert expr.head is None
         assert expr.antenna_anim is not None
+        assert 2.0 <= abs(expr.antenna_anim.center) <= 4.0
+        assert 2.0 <= expr.antenna_anim.amplitude <= 5.0
+        assert 0.16 <= expr.antenna_anim.frequency <= 0.28
+        assert 4.0 <= expr.antenna_anim.duration <= 6.0
         assert expr.description == "Idle breathing"
 
     def test_idle_expressions_vary(self):
         em = EmotionMapper()
-        poses = set()
+        amplitudes = set()
         for _ in range(20):
             expr = em.get_idle_expression()
-            poses.add(round(expr.head.yaw, 2))
+            amplitudes.add(round(expr.antenna_anim.amplitude, 2))
         # Should have multiple distinct values (randomized)
-        assert len(poses) > 1
+        assert len(amplitudes) > 1
 
 
 class TestDataclasses:

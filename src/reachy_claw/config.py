@@ -180,7 +180,7 @@ class Config:
     motion_emotion_intensity: float = 1.0
     motion_head_tracking_smoothing: float = 0.35
     motion_head_tracking_poll_interval: float = 0.05
-    motion_idle_animation_interval: float = 5.0
+    motion_idle_animation_interval: float = 10.0
 
     # Vision / face tracking
     vision_tracker_type: str = "mediapipe"  # "mediapipe", "remote", "none"
@@ -195,6 +195,9 @@ class Config:
     vision_deadzone: float = 0.01
     vision_min_face_size: float = 0.05  # minimum face bbox fraction (0-1), smaller = ignored
     vision_face_lost_delay: float = 2.0
+    vision_interaction_face_stable_s: float = 1.0
+    vision_interaction_face_min_area: float = 0.008
+    vision_interaction_face_cooldown_s: float = 12.0
 
     # Vision TRT service (used when vision_tracker_type == "remote")
     vision_service_url: str = "tcp://127.0.0.1:8631"
@@ -349,6 +352,9 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("vision", "deadzone"): "vision_deadzone",
     ("vision", "min_face_size"): "vision_min_face_size",
     ("vision", "face_lost_delay"): "vision_face_lost_delay",
+    ("vision", "interaction_face_stable_s"): "vision_interaction_face_stable_s",
+    ("vision", "interaction_face_min_area"): "vision_interaction_face_min_area",
+    ("vision", "interaction_face_cooldown_s"): "vision_interaction_face_cooldown_s",
     ("vision", "service_url"): "vision_service_url",
     ("vision", "emotion_threshold"): "vision_emotion_threshold",
     ("vision", "emotion_cooldown"): "vision_emotion_cooldown",

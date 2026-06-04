@@ -97,6 +97,41 @@ class MotionPlugin(Plugin):
 
         # Rest window pause
         self._paused = False
+        self._interaction_until = 0.0
+        self._tracking_lock_until = 0.0
+
+    def open_interaction_window(self, duration: float | None = None) -> None:
+        """Temporarily allow face/DOA tracking after implicit user interaction."""
+        if duration is None:
+            duration = float(getattr(self.app.config, "motion_interaction_window_s", 12.0))
+        self._interaction_until = max(
+            self._interaction_until,
+            time.monotonic() + max(0.0, float(duration)),
+        )
+
+    def center_and_lock_tracking(self, duration: float | None = None) -> None:
+        """Center the camera pose and briefly suppress tracking updates."""
+        if duration is None:
+            duration = float(getattr(self.app.config, "motion_tracking_lock_s", 1.5))
+        now = time.monotonic()
+        lock_s = max(0.0, float(duration))
+        self._tracking_lock_until = max(self._tracking_lock_until, now + lock_s)
+        self.open_interaction_window(lock_s)
+
+        self._current_yaw = 0.0
+        self._current_pitch = 0.0
+        self._current_roll = 0.0
+        self._current_body_yaw = 0.0
+        self._last_applied_yaw = 0.0
+        self._last_applied_pitch = 0.0
+        self._last_applied_roll = 0.0
+        self._last_applied_body_yaw = 0.0
+        self._set_head_pose(0.0, 0.0, 0.0)
+        self._set_body_yaw(0.0)
+
+    def _tracking_allowed(self) -> bool:
+        now = time.monotonic()
+        return now >= self._tracking_lock_until and now < self._interaction_until
 
     def set_speech_offsets(self, offsets: tuple) -> None:
         """Called by HeadWobbler to set speech-driven head offsets."""
@@ -212,17 +247,24 @@ class MotionPlugin(Plugin):
                 await asyncio.sleep(poll_interval)
                 continue
 
-            try:
-                target = await asyncio.wait_for(
-                    asyncio.to_thread(self.app.head_targets.get_fused_target),
-                    timeout=0.5,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("get_fused_target() timed out; skipping tick")
+            if time.monotonic() < self._tracking_lock_until:
                 await asyncio.sleep(poll_interval)
                 continue
 
-            if target.source == "none":
+            if self._tracking_allowed():
+                try:
+                    target = await asyncio.wait_for(
+                        asyncio.to_thread(self.app.head_targets.get_fused_target),
+                        timeout=0.5,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("get_fused_target() timed out; skipping tick")
+                    await asyncio.sleep(poll_interval)
+                    continue
+            else:
+                target = None
+
+            if target is None or target.source == "none":
                 # Decay all axes to neutral
                 self._current_yaw += self._neutral_decay * (0.0 - self._current_yaw)
                 self._current_pitch += self._neutral_decay * (0.0 - self._current_pitch)
@@ -409,7 +451,7 @@ class MotionPlugin(Plugin):
             from reachy_mini.utils import create_head_pose
 
             kwargs = {}
-            if expr.head:
+            if expr.head and self._tracking_allowed():
                 head_pose = create_head_pose(
                     yaw=expr.head.yaw,
                     roll=expr.head.roll,

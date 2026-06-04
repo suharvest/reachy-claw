@@ -170,7 +170,7 @@ function connectDashboard() {
         const restartStatus = document.getElementById('restart-status');
         const restartBtn = document.getElementById('restart-btn');
         if (restartStatus && restartStatus.textContent) {
-            restartStatus.textContent = 'All services restarted.';
+            restartStatus.textContent = t('restart.done');
             setTimeout(() => { restartStatus.textContent = ''; }, 3000);
         }
         if (restartBtn) restartBtn.disabled = false;
@@ -222,7 +222,7 @@ function handleDashboardMsg(msg) {
             } else {
                 // Empty transcript — reset to listening immediately
                 if (asrIdleTimer) clearTimeout(asrIdleTimer);
-                asrTextEl.innerHTML = '<i>Listening...</i>';
+                asrTextEl.innerHTML = '<i>' + t('asr.listening') + '</i>';
                 asrTextEl.className = 'asr-text idle';
                 asrActive = false;
             }
@@ -283,7 +283,7 @@ function handleDashboardMsg(msg) {
         case 'mode_changed':
             currentMode = msg.mode;
             syncModeUI();
-            showToast('Mode: ' + msg.mode);
+            showToast(t('mode.changed', { mode: modeName(msg.mode) }));
             break;
 
         case 'interpreter_langs_changed':
@@ -302,7 +302,7 @@ function handleDashboardMsg(msg) {
             break;
 
         case 'prompt_saved':
-            showToast('Prompt saved: ' + msg.mode);
+            showToast(t('prompt.saved', { mode: modeName(msg.mode) }));
             break;
 
         case 'llm_settings':
@@ -326,7 +326,7 @@ function handleDashboardMsg(msg) {
             break;
 
         case 'capture_info':
-            document.getElementById('capture-data-count').textContent = (msg.count || 0) + ' photos';
+            document.getElementById('capture-data-count').textContent = t('faces.photos', { n: msg.count || 0 });
             document.getElementById('capture-storage-path').textContent = msg.path || '--';
             break;
 
@@ -356,9 +356,9 @@ function handleDashboardMsg(msg) {
                 updateVoiceSelect();
                 document.getElementById('voice-select').value = msg.voice.name;
                 selectedVoiceName = msg.voice.name;
-                showToast('Voice cloned: ' + msg.voice.name);
+                showToast(t('clone.cloned', { name: msg.voice.name }));
             } else {
-                showToast('Clone failed: ' + msg.error, true);
+                showToast(t('clone.failed', { error: msg.error }), true);
             }
             closeCloneModal();
             break;
@@ -405,7 +405,7 @@ function triggerAsrActive() {
 function resetAsrIdleTimer() {
     if (asrIdleTimer) clearTimeout(asrIdleTimer);
     asrIdleTimer = setTimeout(() => {
-        asrTextEl.innerHTML = '<i>Listening...</i>';
+        asrTextEl.innerHTML = '<i>' + t('asr.listening') + '</i>';
         asrTextEl.className = 'asr-text idle';
         asrActive = false;
     }, 5000);
@@ -419,16 +419,20 @@ function updateEmotionDisplay() {
         : latestFaces;
 
     if (!faces || faces.length === 0) {
-        emotionPill.textContent = 'Neutral';
-        emotionLabel.textContent = 'Smiling face';
+        emotionPill.textContent = t('emotion.neutral');
+        emotionLabel.textContent = t('emotionLabel.smile');
         return;
     }
 
     // Largest face (first in list from dashboard, or pick largest from vision WS)
     const face = faces[0];
     const rawEmotion = face.emotion || 'neutral';
-    // Normalize: capitalize first letter for display
-    const emotion = rawEmotion.charAt(0).toUpperCase() + rawEmotion.slice(1);
+    // Localized emotion name; fall back to capitalized raw when not in dict.
+    const emoKey = 'emotion.' + rawEmotion;
+    const translated = t(emoKey);
+    const emotion = (translated === emoKey)
+        ? rawEmotion.charAt(0).toUpperCase() + rawEmotion.slice(1)
+        : translated;
     const conf = Math.round((face.emotion_confidence || 0) * 100);
     const color = EMOTION_COLORS[rawEmotion] || EMOTION_COLORS.neutral;
 
@@ -565,7 +569,7 @@ function updateState(state) {
     if (state === 'idle' || state === 'listening') {
         removeThinkingCard();
         if (asrIdleTimer) clearTimeout(asrIdleTimer);
-        asrTextEl.innerHTML = '<i>Listening...</i>';
+        asrTextEl.innerHTML = '<i>' + t('asr.listening') + '</i>';
         asrTextEl.className = 'asr-text idle';
         asrActive = false;
     }
@@ -1005,7 +1009,7 @@ function initSettings() {
         applyLlmBtn.onclick = () => {
             llmDirty = false;
             if (!dashboardWs || dashboardWs.readyState !== 1) {
-                showToast('Not connected', true);
+                showToast(t('common.notConnected'), true);
                 return;
             }
             const backend = llmBackend ? llmBackend.value : 'ollama';
@@ -1022,7 +1026,7 @@ function initSettings() {
                 gateway_host,
                 gateway_port
             }));
-            showToast('Applying LLM settings...');
+            showToast(t('llm.applying'));
         };
     }
 
@@ -1130,7 +1134,7 @@ function initVolume() {
 
     slider.oninput = () => {
         const vol = parseInt(slider.value);
-        valueEl.textContent = vol + '%';
+        valueEl.textContent = vol + '%';  // numeric, language-agnostic
         currentVolume = vol;
         if (vol > 0) { isMuted = false; volumeBeforeMute = vol; }
         else { isMuted = true; }
@@ -1181,7 +1185,7 @@ function initHistory() {
     const valueEl = document.getElementById('history-value');
 
     slider.oninput = () => {
-        valueEl.textContent = slider.value + ' turns';
+        valueEl.textContent = t('memory.turns', { n: slider.value });
     };
     slider.onchange = () => {
         const turns = parseInt(slider.value);
@@ -1197,7 +1201,7 @@ function initHistory() {
 
 function setHistoryUI(turns) {
     document.getElementById('history-slider').value = turns;
-    document.getElementById('history-value').textContent = turns + ' turns';
+    document.getElementById('history-value').textContent = t('memory.turns', { n: turns });
 }
 
 function syncModeUI() {
@@ -1205,15 +1209,15 @@ function syncModeUI() {
         opt.classList.toggle('selected', opt.dataset.mode === currentMode);
         opt.querySelector('input').checked = opt.dataset.mode === currentMode;
     });
-    document.getElementById('mode-status').textContent = 'Current: ' + currentMode;
+    document.getElementById('mode-status').textContent = t('mode.current', { mode: modeName(currentMode) });
     const toggles = document.getElementById('mode-toggles');
     if (toggles) toggles.style.display = currentMode === 'conversation' ? '' : 'none';
     const interpSettings = document.getElementById('interpreter-settings');
     if (interpSettings) interpSettings.style.display = currentMode === 'interpreter' ? '' : 'none';
     const mindLabel = document.getElementById('mind-label');
     if (mindLabel) {
-        mindLabel.textContent = currentMode === 'conversation' ? 'Says'
-            : currentMode === 'interpreter' ? 'Translation' : 'Mind';
+        mindLabel.textContent = currentMode === 'conversation' ? t('mind.says')
+            : currentMode === 'interpreter' ? t('mind.translation') : t('mind.mind');
     }
 }
 
@@ -1253,7 +1257,7 @@ function syncLlmUI(backend, model, ollamaUrl, gatewayHost, gatewayPort) {
 
 function setMode(mode) {
     if (!dashboardWs || dashboardWs.readyState !== 1) {
-        showToast('Not connected', true);
+        showToast(t('common.notConnected'), true);
         return;
     }
     dashboardWs.send(JSON.stringify({ type: 'set_mode', mode }));
@@ -1273,13 +1277,13 @@ async function loadFaces() {
 function renderFaceList(faces) {
     const el = document.getElementById('face-list');
     if (!faces.length) {
-        el.innerHTML = '<div class="face-empty">No faces registered</div>';
+        el.innerHTML = `<div class="face-empty">${t('faces.none')}</div>`;
         return;
     }
     el.innerHTML = faces.map(name =>
         `<div class="face-item">
             <span class="face-name">${name}</span>
-            <button class="face-item-btn" onclick="deleteFace('${name}')">Delete</button>
+            <button class="face-item-btn" onclick="deleteFace('${name}')">${t('faces.delete')}</button>
         </div>`
     ).join('');
 }
@@ -1287,29 +1291,29 @@ function renderFaceList(faces) {
 async function deleteFace(name) {
     try {
         const res = await fetch(`${VISION_API}/api/faces/${encodeURIComponent(name)}`, { method: 'DELETE' });
-        if (!res.ok) { showToast('Delete failed', true); return; }
-        showToast(`Deleted: ${name}`);
+        if (!res.ok) { showToast(t('faces.deleteFailed'), true); return; }
+        showToast(t('faces.deleted', { name }));
         loadFaces();
     } catch (e) {
-        showToast('Delete failed', true);
+        showToast(t('faces.deleteFailed'), true);
     }
 }
 
 async function enrollLive() {
     const name = document.getElementById('enroll-name').value.trim();
-    if (!name) { showToast('Enter a name', true); return; }
+    if (!name) { showToast(t('faces.enterName'), true); return; }
 
     const btn = document.getElementById('enroll-live-btn');
     btn.disabled = true;
     try {
         const res = await fetch(`${VISION_API}/api/faces/enroll?name=${encodeURIComponent(name)}`, { method: 'POST' });
         const data = await res.json();
-        if (!res.ok || data.error) { showToast(data.error || 'Enroll failed', true); return; }
-        showToast(`Enrolled: ${name}`);
+        if (!res.ok || data.error) { showToast(data.error || t('faces.enrollFailed'), true); return; }
+        showToast(t('faces.enrolled', { name }));
         document.getElementById('enroll-name').value = '';
         loadFaces();
     } catch (e) {
-        showToast('Enroll failed', true);
+        showToast(t('faces.enrollFailed'), true);
     } finally {
         btn.disabled = false;
     }
@@ -1330,7 +1334,7 @@ function handleUploadFiles(files) {
 
 async function uploadAndEnroll() {
     const name = document.getElementById('upload-name').value.trim();
-    if (!name) { showToast('Enter a name', true); return; }
+    if (!name) { showToast(t('faces.enterName'), true); return; }
     if (!uploadFiles.length) return;
 
     const btn = document.getElementById('upload-btn');
@@ -1350,7 +1354,9 @@ async function uploadAndEnroll() {
         }
     }
 
-    showToast(`Enrolled ${ok}/${uploadFiles.length} images` + (fail ? ` (${fail} failed)` : ''));
+    showToast(fail
+        ? t('faces.enrolledImagesFail', { ok, total: uploadFiles.length, fail })
+        : t('faces.enrolledImages', { ok, total: uploadFiles.length }));
     uploadFiles = [];
     document.getElementById('upload-preview').innerHTML = '';
     document.getElementById('upload-input').value = '';
@@ -1361,16 +1367,16 @@ async function uploadAndEnroll() {
 async function exportFaces() {
     try {
         const res = await fetch(`${VISION_API}/api/faces/export`);
-        if (!res.ok) { showToast('Export failed', true); return; }
+        if (!res.ok) { showToast(t('faces.exportFailed'), true); return; }
         const blob = await res.blob();
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
         a.download = 'faces.zip';
         a.click();
         URL.revokeObjectURL(a.href);
-        showToast('Exported faces.zip');
+        showToast(t('faces.exportedFaces'));
     } catch (e) {
-        showToast('Export failed', true);
+        showToast(t('faces.exportFailed'), true);
     }
 }
 
@@ -1385,10 +1391,10 @@ async function importFaces() {
         const res = await fetch(`${VISION_API}/api/faces/import`, { method: 'POST', body: fd });
         const data = await res.json();
         if (data.error) { showToast(data.error, true); return; }
-        showToast(`Imported ${(data.faces || []).length} faces`);
+        showToast(t('faces.imported', { n: (data.faces || []).length }));
         loadFaces();
     } catch (e) {
-        showToast('Import failed', true);
+        showToast(t('faces.importFailed'), true);
     }
     input.value = '';
 }
@@ -1401,11 +1407,11 @@ function loadCaptureInfo() {
 }
 
 document.getElementById('capture-clear-btn').onclick = async () => {
-    if (!confirm('Clear all smile capture photos? This cannot be undone.')) return;
+    if (!confirm(t('faces.clearConfirm'))) return;
     try {
         const res = await fetch(`${VISION_API}/api/captures`, { method: 'DELETE' });
         if (res.ok) {
-            showToast('Captures cleared');
+            showToast(t('faces.capturesCleared'));
             captureCount = 0;
             captureCountEl.textContent = '0';
             loadCaptureInfo();
@@ -1413,26 +1419,26 @@ document.getElementById('capture-clear-btn').onclick = async () => {
                 dashboardWs.send(JSON.stringify({ type: 'clear_captures' }));
             }
         } else {
-            showToast('Clear failed', true);
+            showToast(t('faces.clearFailed'), true);
         }
     } catch (e) {
-        showToast('Clear failed', true);
+        showToast(t('faces.clearFailed'), true);
     }
 };
 
 document.getElementById('capture-export-btn').onclick = async () => {
     try {
         const res = await fetch(`${VISION_API}/api/captures/export`);
-        if (!res.ok) { showToast('Export failed', true); return; }
+        if (!res.ok) { showToast(t('faces.exportFailed'), true); return; }
         const blob = await res.blob();
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
         a.download = 'smile-captures.zip';
         a.click();
         URL.revokeObjectURL(a.href);
-        showToast('Exported captures');
+        showToast(t('faces.exportedCaptures'));
     } catch (e) {
-        showToast('Export failed', true);
+        showToast(t('faces.exportFailed'), true);
     }
 };
 
@@ -1513,7 +1519,7 @@ function updateVoiceUI() {
 function updateVoiceSelect() {
     const select = document.getElementById('voice-select');
     if (!select) return;
-    select.innerHTML = '<option value="">-- Select Voice --</option>';
+    select.innerHTML = `<option value="">${t('voice.select')}</option>`;
     for (const v of clonedVoices) {
         const opt = document.createElement('option');
         opt.value = v.name;
@@ -1578,7 +1584,7 @@ function resetRecordState() {
     const btn = document.getElementById('record-start-btn');
     if (btn) {
         btn.classList.remove('recording');
-        btn.querySelector('span').textContent = 'Start Recording';
+        btn.querySelector('span').textContent = t('clone.startRecording');
     }
 }
 
@@ -1641,15 +1647,15 @@ document.addEventListener('DOMContentLoaded', () => {
         submitBtn.onclick = async () => {
             const name = document.getElementById('clone-name').value.trim();
             if (!name) {
-                showToast('Enter a voice name', true);
+                showToast(t('clone.enterVoiceName'), true);
                 return;
             }
             if (!cloneAudioBlob) {
-                showToast('Record or upload audio first', true);
+                showToast(t('clone.recordFirst'), true);
                 return;
             }
             submitBtn.disabled = true;
-            submitBtn.textContent = 'Cloning...';
+            submitBtn.textContent = t('clone.cloning');
 
             const reader = new FileReader();
             reader.onload = async () => {
@@ -1661,9 +1667,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 }));
             };
             reader.onerror = () => {
-                showToast('Failed to read audio', true);
+                showToast(t('clone.readFailed'), true);
                 submitBtn.disabled = false;
-                submitBtn.textContent = 'Clone Voice';
+                submitBtn.textContent = t('clone.submit');
             };
             reader.readAsDataURL(cloneAudioBlob);
         };
@@ -1673,7 +1679,7 @@ document.addEventListener('DOMContentLoaded', () => {
 async function startRecording() {
     // Check if HTTPS or localhost (required for microphone access)
     if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
-        showToast('Microphone requires HTTPS. Use https:// or localhost.', true);
+        showToast(t('clone.micHttps'), true);
         return;
     }
     
@@ -1687,7 +1693,7 @@ async function startRecording() {
             const blob = new Blob(audioChunks, { type: 'audio/webm' });
             cloneAudioBlob = blob;
             document.getElementById('clone-submit-btn').disabled = false;
-            document.getElementById('record-status').textContent = 'Recording saved (' + Math.round(blob.size / 1024) + ' KB)';
+            document.getElementById('record-status').textContent = t('clone.recordingSaved', { kb: Math.round(blob.size / 1024) });
             stream.getTracks().forEach(t => t.stop());
         };
 
@@ -1695,16 +1701,16 @@ async function startRecording() {
         recordingStartTime = Date.now();
         const btn = document.getElementById('record-start-btn');
         btn.classList.add('recording');
-        btn.querySelector('span').textContent = 'Stop';
+        btn.querySelector('span').textContent = t('clone.stop');
         updateRecordTimer();
     } catch (e) {
         console.error('Microphone error:', e);
         if (e.name === 'NotAllowedError') {
-            showToast('Microphone blocked. Click the lock icon in address bar to allow.', true);
+            showToast(t('clone.micBlocked'), true);
         } else if (e.name === 'NotFoundError') {
-            showToast('No microphone found on this device.', true);
+            showToast(t('clone.micNotFound'), true);
         } else {
-            showToast('Microphone error: ' + e.message, true);
+            showToast(t('clone.micError', { msg: e.message }), true);
         }
     }
 }
@@ -1715,7 +1721,7 @@ function stopRecording() {
     }
     const btn = document.getElementById('record-start-btn');
     btn.classList.remove('recording');
-    btn.querySelector('span').textContent = 'Start Recording';
+    btn.querySelector('span').textContent = t('clone.startRecording');
 }
 
 function updateRecordTimer() {
@@ -1805,7 +1811,7 @@ function syncMotorPresetUI() {
 function updateMotorStatus() {
     const el = document.getElementById('motor-status');
     if (el) {
-        el.textContent = motorEnabled ? 'Motor: ' + motorPreset : 'Motor: sleep (disabled)';
+        el.textContent = motorEnabled ? t('motor.status', { preset: motorPreset }) : t('motor.statusDisabled');
     }
 }
 
@@ -1827,7 +1833,7 @@ function loadPrompts() {
 
 function savePrompt(mode, text) {
     if (!dashboardWs || dashboardWs.readyState !== 1) {
-        showToast('Not connected', true);
+        showToast(t('common.notConnected'), true);
         return;
     }
     if (text === undefined) {
@@ -1848,12 +1854,12 @@ function initRestart() {
     if (!btn) return;
     btn.onclick = () => {
         if (!dashboardWs || dashboardWs.readyState !== 1) {
-            showToast('Not connected', true);
+            showToast(t('common.notConnected'), true);
             return;
         }
-        if (!confirm('Restart all services? The dashboard will briefly disconnect.')) return;
+        if (!confirm(t('restart.confirm'))) return;
         btn.disabled = true;
-        document.getElementById('restart-status').textContent = 'Sending restart command...';
+        document.getElementById('restart-status').textContent = t('restart.sending');
         dashboardWs.send(JSON.stringify({ type: 'restart_services' }));
     };
 }
@@ -1865,19 +1871,19 @@ function handleRestartStatus(msg) {
 
     switch (msg.status) {
         case 'starting':
-            statusEl.textContent = 'Restarting services...';
+            statusEl.textContent = t('restart.restarting');
             break;
         case 'restarting':
-            statusEl.textContent = `Restarting ${msg.container}...`;
+            statusEl.textContent = t('restart.restartingOne', { container: msg.container });
             break;
         case 'done':
-            statusEl.textContent = 'All services restarted. Reconnecting...';
+            statusEl.textContent = t('restart.reconnecting');
             if (btn) btn.disabled = false;
             break;
         case 'error':
-            statusEl.textContent = 'Error: ' + (msg.error || 'unknown');
+            statusEl.textContent = t('restart.error', { error: msg.error || t('common.unknown') });
             if (btn) btn.disabled = false;
-            showToast('Restart failed', true);
+            showToast(t('restart.failed'), true);
             break;
     }
 }
@@ -1916,6 +1922,53 @@ function initPageTabs() {
     });
 }
 
+// ── i18n: language toggle + dynamic re-render ───────────────────────
+
+// Localized mode name; falls back to the raw key when not in the dict.
+function modeName(m) {
+    const k = 'mode.' + m + '.title';
+    const v = t(k);
+    return v === k ? m : v;
+}
+
+function initI18n() {
+    const btn = document.getElementById('lang-toggle');
+    if (btn) {
+        btn.addEventListener('click', () => {
+            const next = (window.I18N && I18N.getLang() === 'zh') ? 'en' : 'zh';
+            window.I18N && I18N.setLang(next);
+        });
+    }
+    // Re-render JS-managed (non-static) text whenever the language changes.
+    document.addEventListener('i18n:changed', applyI18nDynamic);
+    // Initial pass so labels match the active language before any WS data.
+    applyI18nDynamic();
+}
+
+// Refresh dynamic labels that are produced in JS (and thus not covered by
+// the static [data-i18n] markup) in the current language.
+function applyI18nDynamic() {
+    try { syncModeUI(); } catch (e) { /* ignore */ }
+    try { updateEmotionDisplay(); } catch (e) { /* ignore */ }
+    try { updateMotorStatus(); } catch (e) { /* ignore */ }
+    // ASR idle bubble
+    try {
+        if (!asrActive && asrTextEl) {
+            asrTextEl.innerHTML = '<i>' + t('asr.listening') + '</i>';
+        }
+    } catch (e) { /* ignore */ }
+    // Memory / volume value suffixes
+    try {
+        const hs = document.getElementById('history-slider');
+        const hv = document.getElementById('history-value');
+        if (hs && hv) hv.textContent = t('memory.turns', { n: hs.value });
+    } catch (e) { /* ignore */ }
+    // Re-render the currently loaded diary so its JS-built text follows the language.
+    try {
+        if (typeof window.reloadCurrentDiary === 'function') window.reloadCurrentDiary();
+    } catch (e) { /* ignore */ }
+}
+
 // ── Send WS message helper ─────────────────────────────────────────
 
 function sendDashboardWs(data) {
@@ -1948,9 +2001,9 @@ function createSmileGallery() {
             <div class="smile-gallery-header">
                 <div class="smile-gallery-title">
                     <span class="smile-gallery-count" id="gallery-count">0</span>
-                    <span class="smile-gallery-label">smiles collected</span>
+                    <span class="smile-gallery-label" data-i18n="smile.collected">smiles collected</span>
                 </div>
-                <button class="smile-gallery-close" id="gallery-close">\u2715 Close</button>
+                <button class="smile-gallery-close" id="gallery-close">\u2715 <span data-i18n="common.close">Close</span></button>
             </div>
             <div class="smile-gallery-scatter" id="gallery-grid"></div>
             <div class="smile-gallery-timeline" id="gallery-timeline" style="display:none">
@@ -1963,6 +2016,7 @@ function createSmileGallery() {
     `;
     document.body.appendChild(el);
     smileGalleryEl = el;
+    window.I18N && I18N.apply(el);
 
     document.getElementById('gallery-close').addEventListener('click', closeSmileGallery);
     el.addEventListener('click', (e) => {
@@ -2064,7 +2118,7 @@ async function openSmileGallery() {
     const grid = document.getElementById('gallery-grid');
     const countEl = document.getElementById('gallery-count');
     const timeline = document.getElementById('gallery-timeline');
-    grid.innerHTML = '<div class="smile-gallery-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">Loading smiles...</div>';
+    grid.innerHTML = `<div class="smile-gallery-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">${t('smile.loading')}</div>`;
     timeline.style.display = 'none';
 
     try {
@@ -2075,7 +2129,7 @@ async function openSmileGallery() {
         countEl.textContent = data.total || files.length;
 
         if (files.length === 0) {
-            grid.innerHTML = '<div class="smile-gallery-empty" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">No smiles captured yet</div>';
+            grid.innerHTML = `<div class="smile-gallery-empty" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">${t('smile.empty')}</div>`;
             return;
         }
 
@@ -2101,7 +2155,7 @@ async function openSmileGallery() {
 
     } catch (e) {
         console.warn('Failed to load captures:', e);
-        grid.innerHTML = '<div class="smile-gallery-empty" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">Could not load smiles</div>';
+        grid.innerHTML = `<div class="smile-gallery-empty" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">${t('smile.error')}</div>`;
     }
 }
 
@@ -2216,6 +2270,7 @@ async function renderDiaryHAChips() {
 
 // ── Init ────────────────────────────────────────────────────────────
 function init() {
+    initI18n();
     initPageTabs();
     setupVideo();
     connectVision();

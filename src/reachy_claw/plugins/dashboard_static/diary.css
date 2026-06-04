@@ -47,6 +47,31 @@
     border-radius: 2px 2px 0 0;
 }
 
+/* Language toggle — sits at the right of the nav, clear of the settings gear */
+.lang-toggle {
+    margin-left: auto;
+    margin-right: 52px;
+    align-self: center;
+    background: rgba(30, 30, 30, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #9b9ba6;
+    font-family: 'Outfit', sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    padding: 5px 12px;
+    border-radius: 14px;
+    cursor: pointer;
+    transition: color 0.2s, border-color 0.2s, background 0.2s;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.lang-toggle:hover {
+    color: #e8e6e3;
+    border-color: rgba(0, 214, 143, 0.5);
+    background: rgba(0, 214, 143, 0.08);
+}
+
 /* Offset content for fixed tab bar */
 #page-live { padding-top: 0; }
 #page-diary { padding-top: 48px; }

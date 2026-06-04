@@ -121,6 +121,50 @@ class TestVisionClientSmoothing:
         assert plugin._smooth_y == old_y
 
 
+class FakeMotion:
+    name = "motion"
+
+    def __init__(self):
+        self.opened: list[float | None] = []
+
+    def open_interaction_window(self, duration=None):
+        self.opened.append(duration)
+
+
+class TestVisionInteractionTrigger:
+    def test_stable_near_face_opens_motion_interaction_window(self, vision_app):
+        motion = FakeMotion()
+        vision_app._plugins.append(motion)
+        plugin = VisionClientPlugin(vision_app)
+        plugin._face_trigger_stable_s = 1.0
+        plugin._face_trigger_min_area = 0.01
+        plugin._face_trigger_cooldown_s = 10.0
+        face = {"bbox": [0.4, 0.3, 0.55, 0.5]}
+
+        plugin._maybe_trigger_face_interaction(face, now=10.0)
+        plugin._maybe_trigger_face_interaction(face, now=11.1)
+
+        assert motion.opened == [None]
+
+    def test_small_or_brief_face_does_not_trigger_interaction(self, vision_app):
+        motion = FakeMotion()
+        vision_app._plugins.append(motion)
+        plugin = VisionClientPlugin(vision_app)
+        plugin._face_trigger_stable_s = 1.0
+        plugin._face_trigger_min_area = 0.01
+
+        plugin._maybe_trigger_face_interaction(
+            {"bbox": [0.4, 0.3, 0.45, 0.35]},
+            now=10.0,
+        )
+        plugin._maybe_trigger_face_interaction(
+            {"bbox": [0.4, 0.3, 0.55, 0.5]},
+            now=10.4,
+        )
+
+        assert motion.opened == []
+
+
 class TestEmotionRemap:
     def test_hsemotion_mapping(self):
         assert _EMOTION_REMAP["Anger"] == "angry"

@@ -58,6 +58,15 @@ class VisionClientPlugin(Plugin):
         self._smoothing_alpha = cfg.vision_smoothing_alpha
         self._deadzone = cfg.vision_deadzone
         self._face_lost_delay = cfg.vision_face_lost_delay
+        self._face_trigger_stable_s = getattr(
+            cfg, "vision_interaction_face_stable_s", 1.0
+        )
+        self._face_trigger_min_area = getattr(
+            cfg, "vision_interaction_face_min_area", 0.008
+        )
+        self._face_trigger_cooldown_s = getattr(
+            cfg, "vision_interaction_face_cooldown_s", 12.0
+        )
         self._emotion_threshold = cfg.vision_emotion_threshold
         self._emotion_cooldown = cfg.vision_emotion_cooldown
 
@@ -67,6 +76,8 @@ class VisionClientPlugin(Plugin):
         self._smooth_roll = 0.0
         self._last_face_time = 0.0
         self._face_lost_published = False
+        self._face_trigger_seen_since = 0.0
+        self._last_face_trigger_time = 0.0
 
         # Body yaw: accumulated angle (closed-loop centering)
         self._body_yaw_acc = 0.0
@@ -241,6 +252,7 @@ class VisionClientPlugin(Plugin):
 
             self._last_face_time = now
             self._face_lost_published = False
+            self._maybe_trigger_face_interaction(primary, now=now)
 
             # Head tracking (same logic as FaceTrackerPlugin)
             center = primary.get("center")
@@ -341,6 +353,33 @@ class VisionClientPlugin(Plugin):
                 self.current_identity = identity
                 if identity:
                     logger.info(f"Face identified: {identity}")
+
+    def _maybe_trigger_face_interaction(self, face: dict, *, now: float) -> None:
+        bbox = face.get("bbox")
+        if not bbox or len(bbox) < 4:
+            self._face_trigger_seen_since = 0.0
+            return
+
+        width = max(0.0, float(bbox[2]) - float(bbox[0]))
+        height = max(0.0, float(bbox[3]) - float(bbox[1]))
+        area = width * height
+        if area < self._face_trigger_min_area:
+            self._face_trigger_seen_since = 0.0
+            return
+
+        if self._face_trigger_seen_since <= 0.0:
+            self._face_trigger_seen_since = now
+            return
+        if (now - self._face_trigger_seen_since) < self._face_trigger_stable_s:
+            return
+        if (now - self._last_face_trigger_time) < self._face_trigger_cooldown_s:
+            return
+
+        motion = self.app.get_plugin("motion")
+        if motion and hasattr(motion, "open_interaction_window"):
+            motion.open_interaction_window()
+            self.app.emotions.queue_emotion("listening")
+            self._last_face_trigger_time = now
 
     def _emit_threadsafe(self, event: str, data: dict) -> None:
         """Emit EventBus event from a background thread."""
