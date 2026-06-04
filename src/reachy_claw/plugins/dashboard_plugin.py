@@ -377,7 +377,7 @@ class DashboardPlugin(Plugin):
             action = command
 
         # Find the conversation plugin and execute
-        conv = self.app.get_plugin("ConversationPlugin")
+        conv = self.app.get_plugin("conversation")
         if not conv:
             return web.json_response(
                 {"status": "error", "message": "ConversationPlugin not available"},
