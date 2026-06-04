@@ -22,8 +22,8 @@ sys.path  # noqa
 
 from reachy_claw.config import Config
 from reachy_claw.app import ReachyClawApp
-from reachy_claw.plugins.conversation_plugin_slv import ConversationPlugin, ConvState
-from ovs_agent.slv_client import ASRFinal, ASRPartial
+from reachy_claw.plugins.conversation_plugin_slv import ConversationPlugin
+from ovs_agent.slv_client import ASRFinal
 
 
 class FakeSLV:
