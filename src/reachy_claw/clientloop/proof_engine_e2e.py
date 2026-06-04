@@ -205,7 +205,6 @@ async def run(wav: str, config_path: Path, timeout_s: float) -> int:
 
     # Instrument the SLV client to flag asr_final + tts_started as they
     # cross the WS transport (irrefutable "went through the engine").
-    from ovs_agent.slv_client import ASRFinal, TTSStarted  # local import
 
     orig_handle_json = app.slv._handle_json
 

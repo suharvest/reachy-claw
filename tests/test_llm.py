@@ -9,6 +9,7 @@ from reachy_claw.llm import (
     OllamaClient,
     OllamaConfig,
     _extract_emotion,
+    _StreamingBracketStripper,
 )
 
 
@@ -257,3 +258,56 @@ class TestOllamaStreaming:
 
         await client._stream_chat("third")
         assert len(client._history) == 4  # trimmed to max_history=2 turns
+
+
+# ── Streaming bracket-tag stripper ──────────────────────────────────
+
+
+class TestStreamingBracketStripper:
+    """Strip [emotion] and [Faces: ...] tags from a streamed token feed.
+
+    The LLM often splits a tag across token deltas (e.g. "[", "happy", "]"),
+    so a per-token regex misses it and the raw tag leaks into TTS. The
+    stripper buffers across feeds until a tag closes.
+    """
+
+    def _drain(self, stripper, tokens):
+        """Feed all tokens then flush; return the concatenated output."""
+        out = "".join(stripper.feed(t) for t in tokens)
+        return out + stripper.flush()
+
+    def test_emotion_tag_single_feed(self):
+        s = _StreamingBracketStripper()
+        assert self._drain(s, ["[happy] Hello"]) == "Hello"
+
+    def test_emotion_tag_split_across_feeds(self):
+        s = _StreamingBracketStripper()
+        assert self._drain(s, ["[", "happy", "] hi"]) == "hi"
+
+    def test_faces_tag_split_across_feeds(self):
+        s = _StreamingBracketStripper()
+        assert self._drain(s, ["[Fac", "es: Alice", "] hello"]) == "hello"
+
+    def test_trailing_space_eaten_across_feed_boundary(self):
+        # Tag closes exactly at end of a feed; the leading space of the next
+        # feed must be eaten so "[Faces: X]" + " hello" → "hello".
+        s = _StreamingBracketStripper()
+        assert self._drain(s, ["[Faces: X]", " hello"]) == "hello"
+
+    def test_unclosed_bracket_is_preserved_via_flush(self):
+        # A bare "[" with no closing "]" is held, not dropped; flush() emits it.
+        s = _StreamingBracketStripper()
+        assert self._drain(s, ["hi [incomplete"]) == "hi [incomplete"
+
+    def test_non_tag_bracket_is_kept(self):
+        # Bracketed text with spaces isn't a tag — leave it untouched.
+        s = _StreamingBracketStripper()
+        assert self._drain(s, ["[hello world]"]) == "[hello world]"
+
+    def test_plain_text_passthrough(self):
+        s = _StreamingBracketStripper()
+        assert self._drain(s, ["just ", "plain ", "text"]) == "just plain text"
+
+    def test_tag_then_text_then_tag(self):
+        s = _StreamingBracketStripper()
+        assert self._drain(s, ["[happy] hi ", "[Faces: Bob] there"]) == "hi there"

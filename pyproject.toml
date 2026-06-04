@@ -68,7 +68,11 @@ override-dependencies = [
 ]
 
 [tool.uv.sources]
-openvoicestream-agent = { path = "../seeed-local-voice/agent", editable = true }
+# Use the in-repo torch-free wheel so the project resolves on any checkout
+# (CI, fresh clones, image builds). For live editing of the agent source,
+# point this back at an editable sibling path, e.g.
+#   { path = "../seeed-local-voice/agent", editable = true }
+openvoicestream-agent = { path = "deploy/jetson/reachy/vendor/openvoicestream_agent-0.1.0-py3-none-any.whl" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

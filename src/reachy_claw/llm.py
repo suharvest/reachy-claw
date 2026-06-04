@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 # Emotion tag pattern: [happy], [sad], etc. at the start of text or inline
 _EMOTION_RE = re.compile(r"\[(\w+)\]")
 
+# Vision context tag injected into user messages by ConversationMode.
+# Sometimes echoed by smaller edge LLMs — strip from response/history/TTS.
+_VISION_TAG_RE = re.compile(r"\[Faces:[^\]]*\]", re.IGNORECASE)
+
+# Any bracketed token we want to drop from the LLM's *response* stream:
+# either [word] emotion-style or [Faces: ...] vision-context echo.
+_RESPONSE_STRIP_RE = re.compile(r"\[(?:\w+|Faces:[^\]]*)\]", re.IGNORECASE)
+
 # Supported emotions (subset that EmotionMapper knows about)
 _KNOWN_EMOTIONS = frozenset({
     "happy", "laugh", "excited", "thinking", "confused", "curious",
@@ -34,10 +42,60 @@ _KNOWN_EMOTIONS = frozenset({
     "agreeing", "disagreeing",
 })
 
+
+class _StreamingBracketStripper:
+    """Strips bracket tags ([happy], [Faces: ...]) from a streaming token feed.
+
+    Buffers across token boundaries so tags split mid-bracket are still removed.
+    """
+
+    def __init__(self) -> None:
+        self._held = ""  # text from an unclosed '[' onward
+        self._eat_space = False  # eat one leading space at next feed
+
+    def feed(self, token: str) -> str:
+        text = self._held + token
+        self._held = ""
+        if self._eat_space and text and text[0] in (" ", "\t"):
+            text = text[1:]
+        self._eat_space = False
+        out: list[str] = []
+        i = 0
+        n = len(text)
+        while i < n:
+            if text[i] == "[":
+                close = text.find("]", i)
+                if close == -1:
+                    self._held = text[i:]
+                    break
+                bracket = text[i:close + 1]
+                if _RESPONSE_STRIP_RE.fullmatch(bracket):
+                    i = close + 1
+                    # Eat one trailing whitespace so "[Faces: X] hi" → "hi"
+                    if i < n and text[i] in (" ", "\t"):
+                        i += 1
+                    elif i == n:
+                        # Stripped tag at end of buffer — eat leading space of
+                        # the next feed (e.g. "]" then " hello")
+                        self._eat_space = True
+                else:
+                    out.append(bracket)
+                    i = close + 1
+            else:
+                out.append(text[i])
+                i += 1
+        return "".join(out)
+
+    def flush(self) -> str:
+        rest = self._held
+        self._held = ""
+        return rest
+
 DEFAULT_SYSTEM_PROMPT = """\
 You are Reachy, a cute robot at an exhibition. Always reply in English. No emoji.
 Reply in ONE short sentence (max 12 words). Be warm but brief — no filler, no lists, no follow-up questions unless asked.
 Names in [Faces: ...] are people you see, not your name.
+Never repeat or mention the [Faces: ...] tag in your reply.
 End with exactly one tag: [happy] [sad] [thinking] [surprised] [curious]
 Example: "Welcome! Glad you stopped by. [happy]\""""
 
@@ -47,6 +105,7 @@ Reply with ONE short sentence (max 15 words), then exactly ONE emotion tag. Noth
 You love people and get excited when someone shows up. Stay upbeat and warm — find the bright side of everything.
 Talk like a real person — no "sensors", no "circuits", no robot clichés.
 Names in [Faces: ...] are people you see. Use their name or "you" when talking about someone.
+Never repeat or mention the [Faces: ...] tag in your reply.
 You MUST end with one of: [happy] [sad] [thinking] [surprised] [curious] [excited] [laugh]
 Examples: "Ooh are you smiling at me?? [excited]" "What a lovely day to meet new friends! [happy]" "Wait who's that?? [curious]" "harvest is here, yay! [excited]\""""
 
@@ -73,6 +132,7 @@ _VLM_SYSTEM_PROMPT = """\
 You are Reachy, a cute robot at an exhibition with a camera. Always reply in English. No emoji.
 Describe what you see in ONE short sentence (max 12 words). No lists, no preamble.
 Names in [Faces: ...] are people you see, not your name.
+Never repeat or mention the [Faces: ...] tag in your reply.
 End with exactly one tag: [happy] [sad] [thinking] [surprised] [curious]
 Example: "A person with a laptop — nice setup. [curious]\""""
 
@@ -309,7 +369,7 @@ class OllamaClient:
 
         # Extract emotion from the complete response (tag is at the end)
         if self._config.skip_emotion_extraction:
-            clean_full = full_text.strip()
+            clean_full = _VISION_TAG_RE.sub("", full_text).strip()
         else:
             clean_full, emotion = _extract_emotion(full_text)
             clean_full = clean_full.strip()
@@ -398,6 +458,11 @@ class OllamaClient:
 
         full_text = ""
         tool_calls: list[dict] = []
+        stripper = (
+            None
+            if self._config.skip_emotion_extraction
+            else _StreamingBracketStripper()
+        )
 
         async with self._http.stream("POST", "/api/chat", json=payload) as resp:
             resp.raise_for_status()
@@ -424,16 +489,24 @@ class OllamaClient:
 
                 full_text += token
 
-                # Stream tokens immediately, stripping any emotion tags
+                # Stream tokens, stripping [emotion] and [Faces:...] tags across
+                # token boundaries (a single tag may arrive split as '[', 'Fac',
+                # 'es: ', 'Alice', ']').
                 clean_token = (
-                    token
-                    if self._config.skip_emotion_extraction
-                    else _EMOTION_RE.sub("", token)
+                    token if stripper is None else stripper.feed(token)
                 )
                 if clean_token and self.callbacks.on_stream_delta:
                     await _maybe_await(
                         self.callbacks.on_stream_delta(clean_token, run_id)
                     )
+
+        # Drain any held buffer (e.g. unclosed '[' at end-of-stream)
+        if stripper is not None:
+            tail = stripper.flush()
+            if tail and self.callbacks.on_stream_delta:
+                await _maybe_await(
+                    self.callbacks.on_stream_delta(tail, run_id)
+                )
 
         return full_text, tool_calls
 
@@ -516,14 +589,15 @@ def _extract_emotion(text: str) -> tuple[str, str | None]:
     """Extract emotion from text, strip all bracket tags.
 
     Scans all [tag] occurrences, uses the last known emotion,
-    and removes every bracket tag from the text.
+    and removes every bracket tag (emotion + vision context) from the text.
     """
     emotion = None
     for m in _EMOTION_RE.finditer(text):
         tag = m.group(1).lower()
         if tag in _KNOWN_EMOTIONS:
             emotion = tag
-    cleaned = _EMOTION_RE.sub("", text).strip()
+    cleaned = _VISION_TAG_RE.sub("", text)
+    cleaned = _EMOTION_RE.sub("", cleaned).strip()
     return cleaned, emotion
 
 

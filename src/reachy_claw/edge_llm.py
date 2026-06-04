@@ -252,35 +252,45 @@ class EdgeLLMClient:
             payload["prefix_cache"] = True
 
         full_text = ""
-        # Streaming-safe emotion-tag stripper. LLM tokens often split a
-        # tag across deltas (e.g. "[", "curious", "]"), so the per-delta
-        # regex .sub() misses them and the tag leaks into V2V TTS. Buffer
-        # text once we see a "[" until the matching "]" arrives, then
-        # decide: looks like an emotion tag → drop; anything else → flush
-        # as plain text.
+        # Streaming-safe tag stripper. LLM tokens often split a tag
+        # across deltas (e.g. "[", "curious", "]"), so the per-delta
+        # regex .sub() misses them and the tag leaks into V2V TTS.
+        # Buffer text once we see a "[" until the matching "]" arrives,
+        # then decide:
+        #   - [word]              → emotion tag, drop
+        #   - [Faces: ...]        → echoed vision context, drop
+        #   - anything else       → flush as plain text
+        # After a dropped tag, also eat the next single whitespace char
+        # so "[Faces: X] hi" → "hi" (no leading space).
         tag_buf = ""
+        eat_space = False
 
         def _consume(delta_in: str) -> str:
-            nonlocal tag_buf
+            nonlocal tag_buf, eat_space
             if self._config.skip_emotion_extraction:
                 return delta_in
             out_chars: list[str] = []
             for ch in delta_in:
+                if eat_space:
+                    eat_space = False
+                    if ch in (" ", "\t"):
+                        continue
                 if tag_buf:
                     tag_buf += ch
                     if ch == "]":
-                        # Emit only if it doesn't look like a tag —
-                        # tags are [word] with no spaces/punctuation.
                         inner = tag_buf[1:-1]
-                        if inner and all(
+                        is_emotion_tag = bool(inner) and all(
                             c.isalnum() or c == "_" for c in inner
-                        ):
-                            pass  # drop emotion tag
+                        )
+                        is_vision_tag = inner.lower().startswith("faces:")
+                        if is_emotion_tag or is_vision_tag:
+                            eat_space = True  # consume trailing space
                         else:
                             out_chars.append(tag_buf)
                         tag_buf = ""
-                    elif len(tag_buf) > 32:
+                    elif len(tag_buf) > 64:
                         # Runaway: not a tag, flush as plain text.
+                        # Threshold bumped to fit "[Faces: <names>]".
                         out_chars.append(tag_buf)
                         tag_buf = ""
                 elif ch == "[":

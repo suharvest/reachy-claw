@@ -1161,6 +1161,33 @@ class ConversationPlugin(Plugin):
         async def status() -> dict:
             return await asyncio.to_thread(self._cmd_status, {})
 
+    # ── REST dispatch ────────────────────────────────────────────────
+
+    def _execute_robot_command(self, action: str, params: dict) -> dict:
+        """Dispatch a robot command to the matching _cmd_* handler.
+
+        Used by the dashboard's POST /api/ai/commands endpoint. Mirrors the
+        legacy ConversationPlugin dispatcher, but only exposes the handlers
+        this SLV plugin actually implements.
+        """
+        handlers = {
+            "move_head": self._cmd_move_head,
+            "move_antennas": self._cmd_move_antennas,
+            "play_emotion": self._cmd_play_emotion,
+            "dance": self._cmd_dance,
+            "capture_image": self._cmd_capture_image,
+            "set_volume": self._cmd_set_volume,
+            "status": self._cmd_status,
+        }
+        handler = handlers.get(action)
+        if not handler:
+            return {"status": "error", "message": f"Unknown action: {action}"}
+        try:
+            return handler(params)
+        except Exception as e:
+            logger.error(f"Robot command '{action}' failed: {e}")
+            return {"status": "error", "message": str(e)}
+
     # ── _cmd_* handlers (ported from legacy plugin; use app.reachy) ──
 
     def _cmd_move_head(self, params: dict) -> dict:
