@@ -26,6 +26,7 @@ import logging
 import re
 import time
 import uuid
+from difflib import SequenceMatcher
 from typing import Any, AsyncIterator, Coroutine
 
 import numpy as np
@@ -184,6 +185,7 @@ class ConversationPlugin(Plugin):
         self._state = ConvState.IDLE
         self._speaking_since_ts: float = 0.0
         self._last_tts_done_ts: float = 0.0
+        self._last_tts_sentence: str = ""
         self._post_tts_echo_ignore_s: float = float(
             getattr(config, "post_tts_echo_ignore_s", 2.0)
         )
@@ -237,6 +239,21 @@ class ConversationPlugin(Plugin):
         if asr_lang and asr_lang == tts_lang:
             return _CONVERSATION_LANGUAGE_PROMPTS[asr_lang]
         return ""
+
+    @staticmethod
+    def _normalize_echo_text(text: str) -> str:
+        return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", text.lower())).strip()
+
+    def _looks_like_recent_tts_echo(self, text: str) -> bool:
+        heard = self._normalize_echo_text(text)
+        spoken = self._normalize_echo_text(self._last_tts_sentence)
+        if not heard or not spoken:
+            return False
+        if heard == spoken:
+            return True
+        if len(heard) < 4 or len(spoken) < 4:
+            return False
+        return SequenceMatcher(None, heard, spoken).ratio() >= 0.82
 
     async def set_conversation_language(self, language: str) -> None:
         lang = self._normalize_conversation_language(language)
@@ -737,6 +754,7 @@ class ConversationPlugin(Plugin):
             if (
                 self._last_tts_done_ts > 0
                 and now - self._last_tts_done_ts < self._post_tts_echo_ignore_s
+                and self._looks_like_recent_tts_echo(text)
             ):
                 logger.info(
                     "asr_final ignored during post-TTS echo guard: %r", text
@@ -769,6 +787,7 @@ class ConversationPlugin(Plugin):
         if isinstance(ev, TTSStarted):
             self._set_state(ConvState.SPEAKING)
             self._speaking_since_ts = time.monotonic()
+            self._last_tts_sentence = ev.sentence or ""
             self.app.events.emit("tts_started", {"sentence": ev.sentence})
             return
 

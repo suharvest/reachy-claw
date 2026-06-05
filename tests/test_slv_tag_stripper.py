@@ -380,11 +380,12 @@ class TestSlvInteractionWindow:
         assert slv_plugin._state == conversation_plugin_slv.ConvState.SPEAKING
 
     @pytest.mark.asyncio
-    async def test_asr_final_ignored_during_post_tts_echo_guard(self, slv_plugin):
+    async def test_matching_asr_final_ignored_during_post_tts_echo_guard(self, slv_plugin):
         finals: list[dict] = []
         slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
         slv_plugin._state = conversation_plugin_slv.ConvState.TRANSCRIBING
         slv_plugin._last_tts_done_ts = time.monotonic()
+        slv_plugin._last_tts_sentence = "Exactly."
         slv_plugin._running = True
 
         await slv_plugin._dispatch_slv_event(
@@ -394,6 +395,33 @@ class TestSlvInteractionWindow:
         assert finals == []
         assert slv_plugin._turn_task is None
         assert slv_plugin._state == conversation_plugin_slv.ConvState.LISTENING
+
+    @pytest.mark.asyncio
+    async def test_different_asr_final_after_tts_is_not_echo_guarded(self, slv_plugin, monkeypatch):
+        finals: list[dict] = []
+        slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
+        slv_plugin._state = conversation_plugin_slv.ConvState.TRANSCRIBING
+        slv_plugin._last_tts_done_ts = time.monotonic()
+        slv_plugin._last_tts_sentence = "Hello, I'm Reachy."
+        slv_plugin._running = True
+
+        def fake_spawn(coro, *, name):
+            coro.close()
+
+            class DoneTask:
+                def done(self):
+                    return True
+
+            return DoneTask()
+
+        monkeypatch.setattr(slv_plugin, "_spawn_task", fake_spawn)
+
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("能给我介绍一下吗？", session_complete=False)
+        )
+
+        assert finals[-1]["text"] == "能给我介绍一下吗？"
+        assert slv_plugin._last_asr_final == "能给我介绍一下吗？"
 
     @pytest.mark.asyncio
     async def test_asr_final_opens_motion_interaction_window(self, slv_plugin, monkeypatch):
