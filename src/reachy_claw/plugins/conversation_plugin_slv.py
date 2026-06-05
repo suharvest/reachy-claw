@@ -195,6 +195,8 @@ class ConversationPlugin(Plugin):
         self._pending_tasks: set[asyncio.Task] = set()
         self._last_asr_final: str = ""
         self._last_asr_final_ts: float = 0.0
+        self._last_asr_partial: str = ""
+        self._last_asr_partial_ts: float = 0.0
         self._paused = False
         # Serialise text-injected turns (dashboard send_message) against each
         # other so two rapid injections don't fire overlapping LLM streams.
@@ -259,6 +261,21 @@ class ConversationPlugin(Plugin):
                 prompt,
                 flags=re.IGNORECASE,
             )
+            prompt = re.sub(
+                r'Example: "Welcome! Glad you stopped by\. \[happy\]"',
+                'Example: "欢迎，很高兴见到你。[happy]"',
+                prompt,
+                flags=re.IGNORECASE,
+            )
+            prompt = re.sub(
+                r'Good examples:\n(?:".*"\n?)+',
+                'Good examples:\n'
+                '"欢迎，这里展示边缘 AI 方案。[happy]"\n'
+                '"可以试试视觉或机械臂演示。[curious]"\n'
+                '"实时数据请看屏幕。[thinking]"\n',
+                prompt,
+                flags=re.IGNORECASE,
+            )
         elif lang == "en":
             prompt = re.sub(
                 r"Always reply in Chinese\.",
@@ -288,6 +305,23 @@ class ConversationPlugin(Plugin):
         if len(heard) < 4 or len(spoken) < 4:
             return False
         return SequenceMatcher(None, heard, spoken).ratio() >= 0.82
+
+    @staticmethod
+    def _compact_asr_text(text: str) -> str:
+        return re.sub(r"\s+", "", re.sub(r"[^\w\s]", "", text.lower()))
+
+    def _is_meaningful_asr_text(self, text: str) -> bool:
+        compact = self._compact_asr_text(text)
+        if not compact:
+            return False
+        filler_chars = set("嗯啊呃额哦噢唔唉哎")
+        if all(ch in filler_chars for ch in compact):
+            return False
+        has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in compact)
+        if has_cjk:
+            return len(compact) >= 2
+        alpha_count = sum(ch.isalpha() for ch in compact)
+        return alpha_count >= 2
 
     async def set_conversation_language(self, language: str) -> None:
         lang = self._normalize_conversation_language(language)
@@ -762,6 +796,8 @@ class ConversationPlugin(Plugin):
         if isinstance(ev, ASRPartial):
             text = (ev.text or "").strip()
             if text:
+                self._last_asr_partial = text
+                self._last_asr_partial_ts = time.monotonic()
                 self.app.events.emit(
                     "asr_partial", {"text": ev.text, "is_stable": ev.is_stable}
                 )
@@ -795,16 +831,33 @@ class ConversationPlugin(Plugin):
                 )
                 if self._state == ConvState.TRANSCRIBING:
                     self._set_state(ConvState.LISTENING)
+                self._last_asr_partial = ""
                 return
             if not text:
-                self.app.events.emit("asr_final", {"text": ""})
+                if (
+                    self._last_asr_partial
+                    and now - self._last_asr_partial_ts < 2.5
+                    and self._is_meaningful_asr_text(self._last_asr_partial)
+                ):
+                    text = self._last_asr_partial
+                    logger.info("asr_final empty; using recent partial: %r", text)
+                else:
+                    self.app.events.emit("asr_final", {"text": ""})
+                    if self._state == ConvState.TRANSCRIBING:
+                        self._set_state(ConvState.LISTENING)
+                    self._last_asr_partial = ""
+                    return
+            if not self._is_meaningful_asr_text(text):
+                logger.info("asr_final ignored as short filler/noise: %r", text)
                 if self._state == ConvState.TRANSCRIBING:
                     self._set_state(ConvState.LISTENING)
+                self._last_asr_partial = ""
                 return
             # Drop a fresh utterance while a turn is already in flight to
             # avoid overlapping LLM streams (option A from legacy).
             if self._turn_task is not None and not self._turn_task.done():
                 logger.debug("asr_final dropped: turn already in flight: %r", text)
+                self._last_asr_partial = ""
                 return
             if self._state in (ConvState.IDLE, ConvState.LISTENING):
                 self._set_state(ConvState.TRANSCRIBING)
@@ -813,6 +866,7 @@ class ConversationPlugin(Plugin):
             self._monologue_last_ts = time.monotonic()
             self._open_motion_interaction_window()
             self.app.events.emit("asr_final", {"text": text})
+            self._last_asr_partial = ""
             self._turn_task = self._spawn_task(
                 self._drive_turn(text), name="slv-turn"
             )

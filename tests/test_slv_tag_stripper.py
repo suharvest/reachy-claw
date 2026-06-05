@@ -237,14 +237,17 @@ class TestSlvModeSwitching:
         slv_plugin.app.config.v2v_tts_language = "zh"
         slv_plugin.app.config.ollama_system_prompt = (
             "Always reply in English. No emoji.\n"
-            "Use 4 to 10 English words before the tag."
+            "Use 4 to 10 English words before the tag.\n"
+            'Good examples:\n"Welcome, this vehicle brings edge AI to the field. [happy]"\n'
         )
 
         prompt = slv_plugin._build_system_prompt()
 
         assert "Always reply in English." not in prompt
         assert "English words" not in prompt
+        assert "Welcome, this vehicle" not in prompt
         assert "Always reply in Chinese." in prompt
+        assert "欢迎，这里展示边缘 AI 方案。[happy]" in prompt
         assert "Reply only in Chinese." in prompt
 
     def test_conversation_prompt_forces_english_when_configured(self, slv_plugin):
@@ -377,6 +380,49 @@ class TestSlvInteractionWindow:
         )
 
         assert finals[-1]["text"] == ""
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.LISTENING
+
+    @pytest.mark.asyncio
+    async def test_empty_asr_final_uses_recent_meaningful_partial(self, slv_plugin, monkeypatch):
+        finals: list[dict] = []
+        slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
+        slv_plugin._set_state(conversation_plugin_slv.ConvState.LISTENING)
+        slv_plugin._running = True
+
+        def fake_spawn(coro, *, name):
+            coro.close()
+
+            class DoneTask:
+                def done(self):
+                    return True
+
+            return DoneTask()
+
+        monkeypatch.setattr(slv_plugin, "_spawn_task", fake_spawn)
+
+        await slv_plugin._dispatch_slv_event(
+            conversation_plugin_slv.ASRPartial("能给我介绍一下吗？", is_stable=False)
+        )
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("", session_complete=False)
+        )
+
+        assert finals[-1]["text"] == "能给我介绍一下吗？"
+        assert slv_plugin._last_asr_final == "能给我介绍一下吗？"
+
+    @pytest.mark.asyncio
+    async def test_short_filler_asr_final_is_not_sent_to_llm(self, slv_plugin):
+        finals: list[dict] = []
+        slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
+        slv_plugin._state = conversation_plugin_slv.ConvState.TRANSCRIBING
+        slv_plugin._running = True
+
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("嗯。", session_complete=False)
+        )
+
+        assert finals == []
+        assert slv_plugin._turn_task is None
         assert slv_plugin._state == conversation_plugin_slv.ConvState.LISTENING
 
     @pytest.mark.asyncio
