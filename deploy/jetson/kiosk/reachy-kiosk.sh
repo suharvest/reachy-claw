@@ -47,19 +47,21 @@ for path in (base / "Local State", base / "Default" / "Preferences"):
 PY
 }
 
-# Detect browser
+# Detect browser. Prefer Flatpak Chromium on Jetson because chromium-browser is
+# often a snap shim that cannot launch from this kiosk session.
 BROWSER=""
+if command -v flatpak > /dev/null 2>&1; then
+    if flatpak info org.chromium.Chromium > /dev/null 2>&1; then
+        BROWSER="flatpak-chromium"
+    fi
+fi
 for cmd in chromium-browser chromium google-chrome firefox; do
+    [ -z "$BROWSER" ] || break
     if command -v "$cmd" > /dev/null 2>&1; then
         BROWSER="$cmd"
         break
     fi
 done
-if [ -z "$BROWSER" ] && command -v flatpak > /dev/null 2>&1; then
-    if flatpak info org.chromium.Chromium > /dev/null 2>&1; then
-        BROWSER="flatpak-chromium"
-    fi
-fi
 
 if [ -z "$BROWSER" ]; then
     echo "ERROR: No browser found. Install chromium: sudo apt install chromium-browser"
