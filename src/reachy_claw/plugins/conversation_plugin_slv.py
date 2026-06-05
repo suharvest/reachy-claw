@@ -458,6 +458,8 @@ class ConversationPlugin(Plugin):
             if self._paused:
                 continue
             if isinstance(chunk, np.ndarray):
+                if chunk.ndim > 1:
+                    chunk = chunk.mean(axis=1)
                 if chunk.dtype != np.int16:
                     boosted = np.clip(chunk * 4.0, -1.0, 1.0)
                     pcm = np.clip(

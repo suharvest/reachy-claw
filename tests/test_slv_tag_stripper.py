@@ -207,6 +207,33 @@ class TestSlvModeSwitching:
 
 class TestSlvInteractionWindow:
     @pytest.mark.asyncio
+    async def test_mic_chunks_downmixes_stereo_to_mono_pcm16(self, slv_plugin):
+        import numpy as np
+
+        class FakeAudio:
+            def __init__(self):
+                self.calls = 0
+
+            async def read_chunk(self, frames):
+                self.calls += 1
+                if self.calls == 1:
+                    left = np.ones(1024, dtype=np.float32) * 0.25
+                    right = np.ones(1024, dtype=np.float32) * -0.25
+                    return np.stack([left, right], axis=1)
+                slv_plugin._running = False
+                return None
+
+        slv_plugin._running = True
+        slv_plugin._audio = FakeAudio()
+
+        chunk = await anext(slv_plugin._mic_chunks())
+        pcm = np.frombuffer(chunk, dtype=np.int16)
+
+        assert len(chunk) == 1024 * 2
+        assert pcm.shape == (1024,)
+        assert np.max(np.abs(pcm)) == 0
+
+    @pytest.mark.asyncio
     async def test_tts_started_and_done_updates_shared_speaking_flag(self, slv_plugin):
         assert slv_plugin.app.is_speaking is False
 
