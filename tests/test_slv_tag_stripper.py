@@ -232,6 +232,21 @@ class TestSlvModeSwitching:
         assert "Reply only in Chinese." in prompt
         assert "Do not switch languages" in prompt
 
+    def test_chinese_language_rewrites_saved_english_prompt_constraint(self, slv_plugin):
+        slv_plugin.app.config.v2v_asr_language = "zh"
+        slv_plugin.app.config.v2v_tts_language = "zh"
+        slv_plugin.app.config.ollama_system_prompt = (
+            "Always reply in English. No emoji.\n"
+            "Use 4 to 10 English words before the tag."
+        )
+
+        prompt = slv_plugin._build_system_prompt()
+
+        assert "Always reply in English." not in prompt
+        assert "English words" not in prompt
+        assert "Always reply in Chinese." in prompt
+        assert "Reply only in Chinese." in prompt
+
     def test_conversation_prompt_forces_english_when_configured(self, slv_plugin):
         slv_plugin.app.config.v2v_asr_language = "en"
         slv_plugin.app.config.v2v_tts_language = "en"

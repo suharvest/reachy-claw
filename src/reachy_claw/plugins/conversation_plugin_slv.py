@@ -229,6 +229,12 @@ class ConversationPlugin(Plugin):
         return lang if lang in _CONVERSATION_LANGUAGE_PROMPTS else None
 
     def _conversation_language_instruction(self) -> str:
+        lang = self._conversation_language_code()
+        if lang:
+            return _CONVERSATION_LANGUAGE_PROMPTS[lang]
+        return ""
+
+    def _conversation_language_code(self) -> str | None:
         config = self.app.config
         asr_lang = self._normalize_conversation_language(
             getattr(config, "v2v_asr_language", "auto")
@@ -236,9 +242,37 @@ class ConversationPlugin(Plugin):
         tts_lang = self._normalize_conversation_language(
             getattr(config, "v2v_tts_language", "auto")
         )
-        if asr_lang and asr_lang == tts_lang:
-            return _CONVERSATION_LANGUAGE_PROMPTS[asr_lang]
-        return ""
+        return asr_lang if asr_lang and asr_lang == tts_lang else None
+
+    def _apply_conversation_language_to_prompt(self, prompt: str) -> str:
+        lang = self._conversation_language_code()
+        if lang == "zh":
+            prompt = re.sub(
+                r"Always reply in English\.",
+                "Always reply in Chinese.",
+                prompt,
+                flags=re.IGNORECASE,
+            )
+            prompt = re.sub(
+                r"Use 4 to 10 English words before the tag\.",
+                "Use one short Chinese sentence before the tag.",
+                prompt,
+                flags=re.IGNORECASE,
+            )
+        elif lang == "en":
+            prompt = re.sub(
+                r"Always reply in Chinese\.",
+                "Always reply in English.",
+                prompt,
+                flags=re.IGNORECASE,
+            )
+            prompt = re.sub(
+                r"Use one short Chinese sentence before the tag\.",
+                "Use 4 to 10 English words before the tag.",
+                prompt,
+                flags=re.IGNORECASE,
+            )
+        return prompt
 
     @staticmethod
     def _normalize_echo_text(text: str) -> str:
@@ -1085,7 +1119,9 @@ class ConversationPlugin(Plugin):
             )
             return "\n".join([base, "/no_think"])
 
-        base = getattr(config, "ollama_system_prompt", "") or DEFAULT_SYSTEM_PROMPT
+        base = self._apply_conversation_language_to_prompt(
+            getattr(config, "ollama_system_prompt", "") or DEFAULT_SYSTEM_PROMPT
+        )
         lang_instruction = self._conversation_language_instruction()
         vision = self._get_vision_context()
         parts = [base]
@@ -1211,7 +1247,9 @@ class ConversationPlugin(Plugin):
     async def _run_monologue(self) -> None:
         assert self._slv is not None and self._llm is not None
         config = self.app.config
-        base = getattr(config, "ollama_monologue_prompt", "") or MONOLOGUE_SYSTEM_PROMPT
+        base = self._apply_conversation_language_to_prompt(
+            getattr(config, "ollama_monologue_prompt", "") or MONOLOGUE_SYSTEM_PROMPT
+        )
         vision = self._get_vision_context()
         parts = [base]
         lang_instruction = self._conversation_language_instruction()
