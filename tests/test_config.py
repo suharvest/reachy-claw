@@ -6,6 +6,29 @@ from __future__ import annotations
 from reachy_claw.config import Config, load_config, save_runtime_overrides
 
 
+def test_slv_deploy_restart_button_covers_voice_and_llm_services():
+    import yaml
+    from pathlib import Path
+
+    cfg_file = (
+        Path(__file__).parents[1]
+        / "deploy"
+        / "jetson"
+        / "reachy"
+        / "reachy-claw.jetson.slv.yaml"
+    )
+    data = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    restart_containers = data["dashboard"]["restart_containers"]
+
+    assert restart_containers == [
+        "vision-trt:true",
+        "edge-llm-chat-service:true",
+        "deploy-speech-1:false",
+        "reachy-daemon:false",
+        "reachy-claw:false",
+    ]
+
+
 def test_config_loads_tokens_from_environment(monkeypatch):
     monkeypatch.setenv("OPENCLAW_TOKEN", "gateway-token")
     monkeypatch.setenv("OPENCLAW_OPENAI_TOKEN", "openai-token")

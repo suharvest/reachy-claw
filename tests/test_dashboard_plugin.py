@@ -102,6 +102,21 @@ def test_dashboard_exposes_conversation_language_select():
     assert '"panelLanguage.title"' in i18n
 
 
+def test_dashboard_restart_copy_targets_robot_services():
+    i18n = (
+        Path(__file__).parents[1]
+        / "src"
+        / "reachy_claw"
+        / "plugins"
+        / "dashboard_static"
+        / "i18n.js"
+    ).read_text(encoding="utf-8")
+
+    assert '"services.restartAll": "Restart Robot Services"' in i18n
+    assert '"services.restartAll": "重启机器人服务"' in i18n
+    assert "Restarting {container}" in i18n
+
+
 class FakeConversationPlugin:
     name = "conversation"
 

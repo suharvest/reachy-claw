@@ -149,7 +149,7 @@
       "rest.forcedAwake": "Forced awake",
       "rest.following": "Following schedule",
       "services.title": "Services",
-      "services.restartAll": "Restart All Services",
+      "services.restartAll": "Restart Robot Services",
 
       // ── Faces tab ──
       "faces.registered": "Registered Faces",
@@ -311,12 +311,12 @@
       // ── Misc / restart ──
       "common.notConnected": "Not connected",
       "common.plusOne": "+1",
-      "restart.confirm": "Restart all services? The dashboard will briefly disconnect.",
+      "restart.confirm": "Restart robot services? The dashboard will briefly disconnect.",
       "restart.sending": "Sending restart command...",
       "restart.restarting": "Restarting services...",
       "restart.restartingOne": "Restarting {container}...",
-      "restart.done": "All services restarted.",
-      "restart.reconnecting": "All services restarted. Reconnecting...",
+      "restart.done": "Robot services restarted.",
+      "restart.reconnecting": "Robot services restarted. Reconnecting...",
       "restart.error": "Error: {error}",
       "restart.failed": "Restart failed",
       "common.unknown": "unknown",
@@ -468,7 +468,7 @@
       "rest.forcedAwake": "已强制唤醒",
       "rest.following": "已跟随计划",
       "services.title": "服务",
-      "services.restartAll": "重启所有服务",
+      "services.restartAll": "重启机器人服务",
 
       // ── Faces tab ──
       "faces.registered": "已注册人脸",
@@ -630,12 +630,12 @@
       // ── Misc / restart ──
       "common.notConnected": "未连接",
       "common.plusOne": "+1",
-      "restart.confirm": "重启所有服务？面板将短暂断开连接。",
+      "restart.confirm": "重启机器人服务？面板将短暂断开连接。",
       "restart.sending": "正在发送重启指令…",
       "restart.restarting": "正在重启服务…",
       "restart.restartingOne": "正在重启 {container}…",
-      "restart.done": "所有服务已重启。",
-      "restart.reconnecting": "所有服务已重启。正在重新连接…",
+      "restart.done": "机器人服务已重启。",
+      "restart.reconnecting": "机器人服务已重启。正在重新连接…",
       "restart.error": "错误：{error}",
       "restart.failed": "重启失败",
       "common.unknown": "未知",

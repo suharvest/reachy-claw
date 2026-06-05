@@ -97,6 +97,16 @@ vision:
 dashboard:
   enabled: true
   port: 8640
+  # Containers to restart from the Settings restart button.
+  # Order matters: vision-trt first (camera lock), dependency services
+  # before reachy-claw, and reachy-claw last so the dashboard comes back
+  # after the stack is ready.
+  restart_containers:
+    - "vision-trt:true"
+    - "edge-llm-chat-service:true"
+    - "deploy-speech-1:false"
+    - "reachy-daemon:false"
+    - "reachy-claw:false"
 
 # ── Autonomous plugins ───────────────────────────────────────────────
 plugins:
