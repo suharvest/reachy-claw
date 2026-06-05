@@ -53,16 +53,11 @@ v2v:
   url: ws://localhost:8621/v2v/stream
   asr_language: auto
   tts_language: zh
-  # Server VAD OFF — the CLIENT drives turn detection. The SLV plugin runs a
-  # local VAD (silero, energy fallback) over the mic uplink and:
-  #   * forwards a ~preroll_ms ring captured BEFORE speech onset (so the
-  #     first word is not swallowed),
-  #   * sends asr_eos after client_vad_silence_ms of trailing silence so the
-  #     engine finalizes the clean utterance,
-  #   * fires barge-in on local speech onset during TTS (no dependence on the
-  #     engine emitting ASR partials while speaking).
-  vad: none
-  vad_silence_ms: 600        # inert when vad: none (server VAD disabled)
+  # Server VAD ON — the speech service drives turn detection. This is more
+  # robust in the exhibition setup where mic/speaker are close together and
+  # client-side VAD can generate short empty ASR segments from room noise.
+  vad: silero
+  vad_silence_ms: 600        # server-side trailing silence
   client_vad_preroll_ms: 300 # audio retained ahead of speech onset
   client_vad_silence_ms: 400 # trailing silence → client asr_eos
   # client_vad_threshold: 0.5 # silero score; omit to use backend default

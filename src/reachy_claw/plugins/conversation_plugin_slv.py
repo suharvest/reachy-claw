@@ -265,6 +265,7 @@ class ConversationPlugin(Plugin):
                 sample_rate=config.sample_rate,
             )
         await self._audio.start_continuous()
+        self._set_state(ConvState.LISTENING)
 
         self.app.events.subscribe("monologue_trigger", self._on_monologue_trigger)
 
@@ -495,6 +496,41 @@ class ConversationPlugin(Plugin):
 
         config = self.app.config
         sample_rate = int(getattr(config, "sample_rate", 16000) or 16000)
+        server_vad = getattr(config, "v2v_vad", "none") != "none"
+
+        if server_vad:
+            vad_name = getattr(config, "v2v_vad", "silero")
+            logger.info(
+                "SLV audio uplink loop started (server VAD=%s, pass-through)",
+                vad_name,
+            )
+            chunks_sent = 0
+            bytes_sent = 0
+            try:
+                async for payload in self._mic_chunks():
+                    if not self._running:
+                        break
+                    try:
+                        await self._slv.send_audio(payload)
+                        chunks_sent += 1
+                        bytes_sent += len(payload)
+                        if chunks_sent % 100 == 0:
+                            logger.info(
+                                "SLV server-VAD uplink: chunks=%d bytes=%d",
+                                chunks_sent,
+                                bytes_sent,
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("SLV send_audio failed: %s", e)
+                        await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("SLV server-VAD audio uplink loop crashed")
+            finally:
+                logger.info("SLV audio uplink loop stopped")
+            return
+
         chunk_ms = int(
             round((1024 / float(sample_rate)) * 1000.0)
         )  # AudioCapture reads 1024-frame chunks
@@ -519,6 +555,9 @@ class ConversationPlugin(Plugin):
             getattr(vad, "name", "?"), chunk_ms, preroll_ms, silence_ms,
         )
 
+        segment_idx = 0
+        segment_bytes = 0
+        segment_started_at = 0.0
         try:
             async for event, payload in vad_gated(
                 self._mic_chunks(),
@@ -530,16 +569,30 @@ class ConversationPlugin(Plugin):
                 if not self._running:
                     break
                 if event == "speech_start":
+                    segment_idx += 1
+                    segment_bytes = 0
+                    segment_started_at = time.monotonic()
+                    logger.info(
+                        "SLV client-VAD speech_start #%d", segment_idx
+                    )
                     # Barge-in on local speech onset while speaking — does
                     # NOT depend on the engine emitting ASR partials.
                     await self._maybe_barge_in_on_speech_start()
                 elif event == "audio" and payload is not None:
                     try:
                         await self._slv.send_audio(payload)
+                        segment_bytes += len(payload)
                     except Exception as e:  # noqa: BLE001
                         logger.warning("SLV send_audio failed: %s", e)
                         await asyncio.sleep(0.05)
                 elif event == "speech_end":
+                    duration = max(0.0, time.monotonic() - segment_started_at)
+                    logger.info(
+                        "SLV client-VAD speech_end #%d bytes=%d duration=%.2fs",
+                        segment_idx,
+                        segment_bytes,
+                        duration,
+                    )
                     try:
                         await self._slv.asr_eos()
                     except Exception as e:  # noqa: BLE001
@@ -617,7 +670,11 @@ class ConversationPlugin(Plugin):
                 )
                 # BARGE-IN: an ASRPartial with real text during SPEAKING.
                 await self._maybe_barge_in(text)
-                if self._state == ConvState.IDLE:
+                if self._state in (
+                    ConvState.IDLE,
+                    ConvState.LISTENING,
+                    ConvState.BARGED_IN,
+                ):
                     self._set_state(ConvState.TRANSCRIBING)
             return
 
@@ -629,12 +686,16 @@ class ConversationPlugin(Plugin):
             text = (ev.text or "").strip()
             if not text:
                 self.app.events.emit("asr_final", {"text": ""})
+                if self._state == ConvState.TRANSCRIBING:
+                    self._set_state(ConvState.LISTENING)
                 return
             # Drop a fresh utterance while a turn is already in flight to
             # avoid overlapping LLM streams (option A from legacy).
             if self._turn_task is not None and not self._turn_task.done():
                 logger.debug("asr_final dropped: turn already in flight: %r", text)
                 return
+            if self._state in (ConvState.IDLE, ConvState.LISTENING):
+                self._set_state(ConvState.TRANSCRIBING)
             self._last_asr_final = text
             self._last_asr_final_ts = time.monotonic()
             self._monologue_last_ts = time.monotonic()
@@ -661,7 +722,7 @@ class ConversationPlugin(Plugin):
             # LISTENING / BARGED_IN.
             if self._state == ConvState.SPEAKING:
                 self._center_and_lock_motion()
-                self._set_state(ConvState.IDLE)
+                self._set_state(ConvState.LISTENING)
             return
 
         if isinstance(ev, SLVError):

@@ -24,12 +24,20 @@ class FakeSLV:
 
     def __init__(self):
         self.text_chunks: list[str] = []
+        self.audio_chunks: list[bytes] = []
         self.flushed = False
         self.aborted = False
+        self.asr_eos_count = 0
 
     async def send_text(self, text: str):
         if text:
             self.text_chunks.append(text)
+
+    async def send_audio(self, pcm: bytes):
+        self.audio_chunks.append(pcm)
+
+    async def asr_eos(self):
+        self.asr_eos_count += 1
 
     async def flush_tts(self):
         self.flushed = True
@@ -207,6 +215,30 @@ class TestSlvModeSwitching:
 
 class TestSlvInteractionWindow:
     @pytest.mark.asyncio
+    async def test_server_vad_mode_passes_mic_audio_through(self, slv_plugin):
+        import numpy as np
+
+        class FakeAudio:
+            def __init__(self):
+                self.calls = 0
+
+            async def read_chunk(self, frames):
+                self.calls += 1
+                if self.calls <= 2:
+                    return np.ones(1024, dtype=np.float32) * 0.01
+                slv_plugin._running = False
+                return None
+
+        slv_plugin.app.config.v2v_vad = "silero"
+        slv_plugin._running = True
+        slv_plugin._audio = FakeAudio()
+
+        await slv_plugin._v2v_audio_uplink_loop()
+
+        assert len(slv_plugin._slv.audio_chunks) == 2
+        assert slv_plugin._slv.asr_eos_count == 0
+
+    @pytest.mark.asyncio
     async def test_mic_chunks_downmixes_stereo_to_mono_pcm16(self, slv_plugin):
         import numpy as np
 
@@ -246,6 +278,41 @@ class TestSlvInteractionWindow:
         await slv_plugin._dispatch_slv_event(conversation_plugin_slv.TTSDone())
 
         assert slv_plugin.app.is_speaking is False
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.LISTENING
+
+    @pytest.mark.asyncio
+    async def test_asr_partial_moves_listening_to_transcribing(self, slv_plugin):
+        states: list[str] = []
+        partials: list[dict] = []
+        slv_plugin.app.events.subscribe(
+            "state_change", lambda data: states.append(data["state"])
+        )
+        slv_plugin.app.events.subscribe(
+            "asr_partial", lambda data: partials.append(data)
+        )
+        slv_plugin._set_state(conversation_plugin_slv.ConvState.LISTENING)
+
+        await slv_plugin._dispatch_slv_event(
+            conversation_plugin_slv.ASRPartial("hello", is_stable=False)
+        )
+
+        assert partials[-1]["text"] == "hello"
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.TRANSCRIBING
+        assert states[-1] == "transcribing"
+
+    @pytest.mark.asyncio
+    async def test_empty_asr_final_returns_transcribing_to_listening(self, slv_plugin):
+        finals: list[dict] = []
+        slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
+        slv_plugin._state = conversation_plugin_slv.ConvState.TRANSCRIBING
+        slv_plugin._running = True
+
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("", session_complete=False)
+        )
+
+        assert finals[-1]["text"] == ""
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.LISTENING
 
     @pytest.mark.asyncio
     async def test_asr_final_opens_motion_interaction_window(self, slv_plugin, monkeypatch):
@@ -292,7 +359,7 @@ class TestSlvInteractionWindow:
         await slv_plugin._dispatch_slv_event(conversation_plugin_slv.TTSDone())
 
         assert motion.locked == [None]
-        assert slv_plugin._state == conversation_plugin_slv.ConvState.IDLE
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.LISTENING
 
 
 class TestSlvAudioRouting:
