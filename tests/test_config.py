@@ -29,6 +29,25 @@ def test_slv_deploy_restart_button_covers_voice_and_llm_services():
     ]
 
 
+def test_slv_deploy_uses_client_vad_preroll_for_wakeword_free_speech():
+    import yaml
+    from pathlib import Path
+
+    cfg_file = (
+        Path(__file__).parents[1]
+        / "deploy"
+        / "jetson"
+        / "reachy"
+        / "reachy-claw.jetson.slv.yaml"
+    )
+    data = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    v2v = data["v2v"]
+
+    assert v2v["vad"] == "none"
+    assert v2v["client_vad_preroll_ms"] >= 600
+    assert v2v["client_vad_silence_ms"] >= 500
+
+
 def test_config_loads_tokens_from_environment(monkeypatch):
     monkeypatch.setenv("OPENCLAW_TOKEN", "gateway-token")
     monkeypatch.setenv("OPENCLAW_OPENAI_TOKEN", "openai-token")

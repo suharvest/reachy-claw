@@ -54,13 +54,12 @@ v2v:
   url: ws://localhost:8621/v2v/stream
   asr_language: zh
   tts_language: zh
-  # Server VAD ON — the speech service drives turn detection. This is more
-  # robust in the exhibition setup where mic/speaker are close together and
-  # client-side VAD can generate short empty ASR segments from room noise.
-  vad: silero
-  vad_silence_ms: 600        # server-side trailing silence
-  client_vad_preroll_ms: 300 # audio retained ahead of speech onset
-  client_vad_silence_ms: 400 # trailing silence → client asr_eos
+  # Server VAD OFF — reachy-claw runs client VAD with pre-roll. This avoids
+  # losing the first syllables in wake-word-free exhibition speech.
+  vad: none
+  vad_silence_ms: 600        # ignored when vad=none; kept for rollback clarity
+  client_vad_preroll_ms: 700 # audio retained ahead of speech onset
+  client_vad_silence_ms: 550 # trailing silence → client asr_eos
   # client_vad_threshold: 0.5 # silero score; omit to use backend default
   multi_utterance: true
   # voice_id: ""        # leave empty → SLV server default voice
