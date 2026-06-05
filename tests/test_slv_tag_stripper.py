@@ -207,6 +207,20 @@ class TestSlvModeSwitching:
 
 class TestSlvInteractionWindow:
     @pytest.mark.asyncio
+    async def test_tts_started_and_done_updates_shared_speaking_flag(self, slv_plugin):
+        assert slv_plugin.app.is_speaking is False
+
+        await slv_plugin._dispatch_slv_event(
+            conversation_plugin_slv.TTSStarted("hello")
+        )
+
+        assert slv_plugin.app.is_speaking is True
+
+        await slv_plugin._dispatch_slv_event(conversation_plugin_slv.TTSDone())
+
+        assert slv_plugin.app.is_speaking is False
+
+    @pytest.mark.asyncio
     async def test_asr_final_opens_motion_interaction_window(self, slv_plugin, monkeypatch):
         motion = FakeMotion()
         slv_plugin.app._plugins.append(motion)
@@ -240,6 +254,18 @@ class TestSlvInteractionWindow:
         await slv_plugin._maybe_barge_in("hello")
 
         assert motion.locked == [None]
+
+    @pytest.mark.asyncio
+    async def test_tts_done_centers_and_locks_motion_after_speaking(self, slv_plugin):
+        motion = FakeMotion()
+        slv_plugin.app._plugins.append(motion)
+        slv_plugin._state = conversation_plugin_slv.ConvState.SPEAKING
+        slv_plugin._gst_playing = False
+
+        await slv_plugin._dispatch_slv_event(conversation_plugin_slv.TTSDone())
+
+        assert motion.locked == [None]
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.IDLE
 
 
 class TestSlvAudioRouting:

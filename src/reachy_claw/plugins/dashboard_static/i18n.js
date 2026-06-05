@@ -36,7 +36,7 @@
       "mind.translation": "Translation",
       "hear.title": "What I hear",
       "asr.listening": "Listening...",
-      "emotionLabel.smile": "Smiling face",
+      "emotionLabel.smile": "Smile Wall",
 
       // ── Diary page nav ──
       "diary.older": "Older",
@@ -340,7 +340,7 @@
       "mind.translation": "翻译",
       "hear.title": "我听到的",
       "asr.listening": "聆听中…",
-      "emotionLabel.smile": "微笑",
+      "emotionLabel.smile": "微笑墙",
 
       // ── Diary page nav ──
       "diary.older": "更早",

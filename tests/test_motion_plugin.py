@@ -252,6 +252,33 @@ class TestHeadTrackingLoop:
         assert not mock_reachy.set_target_head_pose.called
 
     @pytest.mark.asyncio
+    async def test_monologue_speaking_uses_wobble_instead_of_face_tracking(
+        self, app, mock_reachy
+    ):
+        app.config.motion_head_tracking_poll_interval = 0.02
+        app.config.conversation_mode = "monologue"
+        app.is_speaking = True
+
+        plugin = MotionPlugin(app)
+        plugin._running = True
+        plugin.open_interaction_window(1.0)
+        plugin.set_speech_offsets((2.0, 1.0, 0.5))
+
+        app.head_targets.publish(
+            HeadTarget(yaw=20.0, pitch=-10.0, confidence=0.9, source="face")
+        )
+
+        with patch(_CHP, return_value=np.eye(4)):
+            task = asyncio.create_task(plugin._head_tracking_loop())
+            await asyncio.sleep(0.1)
+            plugin._running = False
+            await task
+
+        assert mock_reachy.set_target_head_pose.called
+        assert plugin._current_yaw == 0.0
+        assert plugin._current_pitch == 0.0
+
+    @pytest.mark.asyncio
     async def test_decays_to_neutral_without_data(self, app, mock_reachy):
         app.config.motion_head_tracking_poll_interval = 0.02
         plugin = MotionPlugin(app)

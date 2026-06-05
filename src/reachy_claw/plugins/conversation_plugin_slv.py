@@ -415,6 +415,7 @@ class ConversationPlugin(Plugin):
         old_state = self._state
         logger.debug("State: %s → %s", old_state.value, new_state.value)
         self._state = new_state
+        self.app.is_speaking = new_state == ConvState.SPEAKING
         self.app.events.emit("state_change", {"state": new_state.value})
         if new_state == ConvState.SPEAKING:
             self._speaking_since_ts = time.monotonic()
@@ -657,6 +658,7 @@ class ConversationPlugin(Plugin):
             # Guard: don't stomp a barge-in that already moved us to
             # LISTENING / BARGED_IN.
             if self._state == ConvState.SPEAKING:
+                self._center_and_lock_motion()
                 self._set_state(ConvState.IDLE)
             return
 

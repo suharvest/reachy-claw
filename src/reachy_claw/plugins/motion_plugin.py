@@ -240,9 +240,9 @@ class MotionPlugin(Plugin):
                 await asyncio.sleep(poll_interval)
                 continue
 
-            if self.app.is_speaking and self.app.config.conversation_mode != "monologue":
-                # During speech in conversation mode, apply wobble offsets instead of tracking
-                # In monologue mode, keep tracking the user's face while speaking
+            if self.app.is_speaking:
+                # During speech, use speech wobble only. Face tracking resumes
+                # after playback ends and the robot has returned to center.
                 self._apply_speech_wobble()
                 await asyncio.sleep(poll_interval)
                 continue
