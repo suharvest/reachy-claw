@@ -184,6 +184,26 @@ class TestSlvModeSwitching:
         assert "Chinese to English" in prompt
         assert "cute robot at an exhibition" not in prompt
 
+    def test_switch_mode_resets_session_when_mode_changes(self, slv_plugin):
+        slv_plugin._session.add_user("previous request")
+        slv_plugin._session.add_assistant("previous answer")
+        slv_plugin._session.prefix_cache_warmed = True
+
+        slv_plugin.switch_mode("interpreter")
+
+        assert slv_plugin._session.history == []
+        assert slv_plugin._session.prefix_cache_warmed is False
+
+    def test_switch_mode_keeps_session_when_mode_is_unchanged(self, slv_plugin):
+        slv_plugin.app.config.conversation_mode = "conversation"
+        slv_plugin._session.add_user("previous request")
+
+        slv_plugin.switch_mode("conversation")
+
+        assert slv_plugin._session.history == [
+            {"role": "user", "content": "previous request"}
+        ]
+
 
 class TestSlvInteractionWindow:
     @pytest.mark.asyncio
@@ -220,6 +240,85 @@ class TestSlvInteractionWindow:
         await slv_plugin._maybe_barge_in("hello")
 
         assert motion.locked == [None]
+
+
+class TestSlvAudioRouting:
+    @pytest.mark.asyncio
+    async def test_v2v_pcm_prefers_duplex_audio_when_sdk_audio_exists(
+        self, slv_plugin, mock_reachy
+    ):
+        class FakeDuplexAudio:
+            def __init__(self):
+                self.enqueued = []
+                self._duplex_stream = object()
+
+            async def enqueue_playback_async(self, samples):
+                self.enqueued.append(samples)
+
+        duplex_audio = FakeDuplexAudio()
+        mock_reachy.media.audio = object()
+        slv_plugin.app.reachy = mock_reachy
+        slv_plugin._audio = duplex_audio
+
+        pcm = b"\x00\x01" * 320
+
+        await slv_plugin._play_v2v_pcm(16000, pcm)
+
+        assert len(duplex_audio.enqueued) == 1
+        mock_reachy.media.start_playing.assert_not_called()
+        mock_reachy.media.push_audio_sample.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stop_playback_drains_duplex_route_when_sdk_audio_exists(
+        self, slv_plugin, mock_reachy
+    ):
+        class FakeDuplexAudio:
+            def __init__(self):
+                self.drained = 0
+
+            async def await_playback_drained(self):
+                self.drained += 1
+
+        duplex_audio = FakeDuplexAudio()
+        mock_reachy.media.audio = object()
+        slv_plugin.app.reachy = mock_reachy
+        slv_plugin._audio = duplex_audio
+        slv_plugin._gst_playing = True
+        slv_plugin._playback_route = "duplex"
+
+        await slv_plugin._stop_gst_playback()
+
+        assert duplex_audio.drained == 1
+        assert slv_plugin._gst_playing is False
+        assert slv_plugin._playback_route is None
+        mock_reachy.media.stop_playing.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_immediate_stop_drops_duplex_playback_without_drain(
+        self, slv_plugin
+    ):
+        class FakeDuplexAudio:
+            def __init__(self):
+                self.drained = 0
+                self.dropped = 0
+
+            async def await_playback_drained(self):
+                self.drained += 1
+
+            def drain_playback(self):
+                self.dropped += 1
+
+        duplex_audio = FakeDuplexAudio()
+        slv_plugin._audio = duplex_audio
+        slv_plugin._gst_playing = True
+        slv_plugin._playback_route = "duplex"
+
+        await slv_plugin._stop_gst_playback(immediate=True)
+
+        assert duplex_audio.dropped == 1
+        assert duplex_audio.drained == 0
+        assert slv_plugin._gst_playing is False
+        assert slv_plugin._playback_route is None
 
 
 class TestSlvMonologue:

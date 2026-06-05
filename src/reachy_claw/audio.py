@@ -97,6 +97,11 @@ class AudioCapture:
             and getattr(self.reachy.media, "audio", None) is not None
         )
 
+    @property
+    def duplex_playback_available(self) -> bool:
+        """Whether playback can share the active capture stream for AEC."""
+        return self._duplex_stream is not None
+
     async def start_continuous(self) -> None:
         """Open mic stream and keep it running for continuous read_chunk() calls."""
         self._running = True

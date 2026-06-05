@@ -1,7 +1,7 @@
 # Client-loop (SLV) production override — additive, non-destructive.
 #
-# Deploys the FINAL full ReachyClawApp image (:slv-v2) with the thin
-# conversation_plugin_slv backend + ovs_agent baked in. Motors OFF.
+# Deploys the FINAL full ReachyClawApp image (:slv-v7) with the thin
+# conversation_plugin_slv backend + ovs_agent baked in.
 #
 # Usage (NOTE: deliberately OMITS docker-compose.dev.yml so the on-device
 #   source bind-mount does NOT shadow the image's baked code):
@@ -18,7 +18,7 @@
 # clean rollback to the previous image (clientloop-test / v1.20).
 services:
   reachy-claw:
-    image: sensecraft-missionpack.seeed.cn/solution/reachy-claw:slv-v2
+    image: sensecraft-missionpack.seeed.cn/solution/reachy-claw:slv-v7
     volumes:
       # Mount the SLV device config over the baked /app/reachy-claw.yaml.
       - ./reachy-claw.jetson.slv.yaml:/app/reachy-claw.yaml:ro
@@ -30,7 +30,7 @@ services:
     environment:
       - DATA_DIR=/app/data
       - HOST_DATA_DIR=/home/recomputer/reachy-data-slv
-      - REACHY_MOTOR_ENABLED=false   # flip to true once a physical Reachy is attached
+      - REACHY_MOTOR_ENABLED=true
       - VISION_SERVICE_URL=tcp://127.0.0.1:8631
       # Explicit localhost wiring for SLV engine + edge-llm (also in config).
       - CLAWD_V2V_URL=ws://localhost:8621/v2v/stream

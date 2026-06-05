@@ -171,6 +171,8 @@ class ConversationPlugin(Plugin):
         self._audio_queue: asyncio.Queue = asyncio.Queue(maxsize=_q_max)
         self._interrupt_event = asyncio.Event()
         self._gst_playing = False
+        self._playback_route: str | None = None
+        self._last_logged_playback_route: str | None = None
 
         # State machine (thin shim — preserves the event-bridge contract).
         self._state = ConvState.IDLE
@@ -336,6 +338,9 @@ class ConversationPlugin(Plugin):
             raise ValueError(f"unknown conversation mode: {mode}")
         prev = getattr(self.app.config, "conversation_mode", "conversation")
         self.app.config.conversation_mode = mode
+        if prev != mode:
+            self._session.reset()
+            logger.info("Conversation session reset for mode switch: %s → %s", prev, mode)
         if mode == "conversation":
             self._barge_in_enabled = True
             self.app.config.barge_in_enabled = True
@@ -572,7 +577,7 @@ class ConversationPlugin(Plugin):
                     await stop()
                 except Exception:  # noqa: BLE001
                     logger.debug("audio.stop_playback failed", exc_info=True)
-        await self._stop_gst_playback()
+        await self._stop_gst_playback(immediate=True)
         if self._slv is not None:
             try:
                 await self._slv.abort()
@@ -687,7 +692,7 @@ class ConversationPlugin(Plugin):
                     await stop()
                 except Exception:  # noqa: BLE001
                     logger.debug("audio.stop_playback failed", exc_info=True)
-        await self._stop_gst_playback()
+        await self._stop_gst_playback(immediate=True)
         if self._slv is not None:
             try:
                 await self._slv.abort()
@@ -789,7 +794,7 @@ class ConversationPlugin(Plugin):
                     await self._slv.abort()
                 except Exception:  # noqa: BLE001
                     logger.debug("slv.abort on cancel failed", exc_info=True)
-                await self._stop_gst_playback()
+                await self._stop_gst_playback(immediate=True)
             self.app.events.emit("llm_end", {"full_text": "", "run_id": run_id})
             raise
         except Exception:
@@ -798,7 +803,7 @@ class ConversationPlugin(Plugin):
                 await self._slv.abort()
             except Exception:  # noqa: BLE001
                 logger.debug("slv.abort on error failed", exc_info=True)
-            await self._stop_gst_playback()
+            await self._stop_gst_playback(immediate=True)
             self.app.events.emit("llm_end", {"full_text": "", "run_id": run_id})
             return
         finally:
@@ -1164,7 +1169,21 @@ class ConversationPlugin(Plugin):
     def _strip_trailing_bare_emotion(text: str) -> str:
         return _TRAILING_BARE_EMOTION_RE.sub("", text).rstrip()
 
-    # ── audio playback (reachy GStreamer path, unchanged) ────────────
+    # ── audio playback ───────────────────────────────────────────────
+
+    def _duplex_playback_available(self) -> bool:
+        if self._audio is None:
+            return False
+        available = getattr(self._audio, "duplex_playback_available", None)
+        if available is not None:
+            return bool(available)
+        return getattr(self._audio, "_duplex_stream", None) is not None
+
+    def _log_playback_route_once(self, route: str) -> None:
+        if route == self._last_logged_playback_route:
+            return
+        self._last_logged_playback_route = route
+        logger.info("SLV V2V playback route: %s", route)
 
     async def _output_pipeline(self) -> None:
         while self._running:
@@ -1194,49 +1213,72 @@ class ConversationPlugin(Plugin):
         vol = self.app.config.audio_volume
         if vol != 1.0:
             samples = np.clip(samples * vol, -1.0, 1.0).astype(np.float32)
-        reachy = self.app.reachy
-        has_sdk_audio = bool(
-            reachy and getattr(getattr(reachy, "media", None), "audio", None)
-        )
-        if has_sdk_audio:
+        if self._duplex_playback_available():
+            self._gst_playing = True
+            self._playback_route = "duplex"
+            self._log_playback_route_once("duplex")
+            await self._audio.enqueue_playback_async(samples)
+        else:
+            reachy = self.app.reachy
+            has_sdk_audio = bool(
+                reachy and getattr(getattr(reachy, "media", None), "audio", None)
+            )
+            if not has_sdk_audio:
+                logger.warning("SLV V2V playback dropped: no duplex or SDK audio")
+                return
             if not self._gst_playing:
                 try:
                     reachy.media.start_playing()
                 except Exception:  # noqa: BLE001
                     pass
                 self._gst_playing = True
+            self._playback_route = "sdk"
+            self._log_playback_route_once("sdk")
             try:
                 reachy.media.push_audio_sample(samples)
             except Exception as e:  # noqa: BLE001
                 logger.warning("V2V push_audio_sample failed: %s", e)
-        elif self._audio is not None:
-            self._gst_playing = True
-            await self._audio.enqueue_playback_async(samples)
         if self._wobbler:
             self._wobbler.feed(samples)
 
-    async def _stop_gst_playback(self) -> None:
+    async def _stop_gst_playback(self, *, immediate: bool = False) -> None:
         if not self._gst_playing:
             return
-        reachy = self.app.reachy
-        has_sdk_audio = bool(
-            reachy and getattr(getattr(reachy, "media", None), "audio", None)
-        )
-        if has_sdk_audio:
+        route = self._playback_route
+        if route == "duplex" and self._audio is not None:
+            if immediate:
+                drain = getattr(self._audio, "drain_playback", None)
+                if callable(drain):
+                    try:
+                        drain()
+                    except Exception:  # noqa: BLE001
+                        logger.debug("drain_playback failed", exc_info=True)
+            else:
+                try:
+                    await self._audio.await_playback_drained()
+                except Exception:  # noqa: BLE001
+                    logger.debug("await_playback_drained failed", exc_info=True)
+                await asyncio.sleep(0.25)
+        elif route == "sdk":
+            reachy = self.app.reachy
+            has_sdk_audio = bool(
+                reachy and getattr(getattr(reachy, "media", None), "audio", None)
+            )
+            if not has_sdk_audio:
+                self._gst_playing = False
+                self._playback_route = None
+                return
             try:
-                silence = np.zeros(1600, dtype=np.float32)
-                for _ in range(5):
-                    reachy.media.push_audio_sample(silence)
-                await asyncio.sleep(0.4)
+                if not immediate:
+                    silence = np.zeros(1600, dtype=np.float32)
+                    for _ in range(5):
+                        reachy.media.push_audio_sample(silence)
+                    await asyncio.sleep(0.4)
                 reachy.media.stop_playing()
             except Exception:  # noqa: BLE001
                 pass
-        elif self._audio is not None:
-            try:
-                await self._audio.await_playback_drained()
-            except Exception:  # noqa: BLE001
-                logger.debug("await_playback_drained failed", exc_info=True)
         self._gst_playing = False
+        self._playback_route = None
         if self._wobbler:
             self._wobbler.reset()
 
