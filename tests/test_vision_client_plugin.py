@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -146,6 +147,24 @@ class TestVisionInteractionTrigger:
 
         assert motion.opened == [None]
 
+    def test_stable_near_face_queues_subtle_attention_not_listening(self, vision_app):
+        motion = FakeMotion()
+        vision_app._plugins.append(motion)
+        plugin = VisionClientPlugin(vision_app)
+        plugin._face_trigger_stable_s = 1.0
+        plugin._face_trigger_min_area = 0.01
+        plugin._face_trigger_cooldown_s = 10.0
+        face = {"bbox": [0.4, 0.3, 0.55, 0.5]}
+
+        plugin._maybe_trigger_face_interaction(face, now=10.0)
+        plugin._maybe_trigger_face_interaction(face, now=11.1)
+
+        expr = vision_app.emotions.get_next_expression()
+        assert expr is not None
+        assert expr.head is None
+        assert expr.antenna_anim is not None
+        assert "attention" in expr.description.lower()
+
     def test_small_or_brief_face_does_not_trigger_interaction(self, vision_app):
         motion = FakeMotion()
         vision_app._plugins.append(motion)
@@ -163,6 +182,53 @@ class TestVisionInteractionTrigger:
         )
 
         assert motion.opened == []
+
+
+class TestVisionClientTracking:
+    def test_effective_remote_face_drives_body_not_head_yaw(self, vision_app):
+        plugin = VisionClientPlugin(vision_app)
+        now = time.monotonic()
+
+        plugin._process_vision_message(
+            {
+                "faces": [
+                    {
+                        "center": [0.8, 0.0],
+                        "bbox": [0.2, 0.2, 0.6, 0.6],
+                        "emotion": "Neutral",
+                        "emotion_confidence": 0.1,
+                    }
+                ]
+            },
+            now=now,
+        )
+
+        target = vision_app.head_targets.get_fused_target()
+        assert target.source == "face"
+        assert target.body_yaw < 0.0
+        assert target.yaw == pytest.approx(0.0)
+
+    def test_small_remote_face_does_not_drive_tracking(self, vision_app):
+        plugin = VisionClientPlugin(vision_app)
+
+        plugin._process_vision_message(
+            {
+                "faces": [
+                    {
+                        "center": [0.9, -0.1],
+                        "bbox": [0.93, 0.42, 0.95, 0.44],
+                        "emotion": "Neutral",
+                        "emotion_confidence": 0.3,
+                    }
+                ]
+            },
+            now=time.monotonic(),
+        )
+
+        target = vision_app.head_targets.get_fused_target()
+        assert target.source == "none"
+        assert plugin._last_face_count == 0
+        assert plugin._last_faces_summary == []
 
 
 class TestEmotionRemap:

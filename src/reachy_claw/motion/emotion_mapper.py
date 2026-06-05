@@ -192,6 +192,15 @@ EMOTION_MAP: dict[str, list[RobotExpression]] = {
             description="Listening — attentive gentle sway",
         ),
     ],
+    "attention": [
+        RobotExpression(
+            antenna_anim=AntennaAnimation(
+                center=6, amplitude=2, frequency=0.5,
+                phase_offset=math.pi / 4, duration=1.0,
+            ),
+            description="Attention acquired — subtle antenna perk",
+        ),
+    ],
     "agreeing": [
         RobotExpression(
             head=HeadPose(yaw=0, pitch=8, roll=0, duration=0.4),

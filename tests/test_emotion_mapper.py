@@ -157,6 +157,21 @@ class TestIdleExpression:
         assert len(amplitudes) > 1
 
 
+class TestAttentionExpression:
+    def test_attention_expression_is_subtle_antenna_only(self):
+        em = EmotionMapper(intensity=1.0)
+
+        expr = em.map_emotion("attention")
+
+        assert expr is not None
+        assert expr.head is None
+        assert expr.antenna_anim is not None
+        assert 4.0 <= expr.antenna_anim.center <= 8.0
+        assert 1.0 <= expr.antenna_anim.amplitude <= 3.0
+        assert 0.3 <= expr.antenna_anim.frequency <= 0.7
+        assert 0.8 <= expr.antenna_anim.duration <= 1.4
+
+
 class TestDataclasses:
     def test_head_pose_defaults(self):
         hp = HeadPose()
