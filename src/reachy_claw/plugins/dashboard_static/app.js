@@ -177,6 +177,7 @@ function connectDashboard() {
         // Query TTS capabilities and cloned voices
         dashboardWs.send(JSON.stringify({ type: 'get_tts_capabilities' }));
         dashboardWs.send(JSON.stringify({ type: 'get_cloned_voices' }));
+        dashboardWs.send(JSON.stringify({ type: 'get_conversation_language' }));
     };
 
     dashboardWs.onmessage = (e) => {
@@ -289,6 +290,10 @@ function handleDashboardMsg(msg) {
         case 'interpreter_langs_changed':
             document.getElementById('interpreter-source').value = msg.source;
             document.getElementById('interpreter-target').value = msg.target;
+            break;
+
+        case 'conversation_language':
+            syncConversationLanguageUI(msg.language || 'zh');
             break;
 
         case 'prompts':
@@ -962,6 +967,21 @@ function initSettings() {
         interpTgt.onchange = sendLangs;
     }
 
+    const conversationLanguage = document.getElementById('conversation-language');
+    if (conversationLanguage) {
+        conversationLanguage.onchange = () => {
+            if (!dashboardWs || dashboardWs.readyState !== 1) {
+                showToast(t('common.notConnected'), true);
+                return;
+            }
+            dashboardWs.send(JSON.stringify({
+                type: 'set_conversation_language',
+                language: conversationLanguage.value,
+            }));
+            showToast(t('conversationLanguage.applying'));
+        };
+    }
+
     // LLM backend/model selection
     const llmBackend = document.getElementById('llm-backend');
     const ollamaModel = document.getElementById('ollama-model');
@@ -1202,6 +1222,12 @@ function initHistory() {
 function setHistoryUI(turns) {
     document.getElementById('history-slider').value = turns;
     document.getElementById('history-value').textContent = t('memory.turns', { n: turns });
+}
+
+function syncConversationLanguageUI(language) {
+    const el = document.getElementById('conversation-language');
+    if (!el) return;
+    el.value = language === 'en' ? 'en' : 'zh';
 }
 
 function syncModeUI() {

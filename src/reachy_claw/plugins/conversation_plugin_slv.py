@@ -87,11 +87,16 @@ _MODE_ENTRY_GESTURES = {
     "interpreter": "listening",
 }
 
+_CONVERSATION_LANGUAGE_PROMPTS = {
+    "zh": "Reply only in Chinese. Do not switch languages unless the operator changes the language setting.",
+    "en": "Reply only in English. Do not switch languages unless the operator changes the language setting.",
+}
+
 
 # Relocated from llm.py (do NOT delete llm.py — this is an additive copy so
 # the new module has no dependency on the legacy backend tree).
 MONOLOGUE_SYSTEM_PROMPT = """\
-Your name is Reachy. You are a cheerful cute robot at an exhibition, mumbling happily to yourself. Always reply in English.
+Your name is Reachy. You are a cheerful cute robot at an exhibition, mumbling happily to yourself. Use the configured exhibition language.
 Reply with ONE short sentence (max 15 words), then exactly ONE emotion tag. Nothing else.
 You love people and get excited when someone shows up. Stay upbeat and warm — find the bright side of everything.
 Talk like a real person — no "sensors", no "circuits", no robot clichés.
@@ -101,7 +106,8 @@ You MUST end with one of: [happy] [sad] [thinking] [surprised] [curious] [excite
 Examples: "Ooh are you smiling at me?? [excited]" "What a lovely day to meet new friends! [happy]" "Wait who's that?? [curious]" "harvest is here, yay! [excited]\""""
 
 DEFAULT_SYSTEM_PROMPT = """\
-You are Reachy, a cute robot at an exhibition. Always reply in English. No emoji.
+You are Reachy, a cute robot at an exhibition. No emoji.
+Use the configured exhibition language.
 Reply in ONE short sentence (max 12 words). Be warm but brief — no filler, no lists, no follow-up questions unless asked.
 Names in [Faces: ...] are people you see, not your name.
 Never repeat or mention the [Faces: ...] tag in your reply.
@@ -177,6 +183,10 @@ class ConversationPlugin(Plugin):
         # State machine (thin shim — preserves the event-bridge contract).
         self._state = ConvState.IDLE
         self._speaking_since_ts: float = 0.0
+        self._last_tts_done_ts: float = 0.0
+        self._post_tts_echo_ignore_s: float = float(
+            getattr(config, "post_tts_echo_ignore_s", 2.0)
+        )
 
         # Turn machinery.
         self._turn_task: asyncio.Task | None = None
@@ -210,6 +220,42 @@ class ConversationPlugin(Plugin):
         self._barge_in_min_speaking_ms = float(
             getattr(config, "barge_in_min_speaking_ms", 500.0)
         )
+
+    @staticmethod
+    def _normalize_conversation_language(language: str | None) -> str | None:
+        lang = (language or "").strip().lower()
+        return lang if lang in _CONVERSATION_LANGUAGE_PROMPTS else None
+
+    def _conversation_language_instruction(self) -> str:
+        config = self.app.config
+        asr_lang = self._normalize_conversation_language(
+            getattr(config, "v2v_asr_language", "auto")
+        )
+        tts_lang = self._normalize_conversation_language(
+            getattr(config, "v2v_tts_language", "auto")
+        )
+        if asr_lang and asr_lang == tts_lang:
+            return _CONVERSATION_LANGUAGE_PROMPTS[asr_lang]
+        return ""
+
+    async def set_conversation_language(self, language: str) -> None:
+        lang = self._normalize_conversation_language(language)
+        if not lang:
+            return
+        config = self.app.config
+        config.v2v_asr_language = lang
+        config.v2v_tts_language = lang
+        if self._slv is not None:
+            self._slv.config["asr_language"] = lang
+            self._slv.config["tts_language"] = lang
+            await self._cancel_turn()
+            try:
+                await self._slv.abort()
+            except Exception:  # noqa: BLE001
+                logger.debug("SLV abort before language reconnect failed", exc_info=True)
+            await self._slv.reconnect()
+        self._session.history.clear()
+        self._session.prefix_cache_warmed = False
 
     # ── lifecycle ───────────────────────────────────────────────────
 
@@ -684,6 +730,20 @@ class ConversationPlugin(Plugin):
             if ev.session_complete or ev.duplicate_of_streamed:
                 return
             text = (ev.text or "").strip()
+            now = time.monotonic()
+            if self._state == ConvState.SPEAKING:
+                logger.info("asr_final ignored during speaking: %r", text)
+                return
+            if (
+                self._last_tts_done_ts > 0
+                and now - self._last_tts_done_ts < self._post_tts_echo_ignore_s
+            ):
+                logger.info(
+                    "asr_final ignored during post-TTS echo guard: %r", text
+                )
+                if self._state == ConvState.TRANSCRIBING:
+                    self._set_state(ConvState.LISTENING)
+                return
             if not text:
                 self.app.events.emit("asr_final", {"text": ""})
                 if self._state == ConvState.TRANSCRIBING:
@@ -718,6 +778,7 @@ class ConversationPlugin(Plugin):
 
         if isinstance(ev, TTSDone):
             await self._stop_gst_playback()
+            self._last_tts_done_ts = time.monotonic()
             # Guard: don't stomp a barge-in that already moved us to
             # LISTENING / BARGED_IN.
             if self._state == ConvState.SPEAKING:
@@ -1006,8 +1067,12 @@ class ConversationPlugin(Plugin):
             return "\n".join([base, "/no_think"])
 
         base = getattr(config, "ollama_system_prompt", "") or DEFAULT_SYSTEM_PROMPT
+        lang_instruction = self._conversation_language_instruction()
         vision = self._get_vision_context()
-        parts = [base, "/no_think"]  # /no_think REQUIRED for qwen3
+        parts = [base]
+        if lang_instruction:
+            parts.append(lang_instruction)
+        parts.append("/no_think")  # /no_think REQUIRED for qwen3
         if vision:
             parts.append(f"[Faces: {vision}]")
         return "\n".join(parts)
@@ -1129,9 +1194,14 @@ class ConversationPlugin(Plugin):
         config = self.app.config
         base = getattr(config, "ollama_monologue_prompt", "") or MONOLOGUE_SYSTEM_PROMPT
         vision = self._get_vision_context()
-        system_prompt = "\n".join(
-            [base, "/no_think"] + ([f"[Faces: {vision}]"] if vision else [])
-        )
+        parts = [base]
+        lang_instruction = self._conversation_language_instruction()
+        if lang_instruction:
+            parts.append(lang_instruction)
+        parts.append("/no_think")
+        if vision:
+            parts.append(f"[Faces: {vision}]")
+        system_prompt = "\n".join(parts)
         run_id = uuid.uuid4().hex
         self._set_state(ConvState.THINKING)
         self.app.emotions.queue_emotion("thinking")

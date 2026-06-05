@@ -9,6 +9,7 @@ working). Reuses the fake-SLV harness style from
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -23,11 +24,13 @@ class FakeSLV:
     """Stub SLVClient: records every send_text chunk; no real WS."""
 
     def __init__(self):
+        self.config: dict[str, object] = {}
         self.text_chunks: list[str] = []
         self.audio_chunks: list[bytes] = []
         self.flushed = False
         self.aborted = False
         self.asr_eos_count = 0
+        self.reconnect_count = 0
 
     async def send_text(self, text: str):
         if text:
@@ -44,6 +47,9 @@ class FakeSLV:
 
     async def abort(self):
         self.aborted = True
+
+    async def reconnect(self):
+        self.reconnect_count += 1
 
 
 class FakeMotion:
@@ -212,6 +218,50 @@ class TestSlvModeSwitching:
             {"role": "user", "content": "previous request"}
         ]
 
+    def test_conversation_prompt_uses_configured_exhibition_language(self, slv_plugin):
+        prompt = slv_plugin._build_system_prompt()
+
+        assert "configured exhibition language" in prompt
+
+    def test_conversation_prompt_forces_chinese_when_configured(self, slv_plugin):
+        slv_plugin.app.config.v2v_asr_language = "zh"
+        slv_plugin.app.config.v2v_tts_language = "zh"
+
+        prompt = slv_plugin._build_system_prompt()
+
+        assert "Reply only in Chinese." in prompt
+        assert "Do not switch languages" in prompt
+
+    def test_conversation_prompt_forces_english_when_configured(self, slv_plugin):
+        slv_plugin.app.config.v2v_asr_language = "en"
+        slv_plugin.app.config.v2v_tts_language = "en"
+
+        prompt = slv_plugin._build_system_prompt()
+
+        assert "Reply only in English." in prompt
+        assert "Do not switch languages" in prompt
+
+    @pytest.mark.asyncio
+    async def test_set_conversation_language_reconnects_slv_with_matched_pair(self, slv_plugin):
+        await slv_plugin.set_conversation_language("en")
+
+        assert slv_plugin.app.config.v2v_asr_language == "en"
+        assert slv_plugin.app.config.v2v_tts_language == "en"
+        assert slv_plugin._slv.config["asr_language"] == "en"
+        assert slv_plugin._slv.config["tts_language"] == "en"
+        assert slv_plugin._slv.reconnect_count == 1
+
+    @pytest.mark.asyncio
+    async def test_set_conversation_language_rejects_auto(self, slv_plugin):
+        slv_plugin.app.config.v2v_asr_language = "zh"
+        slv_plugin.app.config.v2v_tts_language = "zh"
+
+        await slv_plugin.set_conversation_language("auto")
+
+        assert slv_plugin.app.config.v2v_asr_language == "zh"
+        assert slv_plugin.app.config.v2v_tts_language == "zh"
+        assert slv_plugin._slv.reconnect_count == 0
+
 
 class TestSlvInteractionWindow:
     @pytest.mark.asyncio
@@ -312,6 +362,37 @@ class TestSlvInteractionWindow:
         )
 
         assert finals[-1]["text"] == ""
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.LISTENING
+
+    @pytest.mark.asyncio
+    async def test_asr_final_ignored_while_speaking(self, slv_plugin):
+        finals: list[dict] = []
+        slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
+        slv_plugin._state = conversation_plugin_slv.ConvState.SPEAKING
+        slv_plugin._running = True
+
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("I'm Reachy, your robot guide.", session_complete=False)
+        )
+
+        assert finals == []
+        assert slv_plugin._turn_task is None
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.SPEAKING
+
+    @pytest.mark.asyncio
+    async def test_asr_final_ignored_during_post_tts_echo_guard(self, slv_plugin):
+        finals: list[dict] = []
+        slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
+        slv_plugin._state = conversation_plugin_slv.ConvState.TRANSCRIBING
+        slv_plugin._last_tts_done_ts = time.monotonic()
+        slv_plugin._running = True
+
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("Exactly.", session_complete=False)
+        )
+
+        assert finals == []
+        assert slv_plugin._turn_task is None
         assert slv_plugin._state == conversation_plugin_slv.ConvState.LISTENING
 
     @pytest.mark.asyncio
