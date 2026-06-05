@@ -74,6 +74,15 @@ audio:
 barge_in:
   enabled: true
 
+# ── Voice attention gate ──────────────────────────────────────────────
+# No wake-word is exposed. Stable visual attention opens a short internal
+# window where short ASR snippets may trigger; otherwise snippets must be
+# longer to avoid room noise / echo driving the conversation.
+voice:
+  attention_window_s: 12
+  unattended_min_cjk_chars: 6
+  unattended_min_alpha_chars: 5
+
 # ── Reachy daemon (separate container) ───────────────────────────────
 reachy:
   serialport: auto

@@ -48,6 +48,25 @@ def test_slv_deploy_uses_client_vad_preroll_for_wakeword_free_speech():
     assert v2v["client_vad_silence_ms"] >= 500
 
 
+def test_slv_deploy_declares_visual_attention_voice_gate():
+    import yaml
+    from pathlib import Path
+
+    cfg_file = (
+        Path(__file__).parents[1]
+        / "deploy"
+        / "jetson"
+        / "reachy"
+        / "reachy-claw.jetson.slv.yaml"
+    )
+    data = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    voice = data["voice"]
+
+    assert voice["attention_window_s"] >= 10
+    assert voice["unattended_min_cjk_chars"] >= 6
+    assert voice["unattended_min_alpha_chars"] >= 5
+
+
 def test_config_loads_tokens_from_environment(monkeypatch):
     monkeypatch.setenv("OPENCLAW_TOKEN", "gateway-token")
     monkeypatch.setenv("OPENCLAW_OPENAI_TOKEN", "openai-token")
@@ -114,6 +133,10 @@ behavior:
 vision:
   tracker: none
   camera_index: 2
+voice:
+  attention_window_s: 9
+  unattended_min_cjk_chars: 7
+  unattended_min_alpha_chars: 6
 plugins:
   face_tracker: false
 """
@@ -131,6 +154,9 @@ plugins:
     assert config.play_emotions is False
     assert config.vision_tracker_type == "none"
     assert config.vision_camera_index == 2
+    assert config.voice_attention_window_s == 9
+    assert config.voice_unattended_min_cjk_chars == 7
+    assert config.voice_unattended_min_alpha_chars == 6
     assert config.enable_face_tracker is False
 
 

@@ -66,6 +66,18 @@ class FakeMotion:
         self.locked.append(duration)
 
 
+class FakeVision:
+    name = "vision_client"
+
+    def __init__(self, *, face_trigger_age_s: float | None = None, face_count: int = 1):
+        now = time.monotonic()
+        self._last_face_trigger_time = (
+            now - face_trigger_age_s if face_trigger_age_s is not None else 0.0
+        )
+        self._last_face_time = now
+        self._last_face_count = face_count
+
+
 @pytest.fixture
 def slv_plugin():
     cfg = Config(
@@ -424,6 +436,47 @@ class TestSlvInteractionWindow:
         assert finals == []
         assert slv_plugin._turn_task is None
         assert slv_plugin._state == conversation_plugin_slv.ConvState.LISTENING
+
+    @pytest.mark.asyncio
+    async def test_short_unattended_asr_final_is_not_sent_to_llm(self, slv_plugin):
+        finals: list[dict] = []
+        slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
+        slv_plugin._state = conversation_plugin_slv.ConvState.TRANSCRIBING
+        slv_plugin._running = True
+
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("桌台上下。", session_complete=False)
+        )
+
+        assert finals == []
+        assert slv_plugin._turn_task is None
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.LISTENING
+
+    @pytest.mark.asyncio
+    async def test_visual_attention_allows_short_asr_final(self, slv_plugin, monkeypatch):
+        finals: list[dict] = []
+        slv_plugin.app._plugins.append(FakeVision(face_trigger_age_s=1.0))
+        slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
+        slv_plugin._state = conversation_plugin_slv.ConvState.TRANSCRIBING
+        slv_plugin._running = True
+
+        def fake_spawn(coro, *, name):
+            coro.close()
+
+            class DoneTask:
+                def done(self):
+                    return True
+
+            return DoneTask()
+
+        monkeypatch.setattr(slv_plugin, "_spawn_task", fake_spawn)
+
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("桌台上下。", session_complete=False)
+        )
+
+        assert finals[-1]["text"] == "桌台上下。"
+        assert slv_plugin._last_asr_final == "桌台上下。"
 
     @pytest.mark.asyncio
     async def test_asr_final_ignored_while_speaking(self, slv_plugin):

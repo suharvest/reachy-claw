@@ -198,6 +198,15 @@ class ConversationPlugin(Plugin):
         self._last_asr_partial: str = ""
         self._last_asr_partial_ts: float = 0.0
         self._paused = False
+        self._voice_attention_window_s: float = float(
+            getattr(config, "voice_attention_window_s", 12.0)
+        )
+        self._voice_unattended_min_cjk_chars: int = int(
+            getattr(config, "voice_unattended_min_cjk_chars", 6)
+        )
+        self._voice_unattended_min_alpha_chars: int = int(
+            getattr(config, "voice_unattended_min_alpha_chars", 5)
+        )
         # Serialise text-injected turns (dashboard send_message) against each
         # other so two rapid injections don't fire overlapping LLM streams.
         self._send_lock = asyncio.Lock()
@@ -310,7 +319,19 @@ class ConversationPlugin(Plugin):
     def _compact_asr_text(text: str) -> str:
         return re.sub(r"\s+", "", re.sub(r"[^\w\s]", "", text.lower()))
 
-    def _is_meaningful_asr_text(self, text: str) -> bool:
+    def _visual_attention_active(self, *, now: float | None = None) -> bool:
+        vision = self.app.get_plugin("vision_client")
+        if vision is None:
+            return False
+        now = time.monotonic() if now is None else now
+        last_trigger = float(getattr(vision, "_last_face_trigger_time", 0.0) or 0.0)
+        if last_trigger <= 0.0 or (now - last_trigger) > self._voice_attention_window_s:
+            return False
+        last_face = float(getattr(vision, "_last_face_time", 0.0) or 0.0)
+        face_count = int(getattr(vision, "_last_face_count", 0) or 0)
+        return face_count > 0 and (now - last_face) <= self._voice_attention_window_s
+
+    def _is_meaningful_asr_text(self, text: str, *, attended: bool = False) -> bool:
         compact = self._compact_asr_text(text)
         if not compact:
             return False
@@ -319,9 +340,11 @@ class ConversationPlugin(Plugin):
             return False
         has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in compact)
         if has_cjk:
-            return len(compact) >= 2
+            min_chars = 2 if attended else self._voice_unattended_min_cjk_chars
+            return len(compact) >= min_chars
         alpha_count = sum(ch.isalpha() for ch in compact)
-        return alpha_count >= 2
+        min_alpha = 2 if attended else self._voice_unattended_min_alpha_chars
+        return alpha_count >= min_alpha
 
     async def set_conversation_language(self, language: str) -> None:
         lang = self._normalize_conversation_language(language)
@@ -818,6 +841,7 @@ class ConversationPlugin(Plugin):
                 return
             text = (ev.text or "").strip()
             now = time.monotonic()
+            attended = self._visual_attention_active(now=now)
             if self._state == ConvState.SPEAKING:
                 logger.info("asr_final ignored during speaking: %r", text)
                 return
@@ -837,7 +861,9 @@ class ConversationPlugin(Plugin):
                 if (
                     self._last_asr_partial
                     and now - self._last_asr_partial_ts < 2.5
-                    and self._is_meaningful_asr_text(self._last_asr_partial)
+                    and self._is_meaningful_asr_text(
+                        self._last_asr_partial, attended=attended
+                    )
                 ):
                     text = self._last_asr_partial
                     logger.info("asr_final empty; using recent partial: %r", text)
@@ -847,8 +873,12 @@ class ConversationPlugin(Plugin):
                         self._set_state(ConvState.LISTENING)
                     self._last_asr_partial = ""
                     return
-            if not self._is_meaningful_asr_text(text):
-                logger.info("asr_final ignored as short filler/noise: %r", text)
+            if not self._is_meaningful_asr_text(text, attended=attended):
+                logger.info(
+                    "asr_final ignored as short filler/noise: %r attended=%s",
+                    text,
+                    attended,
+                )
                 if self._state == ConvState.TRANSCRIBING:
                     self._set_state(ConvState.LISTENING)
                 self._last_asr_partial = ""

@@ -153,6 +153,13 @@ class Config:
     v2v_voice_id: str = ""
     v2v_voice_clone_sample: str = ""
 
+    # Voice interaction gating. These do not expose a wake-word; they tune
+    # the internal attention gate that decides whether short ASR snippets
+    # are likely to be intentional user speech.
+    voice_attention_window_s: float = 12.0
+    voice_unattended_min_cjk_chars: int = 6
+    voice_unattended_min_alpha_chars: int = 5
+
     # VLM (Vision Language Model)
     enable_vlm: bool = False
     vlm_model: str = "qwen3.5:2b"  # vision model (empty = use ollama_model)
@@ -359,6 +366,9 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("vision", "emotion_threshold"): "vision_emotion_threshold",
     ("vision", "emotion_cooldown"): "vision_emotion_cooldown",
     ("vision", "identity_threshold"): "vision_identity_threshold",
+    ("voice", "attention_window_s"): "voice_attention_window_s",
+    ("voice", "unattended_min_cjk_chars"): "voice_unattended_min_cjk_chars",
+    ("voice", "unattended_min_alpha_chars"): "voice_unattended_min_alpha_chars",
     ("conversation", "mode"): "conversation_mode",
     ("conversation", "monologue_interval"): "monologue_interval",
 ("dashboard", "enabled"): "dashboard_enabled",
@@ -409,6 +419,9 @@ _ENV_FIELD_MAP: dict[str, str] = {
     "CLAWD_V2V_MULTI_UTTERANCE": "v2v_multi_utterance",
     "CLAWD_V2V_VOICE_ID": "v2v_voice_id",
     "CLAWD_V2V_VOICE_CLONE_SAMPLE": "v2v_voice_clone_sample",
+    "CLAWD_VOICE_ATTENTION_WINDOW_S": "voice_attention_window_s",
+    "CLAWD_VOICE_UNATTENDED_MIN_CJK_CHARS": "voice_unattended_min_cjk_chars",
+    "CLAWD_VOICE_UNATTENDED_MIN_ALPHA_CHARS": "voice_unattended_min_alpha_chars",
     "CLAWD_DASHBOARD_RESTART_CONTAINERS": "dashboard_restart_containers",
 }
 
