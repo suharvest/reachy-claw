@@ -293,7 +293,7 @@ function handleDashboardMsg(msg) {
             break;
 
         case 'conversation_language':
-            syncConversationLanguageUI(msg.language || 'zh');
+            syncConversationLanguageUI(msg.language || 'zh', msg.asr_language, msg.tts_language);
             break;
 
         case 'prompts':
@@ -375,6 +375,7 @@ function handleDashboardMsg(msg) {
             document.getElementById('motor-presets').classList.toggle('disabled', !motorEnabled);
             syncMotorPresetUI();
             updateMotorStatus();
+            updateSettingsDiagnostics({ motor_enabled: motorEnabled });
             break;
 
         case 'vlm_state': {
@@ -614,6 +615,7 @@ function updateRobotState(msg) {
     if (msg.llm_backend !== undefined && !llmDirty) {
         syncLlmUI(msg.llm_backend, msg.ollama_model, msg.ollama_url, msg.gateway_host, msg.gateway_port);
     }
+    updateSettingsDiagnostics(msg);
     document.getElementById('dot-robot').className = 'dot live';
 }
 
@@ -1224,10 +1226,36 @@ function setHistoryUI(turns) {
     document.getElementById('history-value').textContent = t('memory.turns', { n: turns });
 }
 
-function syncConversationLanguageUI(language) {
+function syncConversationLanguageUI(language, asrLanguage, ttsLanguage) {
     const el = document.getElementById('conversation-language');
-    if (!el) return;
-    el.value = language === 'en' ? 'en' : 'zh';
+    const lang = language === 'en' ? 'en' : 'zh';
+    if (el) el.value = lang;
+    const status = document.getElementById('conversation-language-status');
+    if (status) {
+        status.textContent = t('conversationLanguage.status', {
+            asr: asrLanguage || lang,
+            tts: ttsLanguage || lang,
+        });
+    }
+}
+
+function updateSettingsDiagnostics(msg = {}) {
+    const setText = (id, value) => {
+        const el = document.getElementById(id);
+        if (el && value !== undefined && value !== null) el.textContent = value;
+    };
+    if (msg.motor_enabled !== undefined) {
+        setText('diag-motor', msg.motor_enabled ? t('settingsDiag.on') : t('settingsDiag.off'));
+    }
+    if (msg.motion_enabled !== undefined) {
+        setText('diag-motion', msg.motion_enabled ? t('settingsDiag.on') : t('settingsDiag.off'));
+    }
+    if (msg.speaking !== undefined) {
+        setText('diag-speaking', msg.speaking ? t('settingsDiag.yes') : t('settingsDiag.no'));
+    }
+    if (msg.mode) {
+        setText('diag-mode', modeName(msg.mode));
+    }
 }
 
 function syncModeUI() {

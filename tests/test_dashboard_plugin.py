@@ -90,8 +90,16 @@ def test_dashboard_exposes_conversation_language_select():
     i18n = (static_dir / "i18n.js").read_text(encoding="utf-8")
 
     assert 'id="conversation-language"' in html
+    assert 'id="conversation-language-status"' in html
+    assert 'id="settings-diagnostics"' in html
     assert "set_conversation_language" in app_js
+    assert "syncConversationLanguageUI" in app_js
+    assert "updateSettingsDiagnostics" in app_js
     assert '"conversationLanguage.title"' in i18n
+    assert '"toggle.vlm": "Visual Understanding (VLM)"' in i18n
+    assert '"toggle.vlm": "视觉理解 (VLM)"' in i18n
+    assert '"settingsDiag.title"' in i18n
+    assert '"panelLanguage.title"' in i18n
 
 
 class FakeConversationPlugin:
@@ -201,6 +209,8 @@ async def test_dashboard_broadcast_robot_state(dashboard_app):
     assert "antenna" in msg
     assert "emotion" in msg
     assert "speaking" in msg
+    assert "motor_enabled" in msg
+    assert "motion_enabled" in msg
     assert "tracking" in msg
     assert "source" in msg["tracking"]
     assert "confidence" in msg["tracking"]

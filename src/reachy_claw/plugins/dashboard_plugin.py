@@ -1390,6 +1390,8 @@ class DashboardPlugin(Plugin):
             "emotion": emotion,
             "emotion_mapping": mapping_info,
             "speaking": self.app.is_speaking,
+            "motor_enabled": self.app.motor_enabled,
+            "motion_enabled": self.app.config.enable_motion,
             "tracking": {
                 "source": target.source,
                 "confidence": round(target.confidence, 2),
