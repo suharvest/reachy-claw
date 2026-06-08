@@ -23,6 +23,8 @@ def _make_mock_reachy():
     reachy.set_target = MagicMock()
     reachy.wake_up = MagicMock()
     reachy.goto_sleep = MagicMock()
+    reachy.enable_motors = MagicMock()
+    reachy.disable_motors = MagicMock()
     reachy.get_current_head_pose = MagicMock(return_value=np.eye(4))
     reachy.get_present_antenna_joint_positions = MagicMock(return_value=[0.0, 0.0])
 
