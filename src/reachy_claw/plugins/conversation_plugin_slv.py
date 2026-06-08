@@ -324,12 +324,20 @@ class ConversationPlugin(Plugin):
         if vision is None:
             return False
         now = time.monotonic() if now is None else now
-        last_trigger = float(getattr(vision, "_last_face_trigger_time", 0.0) or 0.0)
-        if last_trigger <= 0.0 or (now - last_trigger) > self._voice_attention_window_s:
-            return False
+        # Attention = a face is present right now (or was within the window).
+        # Key off CONTINUOUS presence (_last_face_time / _last_face_count, which
+        # the vision plugin refreshes every frame a face is seen), NOT the sparse
+        # greeting trigger _last_face_trigger_time: that fires once per visitor
+        # arrival and then sits on _face_trigger_cooldown_s, so a visitor standing
+        # silently past the window would falsely read as inattentive and have
+        # their short utterances dropped even while clearly looking at the robot.
         last_face = float(getattr(vision, "_last_face_time", 0.0) or 0.0)
         face_count = int(getattr(vision, "_last_face_count", 0) or 0)
-        return face_count > 0 and (now - last_face) <= self._voice_attention_window_s
+        return (
+            face_count > 0
+            and last_face > 0.0
+            and (now - last_face) <= self._voice_attention_window_s
+        )
 
     def _is_meaningful_asr_text(self, text: str, *, attended: bool = False) -> bool:
         compact = self._compact_asr_text(text)
