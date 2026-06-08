@@ -108,6 +108,12 @@ class Config:
     motion_head_tracking_smoothing: float = 0.35
     motion_head_tracking_poll_interval: float = 0.05
     motion_idle_animation_interval: float = 5.0
+    # Head compositor: emotion accents are layered on top of the gaze anchor.
+    motion_emotion_accent_gain: float = 0.6  # scale of emotion head accents (0 = none)
+    motion_head_idle_micro: bool = False  # subtle idle head drift so it's not frozen
+    motion_head_yaw_limit: float = 25.0  # safe envelope for composed head output (deg)
+    motion_head_pitch_limit: float = 18.0
+    motion_head_roll_limit: float = 18.0
 
     # Vision / face tracking
     vision_tracker_type: str = "mediapipe"  # "mediapipe", "remote", "none"
@@ -225,6 +231,11 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("motion", "head_tracking_smoothing"): "motion_head_tracking_smoothing",
     ("motion", "head_tracking_poll_interval"): "motion_head_tracking_poll_interval",
     ("motion", "idle_animation_interval"): "motion_idle_animation_interval",
+    ("motion", "emotion_accent_gain"): "motion_emotion_accent_gain",
+    ("motion", "head_idle_micro"): "motion_head_idle_micro",
+    ("motion", "head_yaw_limit"): "motion_head_yaw_limit",
+    ("motion", "head_pitch_limit"): "motion_head_pitch_limit",
+    ("motion", "head_roll_limit"): "motion_head_roll_limit",
     ("vision", "tracker"): "vision_tracker_type",
     ("vision", "camera_source"): "vision_camera_source",
     ("vision", "camera_index"): "vision_camera_index",

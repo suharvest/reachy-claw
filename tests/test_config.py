@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from reachy_claw.config import Config, load_config, save_runtime_overrides
 
 
@@ -40,6 +38,32 @@ def test_config_has_motion_defaults():
     assert config.motion_emotion_intensity == 1.0
     assert config.motion_head_tracking_smoothing == 0.35
     assert config.motion_idle_animation_interval == 5.0
+    # Head-compositor knobs
+    assert config.motion_emotion_accent_gain == 0.6
+    assert config.motion_head_idle_micro is False
+    assert config.motion_head_yaw_limit == 25.0
+    assert config.motion_head_pitch_limit == 18.0
+    assert config.motion_head_roll_limit == 18.0
+
+
+def test_load_config_maps_motion_compositor_knobs(tmp_path):
+    cfg_file = tmp_path / "reachy-claw.yaml"
+    cfg_file.write_text(
+        """\
+motion:
+  emotion_accent_gain: 0.3
+  head_idle_micro: true
+  head_yaw_limit: 20.0
+"""
+    )
+
+    config = load_config(cfg_file)
+
+    assert config.motion_emotion_accent_gain == 0.3
+    assert config.motion_head_idle_micro is True
+    assert config.motion_head_yaw_limit == 20.0
+    # Unset → default
+    assert config.motion_head_pitch_limit == 18.0
 
 
 def test_config_has_vision_defaults():
