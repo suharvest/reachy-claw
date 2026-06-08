@@ -48,6 +48,27 @@ class AudioCapture:
         if config.audio_device:
             self._device_id = self._find_device(config.audio_device)
 
+    def _input_to_mono(self, data: np.ndarray) -> np.ndarray:
+        """Convert input frames to mono, optionally selecting one channel."""
+        if data.ndim <= 1:
+            return data.flatten().astype(np.float32, copy=False)
+
+        channel = getattr(self.config, "audio_input_channel", None)
+        if channel is not None:
+            try:
+                idx = int(channel)
+            except (TypeError, ValueError):
+                idx = -1
+            if 0 <= idx < data.shape[1]:
+                return data[:, idx].astype(np.float32, copy=True)
+            logger.warning(
+                "Configured audio input channel %r out of range for %d channels; "
+                "falling back to channel average",
+                channel,
+                data.shape[1],
+            )
+        return data.mean(axis=1).astype(np.float32, copy=True)
+
     def _find_device(self, device_name: str) -> int | None:
         """Find audio device by name and set as default for both input and output."""
         try:
@@ -186,10 +207,7 @@ class AudioCapture:
         # Capture path: stereo→mono, push to async queue
         try:
             if indata is not None and self._chunk_queue is not None and self._loop is not None:
-                if indata.ndim > 1 and indata.shape[1] > 1:
-                    chunk = indata.mean(axis=1).astype(np.float32, copy=True)
-                else:
-                    chunk = indata.flatten().astype(np.float32, copy=True)
+                chunk = self._input_to_mono(indata)
                 # TEMP DEBUG: periodic capture energy
                 if not hasattr(self, "_duplex_cap_count"):
                     self._duplex_cap_count = 0
@@ -578,8 +596,7 @@ class AudioCapture:
                 data, overflowed = stream.read(frames)
                 if overflowed:
                     logger.debug("Audio buffer overflow in bg reader")
-                # Stereo to mono: average both channels
-                chunk = data.mean(axis=1) if data.shape[1] > 1 else data.flatten()
+                chunk = self._input_to_mono(data)
                 # Periodic energy check (every ~2 seconds)
                 if not hasattr(self, '_bg_chunk_count'):
                     self._bg_chunk_count = 0
@@ -634,8 +651,7 @@ class AudioCapture:
             data, overflowed = await asyncio.to_thread(self._input_stream.read, frames)
             if overflowed:
                 logger.debug("Audio buffer overflow - some audio was lost")
-            # Stereo to mono: average both channels
-            return data.mean(axis=1) if data.shape[1] > 1 else data.flatten()
+            return self._input_to_mono(data)
 
         except ImportError:
             logger.warning("sounddevice not available for local mic")

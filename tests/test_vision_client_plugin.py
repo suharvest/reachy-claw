@@ -193,10 +193,11 @@ class TestVisionClientTracking:
             {
                 "faces": [
                     {
-                        "center": [0.8, 0.0],
+                        "center": [0.8, 0.6],
                         "bbox": [0.2, 0.2, 0.6, 0.6],
                         "emotion": "Neutral",
                         "emotion_confidence": 0.1,
+                        "landmarks": [[0.3, 0.3], [0.5, 0.4]],
                     }
                 ]
             },
@@ -207,6 +208,27 @@ class TestVisionClientTracking:
         assert target.source == "face"
         assert target.body_yaw < 0.0
         assert target.yaw == pytest.approx(0.0)
+        assert target.pitch == pytest.approx(0.0)
+        assert target.roll == pytest.approx(0.0)
+
+    def test_remote_visual_emotion_does_not_queue_head_expression(self, vision_app):
+        plugin = VisionClientPlugin(vision_app)
+
+        plugin._process_vision_message(
+            {
+                "faces": [
+                    {
+                        "center": [0.0, 0.0],
+                        "bbox": [0.2, 0.2, 0.6, 0.6],
+                        "emotion": "Happiness",
+                        "emotion_confidence": 0.95,
+                    }
+                ]
+            },
+            now=time.monotonic(),
+        )
+
+        assert vision_app.emotions.move_queue.empty()
 
     def test_small_remote_face_does_not_drive_tracking(self, vision_app):
         plugin = VisionClientPlugin(vision_app)

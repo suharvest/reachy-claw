@@ -9,8 +9,6 @@ import asyncio
 import logging
 import time
 
-import numpy as np
-
 from ..motion.head_target import HeadTarget
 from ..plugin import Plugin
 
@@ -281,25 +279,13 @@ class VisionClientPlugin(Plugin):
                 self._smooth_x += self._smoothing_alpha * (face_x - self._smooth_x)
                 self._smooth_y += self._smoothing_alpha * (face_y - self._smooth_y)
 
-            # Body rotation: proportional centering.
+            # Body rotation: proportional centering. The remote vision stream
+            # is reliable enough for coarse horizontal attention, but its
+            # bbox/landmark coordinates are too noisy for head pitch/roll on
+            # the exhibition camera, so keep the head neutral here.
             body_yaw = -self._smooth_x * self._max_yaw
-            # Head pitch: face in upper frame (y<0) → look up (negative pitch in SDK)
-            # SDK convention: positive pitch = look DOWN, negative = look UP
-            pitch = self._smooth_y * self._max_pitch - self._pitch_offset
-
-            # Roll estimation from eye landmarks (points 0=left_eye, 1=right_eye)
+            pitch = 0.0
             roll = 0.0
-            landmarks = primary.get("landmarks")
-            if landmarks and len(landmarks) >= 2:
-                left_eye, right_eye = landmarks[0], landmarks[1]
-                eye_dx = right_eye[0] - left_eye[0]
-                eye_dy = right_eye[1] - left_eye[1]
-                raw_roll = float(np.degrees(np.arctan2(eye_dy, eye_dx)))
-                # EMA smoothing
-                self._smooth_roll += self._smoothing_alpha * (
-                    raw_roll - self._smooth_roll
-                )
-                roll = float(np.clip(self._smooth_roll, -self._max_roll, self._max_roll))
 
             self.app.head_targets.publish(
                 HeadTarget(
@@ -345,7 +331,6 @@ class VisionClientPlugin(Plugin):
                     and (emotion_conf - self._last_emotion_conf) >= 0.15
                 )
                 if changed or sustained or conf_jump:
-                    self.app.emotions.queue_emotion(mapped)
                     self._last_emotion = mapped
                     self._last_emotion_conf = emotion_conf
                     self._last_emotion_time = now
@@ -354,9 +339,13 @@ class VisionClientPlugin(Plugin):
                         else "sustain" if sustained
                         else "conf_jump"
                     )
-                    logger.debug(
-                        f"Vision emotion: {emotion} → {mapped} "
-                        f"(conf={emotion_conf:.2f}, {reason})"
+                    logger.info(
+                        "Vision emotion observed: %s -> %s "
+                        "(conf=%.2f, %s; motion suppressed)",
+                        emotion,
+                        mapped,
+                        emotion_conf,
+                        reason,
                     )
 
         # Identity

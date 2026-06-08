@@ -48,6 +48,60 @@ def test_slv_deploy_uses_client_vad_preroll_for_wakeword_free_speech():
     assert v2v["client_vad_silence_ms"] >= 500
 
 
+def test_config_default_v2v_client_vad_threshold_uses_backend_default():
+    config = Config()
+
+    assert config.v2v_client_vad_threshold is None
+
+
+def test_slv_deploy_uses_less_conservative_client_vad_threshold():
+    from pathlib import Path
+
+    cfg_file = (
+        Path(__file__).parents[1]
+        / "deploy"
+        / "jetson"
+        / "reachy"
+        / "reachy-claw.jetson.slv.yaml"
+    )
+
+    config = load_config(cfg_file)
+
+    assert config.v2v_client_vad_threshold == 0.3
+
+
+def test_slv_deploy_selects_primary_reachy_audio_input_channel():
+    from pathlib import Path
+
+    cfg_file = (
+        Path(__file__).parents[1]
+        / "deploy"
+        / "jetson"
+        / "reachy"
+        / "reachy-claw.jetson.slv.yaml"
+    )
+
+    config = load_config(cfg_file)
+
+    assert config.audio_input_channel == 0
+
+
+def test_slv_deploy_points_tts_capabilities_to_v2v_http_port():
+    from pathlib import Path
+
+    cfg_file = (
+        Path(__file__).parents[1]
+        / "deploy"
+        / "jetson"
+        / "reachy"
+        / "reachy-claw.jetson.slv.yaml"
+    )
+
+    config = load_config(cfg_file)
+
+    assert config.speech_service_url == "http://localhost:8621"
+
+
 def test_slv_deploy_declares_visual_attention_voice_gate():
     import yaml
     from pathlib import Path

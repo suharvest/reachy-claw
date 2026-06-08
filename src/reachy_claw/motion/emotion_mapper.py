@@ -107,12 +107,11 @@ EMOTION_MAP: dict[str, list[RobotExpression]] = {
     ],
     "thinking": [
         RobotExpression(
-            head=HeadPose(yaw=15, pitch=-5, roll=10, duration=1.0),
             antenna_anim=AntennaAnimation(
                 center=5, amplitude=8, frequency=0.5,
                 phase_offset=math.pi / 2, duration=3.0,
             ),
-            description="Thinking — slow asymmetric sway",
+            description="Thinking — slow antenna sway",
         ),
     ],
     "confused": [
@@ -184,12 +183,11 @@ EMOTION_MAP: dict[str, list[RobotExpression]] = {
     ],
     "listening": [
         RobotExpression(
-            head=HeadPose(yaw=5, pitch=-3, roll=3, duration=0.6),
             antenna_anim=AntennaAnimation(
                 center=15, amplitude=5, frequency=0.8,
                 phase_offset=math.pi / 3, duration=3.0,
             ),
-            description="Listening — attentive gentle sway",
+            description="Listening — attentive antenna sway",
         ),
     ],
     "attention": [

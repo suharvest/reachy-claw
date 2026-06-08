@@ -219,6 +219,40 @@ class TestEnergyCalculation:
         assert energy > config.silence_threshold
 
 
+# ── Input channel selection ──────────────────────────────────────────────
+
+
+class TestInputChannelSelection:
+    def test_configured_input_channel_uses_one_channel_not_average(self):
+        config = Config()
+        config.audio_input_channel = 0  # type: ignore[attr-defined]
+        ac = AudioCapture(config)
+
+        stereo = np.column_stack(
+            [
+                np.full(4, 0.25, dtype=np.float32),
+                np.full(4, -0.25, dtype=np.float32),
+            ]
+        )
+
+        mono = ac._input_to_mono(stereo)
+
+        np.testing.assert_array_equal(mono, stereo[:, 0])
+
+    def test_unconfigured_input_channel_keeps_stereo_average_fallback(self):
+        ac = AudioCapture(Config())
+        stereo = np.column_stack(
+            [
+                np.full(4, 0.25, dtype=np.float32),
+                np.full(4, -0.25, dtype=np.float32),
+            ]
+        )
+
+        mono = ac._input_to_mono(stereo)
+
+        np.testing.assert_array_equal(mono, np.zeros(4, dtype=np.float32))
+
+
 # ── Continuous capture ────────────────────────────────────────────────────
 
 

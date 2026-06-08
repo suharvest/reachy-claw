@@ -172,6 +172,18 @@ class TestAttentionExpression:
         assert 0.8 <= expr.antenna_anim.duration <= 1.4
 
 
+class TestPassiveStateExpressions:
+    @pytest.mark.parametrize("emotion", ["listening", "thinking"])
+    def test_passive_state_expression_is_antenna_only(self, emotion):
+        em = EmotionMapper(intensity=1.0)
+
+        expr = em.map_emotion(emotion)
+
+        assert expr is not None
+        assert expr.head is None
+        assert expr.antenna_anim is not None
+
+
 class TestDataclasses:
     def test_head_pose_defaults(self):
         hp = HeadPose()

@@ -60,13 +60,18 @@ v2v:
   vad_silence_ms: 600        # ignored when vad=none; kept for rollback clarity
   client_vad_preroll_ms: 700 # audio retained ahead of speech onset
   client_vad_silence_ms: 550 # trailing silence → client asr_eos
-  # client_vad_threshold: 0.5 # silero score; omit to use backend default
+  client_vad_threshold: 0.3 # silero score; lower than default for Reachy Mini mic
   multi_utterance: true
   # voice_id: ""        # leave empty → SLV server default voice
+
+# ── TTS capability API (same SLV service, HTTP on host port 8621) ─────
+tts:
+  speech_service_url: http://localhost:8621
 
 # ── Audio ─────────────────────────────────────────────────────────────
 audio:
   device: "Reachy Mini Audio"
+  input_channel: 0
   volume: 3.5
   sample_rate: 16000
 

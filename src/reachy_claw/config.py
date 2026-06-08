@@ -71,6 +71,7 @@ class Config:
 
     # Audio settings
     audio_device: str | None = None
+    audio_input_channel: int | None = None
     audio_volume: float = 1.0  # playback gain multiplier (e.g. 2.0 = double volume)
 
     # ── Rest window ─────────────────────────────────────────────
@@ -143,7 +144,7 @@ class Config:
     # Client-side VAD tuning (only used when v2v_vad == "none").
     v2v_client_vad_silence_ms: int = 400  # local silence → send asr_eos
     v2v_client_vad_preroll_ms: int = 300  # ring buffer before speech_start
-    v2v_client_vad_threshold: float = 0.5  # silero score threshold
+    v2v_client_vad_threshold: float | None = None  # silero score threshold; None = backend default
     v2v_multi_utterance: bool = True
     # Optional voice cloning (forwarded into the V2V config frame).
     # voice_id    : id of an OVS-registered voice (cloned or built-in).
@@ -300,6 +301,7 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("vad", "backend"): "vad_backend",
     ("vad", "threshold"): "silero_threshold",
     ("audio", "device"): "audio_device",
+    ("audio", "input_channel"): "audio_input_channel",
     ("audio", "volume"): "audio_volume",
     ("audio", "sample_rate"): "sample_rate",
     ("audio", "silence_threshold"): "silence_threshold",
@@ -402,6 +404,7 @@ _ENV_FIELD_MAP: dict[str, str] = {
     "TTS_BACKEND": "tts_backend",
     "WAKE_WORD": "wake_word",
     "SPEECH_SERVICE_URL": "speech_service_url",
+    "CLAWD_AUDIO_INPUT_CHANNEL": "audio_input_channel",
     "SENSEVOICE_LANGUAGE": "sensevoice_language",
     "VAD_BACKEND": "vad_backend",
     "CLAWD_EDGE_LLM_URL": "edge_llm_url",
