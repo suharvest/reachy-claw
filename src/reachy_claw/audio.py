@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import queue
+import re
 from collections import deque
 from dataclasses import dataclass
 
@@ -47,6 +48,16 @@ class AudioCapture:
         # Find the specified audio device
         if config.audio_device:
             self._device_id = self._find_device(config.audio_device)
+        # Discover the ALSA card index from the kernel (authoritative, unlike
+        # PortAudio's racy in-container USB enumeration). Lets capture/duplex
+        # streams target plughw:<card>,0 directly instead of assuming card 0.
+        self._alsa_card = self._discover_alsa_hw(config.audio_device)
+        if self._alsa_card is not None:
+            logger.info(
+                "AudioCapture: resolved ALSA card %d for %r",
+                self._alsa_card,
+                config.audio_device,
+            )
 
     def _input_to_mono(self, data: np.ndarray) -> np.ndarray:
         """Convert input frames to mono, optionally selecting one channel."""
@@ -93,6 +104,55 @@ class AudioCapture:
         except Exception as e:
             logger.error(f"Error finding audio device: {e}")
             return None
+
+    def _discover_alsa_hw(self, device_name: str | None) -> int | None:
+        """Return the ALSA card index for ``device_name`` from /proc/asound/cards.
+
+        PortAudio enumeration of the USB mic is racy in-container (the card is
+        sometimes missing from ``query_devices()`` → we silently fall back to
+        the wrong device, e.g. the Jetson's onboard Tegra audio, and ASR sees
+        only noise). The kernel's ``/proc/asound/cards`` is authoritative and
+        always lists the USB card, so matching the configured name here lets us
+        target ``plughw:<card>,0`` regardless of the PortAudio race.
+        """
+        name = (device_name or "").strip().lower()
+        if not name:
+            return None
+        try:
+            with open("/proc/asound/cards") as f:
+                text = f.read()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Could not read /proc/asound/cards: %s", e)
+            return None
+        # Card header lines look like:
+        #   " 2 [Audio          ]: USB-Audio - Reachy Mini Audio"
+        # followed by a continuation line carrying the longname. Track the
+        # current card index and return it once the name matches either line.
+        card: int | None = None
+        for line in text.splitlines():
+            m = re.match(r"\s*(\d+)\s+\[", line)
+            if m:
+                card = int(m.group(1))
+            if card is not None and name in line.lower():
+                return card
+        return None
+
+    def _capture_candidates(self) -> list[object]:
+        """Ordered device candidates for capture/duplex streams.
+
+        Prefer the kernel-discovered ALSA hw (survives PortAudio's racy USB
+        enumeration), then the PortAudio-resolved index, then the default.
+        ``plughw`` comes before raw ``hw`` so ALSA resamples if the device
+        does not natively support our requested rate.
+        """
+        cands: list[object] = []
+        if self._alsa_card is not None:
+            cands.append(f"plughw:{self._alsa_card},0")
+            cands.append(f"hw:{self._alsa_card},0")
+        if self._device_id is not None:
+            cands.append(self._device_id)
+        cands.append(None)
+        return cands
 
     async def start(self) -> None:
         """Start audio capture."""
@@ -155,14 +215,11 @@ class AudioCapture:
             logger.debug(f"sounddevice import failed: {e}")
             return False
 
-        # USB Audio (Reachy Mini Audio) is on ALSA card 0 but PortAudio in
-        # the container sometimes doesn't enumerate it. Try hw:0,0 first
-        # to bypass the broken enumeration, then discovered index, then
-        # PortAudio default.
-        candidates: list[object] = ["hw:0,0", "plughw:0,0"]
-        if self._device_id is not None:
-            candidates.append(self._device_id)
-        candidates.append(None)
+        # Target the kernel-discovered USB card (plughw:<card>,0) first; the
+        # device is NOT necessarily on card 0 (e.g. Jetson onboard Tegra audio
+        # takes cards 0/1, USB lands on card 2). Falls back to the resolved
+        # PortAudio index, then the default device.
+        candidates = self._capture_candidates()
 
         last_err: Exception | None = None
         for dev in candidates:
@@ -549,15 +606,12 @@ class AudioCapture:
         """Background thread: continuously read mic into asyncio queue."""
         import sounddevice as sd
 
-        # USB Audio (Reachy Mini Audio) is on ALSA card 0 but PortAudio in the
-        # container sometimes doesn't enumerate it (PulseAudio sink SUSPENDED
-        # → PA reports 0 channels → sd picks Jetson HDA which has no real
-        # mic attached → silence). Try ALSA hw strings first to bypass the
-        # broken enumeration, then fall back to discovered index, then default.
-        candidates: list[object] = ["hw:0,0", "plughw:0,0"]
-        if self._device_id is not None:
-            candidates.append(self._device_id)
-        candidates.append(None)
+        # Target the kernel-discovered USB card (plughw:<card>,0) first. PortAudio
+        # in-container sometimes drops the USB card from enumeration (PulseAudio
+        # sink SUSPENDED → PA reports 0 channels → sd picks the Jetson onboard
+        # audio which has no real mic → silence/noise → empty ASR). The ALSA hw
+        # string bypasses that race; resolved index and default follow.
+        candidates = self._capture_candidates()
 
         stream = None
         used_device: object = None
