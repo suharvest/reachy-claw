@@ -12,7 +12,9 @@ Motion separation:
 import asyncio
 import logging
 import math
+import re
 import time
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -22,6 +24,40 @@ from ..plugin import Plugin
 logger = logging.getLogger(__name__)
 
 _ANIM_HZ = 30  # antenna animation update rate
+
+
+@dataclass
+class _HeadAccent:
+    """A transient, additive head offset layered on top of the gaze anchor.
+
+    Emotion tags no longer command an absolute head pose (which fought the
+    tracking loop and the speech wobbler). Instead each tag injects a short
+    *accent* — a relative roll/pitch/yaw offset with an attack/hold/release
+    envelope — that the compositor sums on top of "looking at the person" and
+    that decays back to the anchor. This is how biological head motion reads:
+    a surprised recoil rides on top of your gaze, then returns to it.
+    """
+
+    roll: float
+    pitch: float
+    yaw: float
+    start: float
+    attack: float
+    hold: float
+    release: float
+
+    @property
+    def total(self) -> float:
+        return self.attack + self.hold + self.release
+
+
+def _smoothstep(x: float) -> float:
+    """Smooth 0→1 ease (Hermite); flattens the ends so accents don't snap."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    return x * x * (3.0 - 2.0 * x)
 
 
 class MotionPlugin(Plugin):
@@ -85,11 +121,32 @@ class MotionPlugin(Plugin):
         self._body_smoothing = 0.35  # body EMA
         self._body_min_angle = 2.0  # degrees — body deadband
         self._body_max_step = 3.0  # max body degrees per step
+        self._full_target_supported: bool | None = None
 
         # Speech wobble offsets (roll, pitch, yaw) set by HeadWobbler
         self._speech_roll = 0.0
         self._speech_pitch = 0.0
         self._speech_yaw = 0.0
+
+        # ── Head compositor ──────────────────────────────────────────────
+        # The head is a single-writer resource. Face tracking gives the gaze
+        # anchor (where to point); emotion accents, speech wobble and idle
+        # micro-motion are additive layers the loop sums on top, clamps into a
+        # safe envelope, and emits as ONE target. Nothing writes the head
+        # directly, so the layers compose instead of stomping each other.
+        self._head_accent: _HeadAccent | None = None
+        cfg = app.config
+        # Emotion accents are *relative* — scale the EMOTION_MAP yaw/pitch/roll
+        # down so they read as a gesture on top of gaze, not a full reorientation.
+        self._accent_gain = float(getattr(cfg, "motion_emotion_accent_gain", 0.6))
+        # Safe head envelope (deg): composed output is clamped into this so
+        # stacked layers can never drive the platform past a comfortable range.
+        self._head_yaw_limit = float(getattr(cfg, "motion_head_yaw_limit", 25.0))
+        self._head_pitch_limit = float(getattr(cfg, "motion_head_pitch_limit", 18.0))
+        self._head_roll_limit = float(getattr(cfg, "motion_head_roll_limit", 18.0))
+        # Idle micro-motion (subtle breathing/saccade so a quiet head isn't
+        # frozen). Off by default — opt in once the booth feel is dialed in.
+        self._idle_micro = bool(getattr(cfg, "motion_head_idle_micro", False))
 
         # Antenna animation state
         self._antenna_anim: AntennaAnimation | None = None
@@ -126,8 +183,7 @@ class MotionPlugin(Plugin):
         self._last_applied_pitch = 0.0
         self._last_applied_roll = 0.0
         self._last_applied_body_yaw = 0.0
-        self._set_head_pose(0.0, 0.0, 0.0)
-        self._set_body_yaw(0.0)
+        self._set_tracking_pose(0.0, 0.0, 0.0, 0.0)
 
     def _tracking_allowed(self) -> bool:
         now = time.monotonic()
@@ -136,6 +192,62 @@ class MotionPlugin(Plugin):
     def set_speech_offsets(self, offsets: tuple) -> None:
         """Called by HeadWobbler to set speech-driven head offsets."""
         self._speech_roll, self._speech_pitch, self._speech_yaw = offsets
+
+    # ── Head compositor layers ───────────────────────────────────────────
+
+    def _inject_head_accent(self, head) -> None:
+        """Register an emotion's head pose as a transient additive accent.
+
+        ``head`` is an emotion_mapper.HeadPose. Its yaw/pitch/roll become the
+        accent amplitude (scaled by ``_accent_gain``); its duration sets the
+        hold. The accent eases in, holds, then releases back to the gaze
+        anchor, so the emotion reads as a head *gesture* riding on top of
+        tracking rather than an absolute pose that overrides it. Called on the
+        event loop (from ``_run_expression_safe``), same thread as the reader.
+        """
+        dur = max(0.2, float(getattr(head, "duration", 0.6)))
+        g = self._accent_gain
+        self._head_accent = _HeadAccent(
+            roll=head.roll * g,
+            pitch=head.pitch * g,
+            yaw=head.yaw * g,
+            start=time.monotonic(),
+            attack=min(0.25, dur * 0.35),
+            hold=dur,
+            release=max(0.4, dur * 0.8),
+        )
+
+    def _sample_head_accent(self, now: float) -> tuple[float, float, float]:
+        """Current enveloped emotion-accent offset; clears the accent when done."""
+        acc = self._head_accent
+        if acc is None:
+            return (0.0, 0.0, 0.0)
+        t = now - acc.start
+        if t >= acc.total:
+            self._head_accent = None
+            return (0.0, 0.0, 0.0)
+        if t < acc.attack:
+            env = _smoothstep(t / acc.attack) if acc.attack > 0 else 1.0
+        elif t < acc.attack + acc.hold:
+            env = 1.0
+        else:
+            rt = (t - acc.attack - acc.hold) / acc.release if acc.release > 0 else 1.0
+            env = _smoothstep(1.0 - rt)
+        return (acc.roll * env, acc.pitch * env, acc.yaw * env)
+
+    def _sample_idle_micro(self, now: float, speaking: bool) -> tuple[float, float, float]:
+        """Tiny low-frequency offsets so a quiet head looks alive, not frozen.
+
+        Disabled while speaking or during an accent (those layers already carry
+        the motion) and gated behind ``_idle_micro``. Uses detuned sines (no
+        RNG) so it stays deterministic for tests/resume.
+        """
+        if not self._idle_micro or speaking or self._head_accent is not None:
+            return (0.0, 0.0, 0.0)
+        roll = 0.3 * math.sin(now * 0.29 + 0.7)
+        pitch = 0.6 * math.sin(now * 0.55) + 0.3 * math.sin(now * 0.21)
+        yaw = 0.5 * math.sin(now * 0.37 + 1.3)
+        return (roll, pitch, yaw)
 
     def set_motor_enabled(self, enabled: bool) -> None:
         """Enable or disable motor output (sleep mode)."""
@@ -226,7 +338,14 @@ class MotionPlugin(Plugin):
         logger.info("Motion loop stopped")
 
     async def _head_tracking_loop(self):
-        """Consume fused head targets and drive body rotation + head pose."""
+        """Drive the head compositor: gaze anchor + additive expression layers.
+
+        Computes the gaze anchor (face/DOA tracking + body yaw for horizontal
+        follow), then sums the additive layers on top — emotion accents, speech
+        wobble, idle micro-motion — clamps into the safe envelope, and emits ONE
+        velocity-limited target. This is the sole writer of the head, so the
+        layers compose instead of stomping each other.
+        """
         logger.info("Head tracking fusion loop started")
 
         while self._running:
@@ -240,18 +359,19 @@ class MotionPlugin(Plugin):
                 await asyncio.sleep(poll_interval)
                 continue
 
-            if self.app.is_speaking:
-                # During speech, use speech wobble only. Face tracking resumes
-                # after playback ends and the robot has returned to center.
-                self._apply_speech_wobble()
+            now = time.monotonic()
+            speaking = self.app.is_speaking
+
+            # ── Gaze anchor source ──────────────────────────────────────
+            # Face tracking is paused while speaking (don't chase faces mid
+            # sentence) and during the post-turn center lock. In both cases the
+            # anchor decays to neutral while the layers below keep it alive.
+            if speaking:
+                target = None
+            elif now < self._tracking_lock_until:
                 await asyncio.sleep(poll_interval)
                 continue
-
-            if time.monotonic() < self._tracking_lock_until:
-                await asyncio.sleep(poll_interval)
-                continue
-
-            if self._tracking_allowed():
+            elif self._tracking_allowed():
                 try:
                     target = await asyncio.wait_for(
                         asyncio.to_thread(self.app.head_targets.get_fused_target),
@@ -287,22 +407,72 @@ class MotionPlugin(Plugin):
                     self._current_body_yaw, target.body_yaw, self._body_smoothing, self._body_max_step
                 )
 
-            # Update head pose if changed enough
-            delta_yaw = abs(self._current_yaw - self._last_applied_yaw)
-            delta_pitch = abs(self._current_pitch - self._last_applied_pitch)
-            delta_roll = abs(self._current_roll - self._last_applied_roll)
+            # ── Compose additive layers on top of the gaze anchor ───────
+            a_roll, a_pitch, a_yaw = self._sample_head_accent(now)
+            if speaking:
+                w_roll, w_pitch, w_yaw = self._speech_roll, self._speech_pitch, self._speech_yaw
+            else:
+                w_roll = w_pitch = w_yaw = 0.0
+            i_roll, i_pitch, i_yaw = self._sample_idle_micro(now, speaking)
 
-            if delta_yaw >= self._min_angle_change or delta_pitch >= self._min_angle_change or delta_roll >= self._min_angle_change:
-                self._set_head_pose(self._current_yaw, self._current_pitch, self._current_roll)
-                self._last_applied_yaw = self._current_yaw
-                self._last_applied_pitch = self._current_pitch
-                self._last_applied_roll = self._current_roll
+            # A transient layer is live → tighten the emit deadband so accents
+            # and wobble stay smooth even below the tracking deadband.
+            transient_active = (
+                self._head_accent is not None
+                or (speaking and (abs(w_roll) + abs(w_pitch) + abs(w_yaw)) > 0.1)
+                or bool(i_roll or i_pitch or i_yaw)
+            )
 
-            # Update body rotation if changed enough
-            delta_body = abs(self._current_body_yaw - self._last_applied_body_yaw)
-            if delta_body >= self._body_min_angle:
-                self._set_body_yaw(self._current_body_yaw)
-                self._last_applied_body_yaw = self._current_body_yaw
+            def _clip(v, lim):
+                return lim if v > lim else (-lim if v < -lim else v)
+
+            comp_yaw = _clip(self._current_yaw + a_yaw + w_yaw + i_yaw, self._head_yaw_limit)
+            comp_pitch = _clip(self._current_pitch + a_pitch + w_pitch + i_pitch, self._head_pitch_limit)
+            comp_roll = _clip(self._current_roll + a_roll + w_roll + i_roll, self._head_roll_limit)
+            comp_body = self._current_body_yaw
+
+            # ── Single emit ─────────────────────────────────────────────
+            # Newer daemons accept one atomic full target; older daemons need
+            # the split commands so body tracking does not continuously
+            # re-anchor the head pose (head only emitted when it actually moved).
+            emit_deadband = 0.1 if transient_active else self._min_angle_change
+            delta_yaw = abs(comp_yaw - self._last_applied_yaw)
+            delta_pitch = abs(comp_pitch - self._last_applied_pitch)
+            delta_roll = abs(comp_roll - self._last_applied_roll)
+            delta_body = abs(comp_body - self._last_applied_body_yaw)
+            head_changed = (
+                delta_yaw >= emit_deadband
+                or delta_pitch >= emit_deadband
+                or delta_roll >= emit_deadband
+            )
+            body_changed = delta_body >= self._body_min_angle
+
+            if head_changed or body_changed:
+                reachy = self.app.reachy
+                use_full_target = bool(
+                    reachy
+                    and hasattr(reachy, "set_target")
+                    and self._supports_full_target(reachy)
+                )
+            else:
+                use_full_target = False
+
+            if use_full_target:
+                self._set_tracking_pose(comp_yaw, comp_pitch, comp_roll, comp_body)
+                self._last_applied_yaw = comp_yaw
+                self._last_applied_pitch = comp_pitch
+                self._last_applied_roll = comp_roll
+                self._last_applied_body_yaw = comp_body
+            else:
+                if head_changed:
+                    self._set_head_pose(comp_yaw, comp_pitch, comp_roll)
+                    self._last_applied_yaw = comp_yaw
+                    self._last_applied_pitch = comp_pitch
+                    self._last_applied_roll = comp_roll
+
+                if body_changed:
+                    self._set_body_yaw(comp_body)
+                    self._last_applied_body_yaw = comp_body
 
             await asyncio.sleep(poll_interval)
 
@@ -400,6 +570,64 @@ class MotionPlugin(Plugin):
         except Exception:
             pass
 
+    @staticmethod
+    def _version_at_least(version: str, minimum: tuple[int, int, int]) -> bool:
+        parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
+        if not parts:
+            return False
+        parts.extend([0] * (3 - len(parts)))
+        return tuple(parts[:3]) >= minimum
+
+    def _supports_full_target(self, reachy) -> bool:
+        """Return True only when the connected daemon supports set_full_target."""
+        if self._full_target_supported is not None:
+            return self._full_target_supported
+
+        supported = False
+        try:
+            client = vars(reachy).get("client")
+            get_status = getattr(client, "get_status", None) if client else None
+            status = get_status(wait=False) if get_status else None
+            version = str(getattr(status, "version", "") or "")
+            supported = self._version_at_least(version, (1, 8, 0))
+            if version and not supported:
+                logger.info(
+                    "Reachy daemon %s does not support set_full_target; "
+                    "using legacy tracking commands",
+                    version,
+                )
+        except Exception:
+            supported = False
+
+        self._full_target_supported = supported
+        return supported
+
+    def _set_tracking_pose(
+        self, yaw: float, pitch: float, roll: float = 0.0, body_yaw: float = 0.0
+    ) -> None:
+        """Set tracking head pose and body yaw as one compatible target update.
+
+        Face tracking splits horizontal motion to the body yaw and keeps head
+        yaw independent, so the robot orients toward the visual target without
+        double-counting the same horizontal offset.
+        """
+        reachy = self.app.reachy
+        if not reachy:
+            return
+        try:
+            from reachy_mini.utils import create_head_pose
+
+            pose = create_head_pose(yaw=yaw, pitch=pitch, roll=roll, degrees=True)
+            if hasattr(reachy, "set_target") and self._supports_full_target(reachy):
+                reachy.set_target(head=pose, body_yaw=math.radians(body_yaw))
+            else:
+                reachy.set_target_head_pose(pose)
+                reachy.set_target_body_yaw(math.radians(body_yaw))
+        except ConnectionError:
+            self.app._disconnect_robot()
+        except Exception:
+            pass
+
     def _set_antennas(self, right_deg: float, left_deg: float) -> None:
         """Set antenna positions immediately (degrees → radians)."""
         reachy = self.app.reachy
@@ -414,6 +642,12 @@ class MotionPlugin(Plugin):
             pass
 
     async def _run_expression_safe(self, expr) -> None:
+        # The head pose of an emotion is injected as an additive accent (the
+        # compositor layers it on top of gaze + wobble); the head is never
+        # commanded as an absolute pose here. Done on the event loop so the
+        # accent is published on the same thread the tracking loop reads it.
+        if expr.head:
+            self._inject_head_accent(expr.head)
         # Runs the blocking SDK call (reachy.goto_target) off the event loop
         # with a timeout, so a hung daemon cannot freeze the whole loop.
         duration = expr.head.duration if expr.head else 0.5
@@ -448,17 +682,11 @@ class MotionPlugin(Plugin):
             )
 
         try:
-            from reachy_mini.utils import create_head_pose
-
+            # Emotion expressions are antenna-only by design: the head stays
+            # neutral so it never fights visual base-yaw tracking or the speech
+            # wobbler. Head motion comes solely from face tracking (base yaw)
+            # and HeadWobbler during speech — emotion tags drive antennas only.
             kwargs = {}
-            if expr.head and self._tracking_allowed():
-                head_pose = create_head_pose(
-                    yaw=expr.head.yaw,
-                    roll=expr.head.roll,
-                    degrees=True,
-                )
-                kwargs["head"] = head_pose
-                kwargs["duration"] = expr.head.duration
 
             # Static antenna (only if no animation)
             if expr.antenna and not expr.antenna_anim:

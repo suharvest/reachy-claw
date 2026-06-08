@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import math
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -24,7 +26,9 @@ _CHP = "reachy_mini.utils.create_head_pose"
 
 
 class TestExecuteExpression:
-    def test_expression_with_head_and_antenna(self, app, mock_reachy):
+    def test_expression_head_ignored_antenna_drives(self, app, mock_reachy):
+        # Emotion expressions are antenna-only: the head pose is ignored and
+        # the static antenna drives goto_target (with the antenna duration).
         plugin = MotionPlugin(app)
         plugin.open_interaction_window(1.0)
         expr = RobotExpression(
@@ -38,10 +42,13 @@ class TestExecuteExpression:
 
         mock_reachy.goto_target.assert_called_once()
         call_kwargs = mock_reachy.goto_target.call_args.kwargs
-        assert call_kwargs["duration"] == 0.5
+        assert "head" not in call_kwargs
         assert "antennas" in call_kwargs
+        assert call_kwargs["duration"] == 0.3
 
-    def test_expression_head_only_inside_interaction_window(self, app, mock_reachy):
+    def test_expression_head_only_never_moves_head(self, app, mock_reachy):
+        # A head-only emotion expression drives nothing — emotion tags no
+        # longer move the head, even inside an interaction window.
         plugin = MotionPlugin(app)
         plugin.open_interaction_window(1.0)
         expr = RobotExpression(
@@ -52,11 +59,9 @@ class TestExecuteExpression:
         with patch(_CHP, return_value=np.eye(4)):
             plugin._execute_expression(expr)
 
-        mock_reachy.goto_target.assert_called_once()
-        call_kwargs = mock_reachy.goto_target.call_args.kwargs
-        assert "antennas" not in call_kwargs
+        mock_reachy.goto_target.assert_not_called()
 
-    def test_expression_head_suppressed_without_interaction_window(
+    def test_expression_head_only_suppressed_without_window(
         self, app, mock_reachy
     ):
         plugin = MotionPlugin(app)
@@ -119,8 +124,8 @@ class TestMotionLoop:
             plugin._running = False
             await task
 
-        # Should have executed the expression
-        assert mock_reachy.goto_target.called
+        # Emotion expressions drive the antenna animation, not the head.
+        assert plugin._antenna_anim is not None
 
     @pytest.mark.asyncio
     async def test_idle_animation_does_not_move_head_without_interaction(self, app, mock_reachy):
@@ -180,8 +185,51 @@ class TestHeadTrackingLoop:
 
         assert not mock_reachy.set_target_head_pose.called
 
+    def test_tracking_pose_sends_head_and_body_atomically(self, app, mock_reachy):
+        mock_reachy.client = SimpleNamespace(
+            get_status=lambda wait=False: SimpleNamespace(version="1.8.0")
+        )
+        plugin = MotionPlugin(app)
+        pose = np.eye(4)
+
+        with patch(_CHP, return_value=pose) as create_head_pose:
+            plugin._set_tracking_pose(
+                yaw=2.0, pitch=-4.0, roll=1.0, body_yaw=12.0
+            )
+
+        create_head_pose.assert_called_once_with(
+            yaw=2.0, pitch=-4.0, roll=1.0, degrees=True
+        )
+        mock_reachy.set_target.assert_called_once_with(
+            head=pose, body_yaw=math.radians(12.0)
+        )
+        assert not mock_reachy.set_target_head_pose.called
+        assert not mock_reachy.set_target_body_yaw.called
+
+    def test_tracking_pose_uses_legacy_commands_for_old_daemon(self, app, mock_reachy):
+        mock_reachy.client = SimpleNamespace(
+            get_status=lambda wait=False: SimpleNamespace(version="1.5.1")
+        )
+        plugin = MotionPlugin(app)
+        pose = np.eye(4)
+
+        with patch(_CHP, return_value=pose) as create_head_pose:
+            plugin._set_tracking_pose(
+                yaw=2.0, pitch=-4.0, roll=1.0, body_yaw=12.0
+            )
+
+        create_head_pose.assert_called_once_with(
+            yaw=2.0, pitch=-4.0, roll=1.0, degrees=True
+        )
+        assert not mock_reachy.set_target.called
+        mock_reachy.set_target_head_pose.assert_called_once_with(pose)
+        mock_reachy.set_target_body_yaw.assert_called_once_with(math.radians(12.0))
+
     @pytest.mark.asyncio
     async def test_tracks_face_target_inside_interaction_window(self, app, mock_reachy):
+        mock_reachy.client = SimpleNamespace(
+            get_status=lambda wait=False: SimpleNamespace(version="1.8.0")
+        )
         app.config.motion_head_tracking_poll_interval = 0.02
         plugin = MotionPlugin(app)
         plugin._running = True
@@ -197,7 +245,40 @@ class TestHeadTrackingLoop:
             plugin._running = False
             await task
 
-        assert mock_reachy.set_target_head_pose.called
+        assert mock_reachy.set_target.called
+        assert not mock_reachy.set_target_head_pose.called
+        assert not mock_reachy.set_target_body_yaw.called
+
+    @pytest.mark.asyncio
+    async def test_legacy_daemon_body_tracking_does_not_reset_head_pose(
+        self, app, mock_reachy
+    ):
+        mock_reachy.client = SimpleNamespace(
+            get_status=lambda wait=False: SimpleNamespace(version="1.5.1")
+        )
+        app.config.motion_head_tracking_poll_interval = 0.02
+        plugin = MotionPlugin(app)
+        plugin._running = True
+        plugin.open_interaction_window(1.0)
+        app.head_targets.publish(
+            HeadTarget(
+                yaw=0.0,
+                pitch=0.0,
+                roll=0.0,
+                body_yaw=12.0,
+                confidence=0.9,
+                source="face",
+            )
+        )
+
+        task = asyncio.create_task(plugin._head_tracking_loop())
+        await asyncio.sleep(0.08)
+        plugin._running = False
+        await task
+
+        assert not mock_reachy.set_target.called
+        assert not mock_reachy.set_target_head_pose.called
+        assert mock_reachy.set_target_body_yaw.called
 
     @pytest.mark.asyncio
     async def test_center_lock_suppresses_face_tracking(self, app, mock_reachy):
@@ -321,3 +402,67 @@ class TestSpeechOffsets:
         plugin._apply_speech_wobble()
         # Too small, should not call set_target_head_pose
         assert not mock_reachy.set_target_head_pose.called
+
+
+# ── Head compositor (emotion accents) ──────────────────────────────────
+
+
+class TestHeadCompositor:
+    def test_inject_head_accent_scales_amplitude(self, app):
+        plugin = MotionPlugin(app)
+        plugin._accent_gain = 0.5
+        plugin._inject_head_accent(HeadPose(yaw=10, pitch=-8, roll=4, duration=0.6))
+
+        acc = plugin._head_accent
+        assert acc is not None
+        assert acc.yaw == 5.0
+        assert acc.pitch == -4.0
+        assert acc.roll == 2.0
+        assert acc.hold == 0.6
+        assert acc.attack > 0.0 and acc.release > 0.0
+
+    def test_head_accent_holds_then_clears(self, app):
+        plugin = MotionPlugin(app)
+        plugin._accent_gain = 1.0
+        plugin._inject_head_accent(HeadPose(yaw=10, duration=0.5))
+        acc = plugin._head_accent
+
+        # Mid-hold → full amplitude.
+        mid = acc.start + acc.attack + acc.hold * 0.5
+        _, _, yaw = plugin._sample_head_accent(mid)
+        assert abs(yaw - 10.0) < 1e-6
+
+        # Past the full envelope → zeroed and cleared.
+        _, _, yaw = plugin._sample_head_accent(acc.start + acc.total + 0.01)
+        assert yaw == 0.0
+        assert plugin._head_accent is None
+
+    def test_idle_micro_disabled_by_default(self, app):
+        plugin = MotionPlugin(app)
+        assert plugin._sample_idle_micro(123.4, speaking=False) == (0.0, 0.0, 0.0)
+
+    @pytest.mark.asyncio
+    async def test_emotion_accent_moves_head_additively(self, app, mock_reachy):
+        # An emotion accent drives the head through the compositor even with no
+        # face target and no interaction window — it rides on top of the
+        # (neutral) gaze anchor instead of being gated away.
+        mock_reachy.client = SimpleNamespace(
+            get_status=lambda wait=False: SimpleNamespace(version="1.8.0")
+        )
+        app.config.motion_head_tracking_poll_interval = 0.02
+        plugin = MotionPlugin(app)
+        plugin._running = True
+        plugin._accent_gain = 1.0
+        plugin._inject_head_accent(HeadPose(yaw=12, duration=0.5))
+
+        with patch(_CHP, return_value=np.eye(4)) as create_head_pose:
+            task = asyncio.create_task(plugin._head_tracking_loop())
+            await asyncio.sleep(0.12)
+            plugin._running = False
+            await task
+
+        assert mock_reachy.set_target.called
+        yaws = [c.kwargs.get("yaw", 0.0) for c in create_head_pose.call_args_list]
+        assert any(abs(y) > 1.0 for y in yaws)
+        # Anchor itself never moved — the motion came purely from the accent.
+        assert plugin._current_yaw == 0.0
