@@ -106,6 +106,16 @@ vision:
   emotion_threshold: 0.6
   emotion_cooldown: 5.0
 
+# ── Motion (head compositor) ─────────────────────────────────────────
+# Head = gaze anchor (base yaw follow) + emotion accents + speech wobble.
+# Emotion tags ride on top of gaze as a brief accent, then decay back.
+motion:
+  emotion_accent_gain: 0.6   # 0 = head stays neutral on emotions; raise for bigger gestures
+  head_idle_micro: false     # true = subtle idle head drift so it's not frozen
+  # head_yaw_limit: 25.0     # safe envelope (deg) for composed head output
+  # head_pitch_limit: 18.0
+  # head_roll_limit: 18.0
+
 # ── Dashboard (exhibition UI) ────────────────────────────────────────
 dashboard:
   enabled: true

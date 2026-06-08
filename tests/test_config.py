@@ -102,6 +102,28 @@ def test_slv_deploy_points_tts_capabilities_to_v2v_http_port():
     assert config.speech_service_url == "http://localhost:8621"
 
 
+def test_slv_deploy_exposes_head_compositor_knobs():
+    from pathlib import Path
+
+    cfg_file = (
+        Path(__file__).parents[1]
+        / "deploy"
+        / "jetson"
+        / "reachy"
+        / "reachy-claw.jetson.slv.yaml"
+    )
+
+    config = load_config(cfg_file)
+
+    # Explicit in yaml.
+    assert config.motion_emotion_accent_gain == 0.6
+    assert config.motion_head_idle_micro is False
+    # Commented out in yaml → fall back to safe defaults.
+    assert config.motion_head_yaw_limit == 25.0
+    assert config.motion_head_pitch_limit == 18.0
+    assert config.motion_head_roll_limit == 18.0
+
+
 def test_slv_deploy_declares_visual_attention_voice_gate():
     import yaml
     from pathlib import Path
