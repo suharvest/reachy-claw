@@ -48,6 +48,25 @@ class TestHeadTargetBus:
         assert target.pitch == pytest.approx(-5.0)
         assert target.confidence == 0.9
 
+    def test_default_face_target_holds_through_brief_detection_gap(self):
+        bus = HeadTargetBus()
+        now = time.monotonic()
+        bus.publish(
+            HeadTarget(
+                yaw=12.0,
+                pitch=-4.0,
+                confidence=0.9,
+                source="face",
+                timestamp=now - 1.0,
+            )
+        )
+
+        target = bus.get_fused_target()
+
+        assert target.source == "face"
+        assert target.yaw == pytest.approx(12.0)
+        assert target.pitch == pytest.approx(-4.0)
+
     def test_doa_published_returns_doa(self):
         bus = HeadTargetBus()
         bus.publish(

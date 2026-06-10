@@ -36,7 +36,7 @@ class HeadTargetBus:
 
     def __init__(
         self,
-        face_timeout: float = 0.5,
+        face_timeout: float = 2.0,
         doa_timeout: float = 3.0,
     ) -> None:
         self._lock = threading.Lock()

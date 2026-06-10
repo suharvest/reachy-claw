@@ -62,10 +62,10 @@ function updateRestBadge(state) {
   badge.classList.remove("active", "resting", "forced");
   if (state.resting) {
     badge.classList.add("resting");
-    badge.textContent = state.force_state === true ? "Resting (forced)" : "Resting";
+    badge.textContent = state.force_state === true ? t("rest.restingForced") : t("rest.resting");
   } else {
     badge.classList.add("active");
-    badge.textContent = state.force_state === false ? "Awake (forced)" : "Awake";
+    badge.textContent = state.force_state === false ? t("rest.awakeForced") : t("rest.awake");
   }
   if (state.force_state !== null && state.force_state !== undefined) {
     badge.classList.add("forced");
@@ -99,7 +99,7 @@ async function bindRestSettings() {
     endInput.value = cur.window_end;
     tzInput.value = cur.timezone;
   } catch (e) {
-    flashStatus(statusEl, "Load failed: " + e.message, false);
+    flashStatus(statusEl, t("common.loadFailed", { msg: e.message }), false);
   }
   await refreshRestState();
 
@@ -121,7 +121,7 @@ async function bindRestSettings() {
     };
     try {
       await putSettings("rest", body);
-      flashStatus(statusEl, "Saved", true);
+      flashStatus(statusEl, t("common.saved"), true);
       await refreshRestState();
     } catch (e) {
       flashStatus(statusEl, e.message, false);
@@ -133,21 +133,21 @@ async function bindRestSettings() {
   enterBtn.addEventListener("click", async () => {
     try {
       await postRestForce("enter");
-      flashStatus(statusEl, "Forced into rest", true);
+      flashStatus(statusEl, t("rest.forcedInto"), true);
       await refreshRestState();
     } catch (e) { flashStatus(statusEl, e.message, false); }
   });
   exitBtn.addEventListener("click", async () => {
     try {
       await postRestForce("exit");
-      flashStatus(statusEl, "Forced awake", true);
+      flashStatus(statusEl, t("rest.forcedAwake"), true);
       await refreshRestState();
     } catch (e) { flashStatus(statusEl, e.message, false); }
   });
   clearBtn.addEventListener("click", async () => {
     try {
       await postRestForce("clear");
-      flashStatus(statusEl, "Following schedule", true);
+      flashStatus(statusEl, t("rest.following"), true);
       await refreshRestState();
     } catch (e) { flashStatus(statusEl, e.message, false); }
   });
@@ -177,7 +177,7 @@ async function bindDiarySettings() {
     pathInput.value = cur.site_diary_path || "src/content/docs";
     branchInput.value = cur.site_branch || "main";
   } catch (e) {
-    flashStatus(statusEl, "Load failed: " + e.message, false);
+    flashStatus(statusEl, t("common.loadFailed", { msg: e.message }), false);
   }
 
   if (!saveBtn.dataset.bound) {
@@ -197,7 +197,7 @@ async function bindDiarySettings() {
       };
       try {
         await putSettings("diary", body);
-        flashStatus(statusEl, "Saved", true);
+        flashStatus(statusEl, t("common.saved"), true);
       } catch (e) {
         flashStatus(statusEl, e.message, false);
       } finally {
@@ -216,7 +216,7 @@ async function renderDiaryHistory() {
     const r = await fetch("/api/diary/status");
     const { dates } = await r.json();
     if (!dates || dates.length === 0) {
-      root.innerHTML = `<div class="face-empty">No diary records yet.</div>`;
+      root.innerHTML = `<div class="face-empty">${t("diarySet.noRecords")}</div>`;
       return;
     }
     root.innerHTML = "";
@@ -226,16 +226,16 @@ async function renderDiaryHistory() {
       row.style.marginBottom = "6px";
 
       const status = d.published
-        ? `<span style="color: var(--green); font-weight: 600;">✓ Published</span>`
+        ? `<span style="color: var(--green); font-weight: 600;">${t("diarySet.published")}</span>`
         : (d.generated
-            ? `<span style="color: #f59e0b; font-weight: 600;">⚠ Unpublished</span>`
-            : `<span style="color: var(--text-dim);">— Missing</span>`);
+            ? `<span style="color: #f59e0b; font-weight: 600;">${t("diarySet.unpublished")}</span>`
+            : `<span style="color: var(--text-dim);">${t("diarySet.missing")}</span>`);
 
       const action = d.published
-        ? { label: "Regenerate", op: () => trigger("generate", d.date, true) }
+        ? { label: t("diarySet.regenerate"), op: () => trigger("generate", d.date, true) }
         : (d.generated
-            ? { label: "Publish", op: () => trigger("publish", d.date, false) }
-            : { label: "Generate + Publish", op: async () => {
+            ? { label: t("diarySet.publish"), op: () => trigger("publish", d.date, false) }
+            : { label: t("diarySet.genPublish"), op: async () => {
                 await trigger("generate", d.date, false);
                 // small wait so the row reflects "generated"
                 await new Promise(res => setTimeout(res, 600));
@@ -250,7 +250,7 @@ async function renderDiaryHistory() {
       const btn = row.querySelector("button");
       btn.addEventListener("click", async () => {
         btn.disabled = true;
-        btn.textContent = "Working...";
+        btn.textContent = t("diarySet.working");
         try { await action.op(); } catch (e) { alert(e.message); }
         await new Promise(res => setTimeout(res, 800));
         await renderDiaryHistory();
@@ -258,7 +258,7 @@ async function renderDiaryHistory() {
       root.appendChild(row);
     }
   } catch (e) {
-    root.innerHTML = `<div class="face-empty">Failed: ${e.message}</div>`;
+    root.innerHTML = `<div class="face-empty">${t("diarySet.failed", { msg: e.message })}</div>`;
   }
 }
 

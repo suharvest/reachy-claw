@@ -4,10 +4,11 @@ version = "0.1.0"
 description = "Low-latency voice assistant for Reachy Mini — powered by sherpa-onnx and OpenClaw"
 requires-python = ">=3.11"
 dependencies = [
-    "reachy-mini>=1.2.0",
-    "websockets>=12.0",
-    "numpy>=1.24",
-    "httpx>=0.27.0",
+    "reachy-mini>=1.8.0",
+    # reachy-mini's WebSocket transport pins websockets<16; numpy>=2.2.5
+    "websockets>=15.0,<16",
+    "numpy>=2.2.5",
+    "httpx>=0.28.0",
     "pyyaml>=6.0",
     "openvoicestream-agent",
 ]

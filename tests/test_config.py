@@ -6,6 +6,143 @@ from __future__ import annotations
 from reachy_claw.config import Config, load_config, save_runtime_overrides
 
 
+def test_slv_deploy_restart_button_covers_voice_and_llm_services():
+    import yaml
+    from pathlib import Path
+
+    cfg_file = (
+        Path(__file__).parents[1]
+        / "deploy"
+        / "jetson"
+        / "reachy"
+        / "reachy-claw.jetson.slv.yaml"
+    )
+    data = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    restart_containers = data["dashboard"]["restart_containers"]
+
+    assert restart_containers == [
+        "vision-trt:true",
+        "edge-llm-chat-service:true",
+        "deploy-speech-1:false",
+        "reachy-daemon:false",
+        "reachy-claw:false",
+    ]
+
+
+def test_slv_deploy_uses_client_vad_preroll_for_wakeword_free_speech():
+    import yaml
+    from pathlib import Path
+
+    cfg_file = (
+        Path(__file__).parents[1]
+        / "deploy"
+        / "jetson"
+        / "reachy"
+        / "reachy-claw.jetson.slv.yaml"
+    )
+    data = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    v2v = data["v2v"]
+
+    assert v2v["vad"] == "none"
+    assert v2v["client_vad_preroll_ms"] >= 600
+    assert v2v["client_vad_silence_ms"] >= 500
+
+
+def test_config_default_v2v_client_vad_threshold_uses_backend_default():
+    config = Config()
+
+    assert config.v2v_client_vad_threshold is None
+
+
+def test_slv_deploy_uses_less_conservative_client_vad_threshold():
+    from pathlib import Path
+
+    cfg_file = (
+        Path(__file__).parents[1]
+        / "deploy"
+        / "jetson"
+        / "reachy"
+        / "reachy-claw.jetson.slv.yaml"
+    )
+
+    config = load_config(cfg_file)
+
+    assert config.v2v_client_vad_threshold == 0.3
+
+
+def test_slv_deploy_selects_primary_reachy_audio_input_channel():
+    from pathlib import Path
+
+    cfg_file = (
+        Path(__file__).parents[1]
+        / "deploy"
+        / "jetson"
+        / "reachy"
+        / "reachy-claw.jetson.slv.yaml"
+    )
+
+    config = load_config(cfg_file)
+
+    assert config.audio_input_channel == 0
+
+
+def test_slv_deploy_points_tts_capabilities_to_v2v_http_port():
+    from pathlib import Path
+
+    cfg_file = (
+        Path(__file__).parents[1]
+        / "deploy"
+        / "jetson"
+        / "reachy"
+        / "reachy-claw.jetson.slv.yaml"
+    )
+
+    config = load_config(cfg_file)
+
+    assert config.speech_service_url == "http://localhost:8621"
+
+
+def test_slv_deploy_exposes_head_compositor_knobs():
+    from pathlib import Path
+
+    cfg_file = (
+        Path(__file__).parents[1]
+        / "deploy"
+        / "jetson"
+        / "reachy"
+        / "reachy-claw.jetson.slv.yaml"
+    )
+
+    config = load_config(cfg_file)
+
+    # Explicit in yaml.
+    assert config.motion_emotion_accent_gain == 0.6
+    assert config.motion_head_idle_micro is False
+    # Commented out in yaml → fall back to safe defaults.
+    assert config.motion_head_yaw_limit == 25.0
+    assert config.motion_head_pitch_limit == 18.0
+    assert config.motion_head_roll_limit == 18.0
+
+
+def test_slv_deploy_declares_visual_attention_voice_gate():
+    import yaml
+    from pathlib import Path
+
+    cfg_file = (
+        Path(__file__).parents[1]
+        / "deploy"
+        / "jetson"
+        / "reachy"
+        / "reachy-claw.jetson.slv.yaml"
+    )
+    data = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    voice = data["voice"]
+
+    assert voice["attention_window_s"] >= 10
+    assert voice["unattended_min_cjk_chars"] >= 6
+    assert voice["unattended_min_alpha_chars"] >= 5
+
+
 def test_config_loads_tokens_from_environment(monkeypatch):
     monkeypatch.setenv("OPENCLAW_TOKEN", "gateway-token")
     monkeypatch.setenv("OPENCLAW_OPENAI_TOKEN", "openai-token")
@@ -38,7 +175,7 @@ def test_config_has_motion_defaults():
     config = Config()
     assert config.motion_emotion_intensity == 1.0
     assert config.motion_head_tracking_smoothing == 0.35
-    assert config.motion_idle_animation_interval == 5.0
+    assert config.motion_idle_animation_interval == 10.0
 
 
 def test_config_has_vision_defaults():
@@ -72,6 +209,10 @@ behavior:
 vision:
   tracker: none
   camera_index: 2
+voice:
+  attention_window_s: 9
+  unattended_min_cjk_chars: 7
+  unattended_min_alpha_chars: 6
 plugins:
   face_tracker: false
 """
@@ -89,6 +230,9 @@ plugins:
     assert config.play_emotions is False
     assert config.vision_tracker_type == "none"
     assert config.vision_camera_index == 2
+    assert config.voice_attention_window_s == 9
+    assert config.voice_unattended_min_cjk_chars == 7
+    assert config.voice_unattended_min_alpha_chars == 6
     assert config.enable_face_tracker is False
 
 

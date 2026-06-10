@@ -59,7 +59,7 @@ async function loadDiaryList() {
 
 async function loadDiary(date) {
     if (!diaryContent) return;
-    diaryContent.innerHTML = '<div class="diary-loading">Loading</div>';
+    diaryContent.innerHTML = `<div class="diary-loading">${t('diary.loadingShort')}</div>`;
 
     try {
         const res = await fetch(`/api/diary/${date}`);
@@ -83,14 +83,14 @@ function navigateDiary(delta) {
 function updateDateNav() {
     if (!diaryDateLabel) return;
     if (diaryDates.length === 0) {
-        diaryDateLabel.textContent = 'No diaries';
+        diaryDateLabel.textContent = t('diary.noDiaries');
         if (diaryPrevBtn) diaryPrevBtn.disabled = true;
         if (diaryNextBtn) diaryNextBtn.disabled = true;
         return;
     }
     const date = diaryDates[diaryCurrentIdx];
     const isToday = date === new Date().toISOString().slice(0, 10);
-    diaryDateLabel.textContent = isToday ? `${date} · Today` : date;
+    diaryDateLabel.textContent = isToday ? t('diary.today', { date }) : date;
     if (diaryPrevBtn) diaryPrevBtn.disabled = diaryCurrentIdx >= diaryDates.length - 1;
     if (diaryNextBtn) diaryNextBtn.disabled = diaryCurrentIdx <= 0;
 }
@@ -105,8 +105,8 @@ function renderDiary(diary) {
     // Header (Storyboard style)
     html += `
         <div class="diary-header">
-            <div class="diary-subtitle">Day ${diary.date || ''}</div>
-            <div class="diary-title">${esc(diary.title || 'Daily Diary')}</div>
+            <div class="diary-subtitle">${t('diary.day', { date: diary.date || '' })}</div>
+            <div class="diary-title">${esc(diary.title || t('diary.defaultTitle'))}</div>
         </div>
     `;
 
@@ -139,14 +139,15 @@ function renderDiary(diary) {
     });
 }
 
+// Localized diary section label; falls back to the raw id when not in dict.
+function sectionLabel(id) {
+    const k = 'diary.section.' + id;
+    const v = t(k);
+    return v === k ? id : v;
+}
+
 function renderSection(section) {
-    const labelMap = {
-        summary: 'Summary', mood_curve: 'Emotional Journey',
-        conversations: 'Conversations', faces: 'People & Smiles',
-        thoughts: 'Reflections', environment: 'Environment',
-        smile_wall: 'Smile Wall',
-    };
-    const label = labelMap[section.id] || section.id;
+    const label = sectionLabel(section.id);
 
     let inner = '';
 
@@ -210,7 +211,7 @@ function renderConversations(items) {
         if (item.user) {
             html += `
                 <div class="diary-conv-bubble user">
-                    <div class="conv-sender">Visitor</div>
+                    <div class="conv-sender">${t('diary.visitor')}</div>
                     ${esc(item.user)}
                 </div>
             `;
@@ -222,7 +223,7 @@ function renderConversations(items) {
                 <div class="diary-conv-bubble reply">
                     <div class="conv-sender">
                         <span>\u{1F916}</span>
-                        <span>Reachy Mini</span>
+                        <span>${t('diary.reachy')}</span>
                     </div>
                     ${esc(item.reply)} ${emoji}
                 </div>
@@ -252,15 +253,15 @@ function renderThoughts(items) {
 
 function renderStats(data) {
     const items = [
-        { value: data.faces_seen ?? '-', label: 'People', color: 'orange' },
-        { value: data.smiles_captured ?? '-', label: 'Smiles', color: 'green' },
-        { value: data.peak_hour ?? '-', label: 'Peak', color: 'blue' },
+        { value: data.faces_seen ?? '-', label: t('diary.stat.people'), color: 'orange' },
+        { value: data.smiles_captured ?? '-', label: t('diary.stat.smiles'), color: 'green' },
+        { value: data.peak_hour ?? '-', label: t('diary.stat.peak'), color: 'blue' },
     ];
 
     const known = data.known_people || {};
     const knownCount = Object.keys(known).length;
     if (knownCount > 0) {
-        items.push({ value: knownCount, label: 'Recognized', color: 'purple' });
+        items.push({ value: knownCount, label: t('diary.stat.recognized'), color: 'purple' });
     }
 
     let html = '<div class="diary-stats-row">';
@@ -278,10 +279,10 @@ function renderStats(data) {
 
 function renderSensors(data) {
     const sensors = [];
-    if (data.temperature != null) sensors.push({ icon: '\u{1F321}', value: `${data.temperature}\u00B0C`, label: 'Temperature' });
-    if (data.humidity != null) sensors.push({ icon: '\u{1F4A7}', value: `${data.humidity}%`, label: 'Humidity' });
-    if (data.weather) sensors.push({ icon: weatherIcon(data.weather), value: data.weather, label: 'Weather' });
-    if (data.location) sensors.push({ icon: '\u{1F4CD}', value: data.location, label: 'Location' });
+    if (data.temperature != null) sensors.push({ icon: '\u{1F321}', value: `${data.temperature}\u00B0C`, label: t('diary.sensor.temperature') });
+    if (data.humidity != null) sensors.push({ icon: '\u{1F4A7}', value: `${data.humidity}%`, label: t('diary.sensor.humidity') });
+    if (data.weather) sensors.push({ icon: weatherIcon(data.weather), value: data.weather, label: t('diary.sensor.weather') });
+    if (data.location) sensors.push({ icon: '\u{1F4CD}', value: data.location, label: t('diary.sensor.location') });
 
     let html = '<div class="diary-sensor-row">';
     for (const s of sensors) {
@@ -301,14 +302,14 @@ function renderSensors(data) {
 
 function renderFooterStats(data) {
     const items = [
-        { value: data.faces_seen ?? 0, label: 'Total Faces', color: '#f0883e' },
-        { value: data.smiles_captured ?? 0, label: 'Smiles', color: '#00d68f' },
-        { value: data.peak_hour || '--', label: 'Peak Hour', color: '#58a6ff' },
+        { value: data.faces_seen ?? 0, label: t('diary.stat.totalFaces'), color: '#f0883e' },
+        { value: data.smiles_captured ?? 0, label: t('diary.stat.smiles'), color: '#00d68f' },
+        { value: data.peak_hour || '--', label: t('diary.stat.peakHour'), color: '#58a6ff' },
     ];
 
     let html = `
         <div class="diary-footer">
-            <div class="diary-footer-label">Data Summary</div>
+            <div class="diary-footer-label">${t('diary.dataSummary')}</div>
             <div class="diary-stats-row">
     `;
     for (const item of items) {
@@ -494,7 +495,7 @@ function drawMoodChart(sectionId, data, canvasId) {
     ctx.fillStyle = '#00d68f';
     ctx.font = 'bold 11px JetBrains Mono, monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(`Peak: ${peakVal}`, peak.x, peak.y - 16);
+    ctx.fillText(t('diary.peakLabel', { value: peakVal }), peak.x, peak.y - 16);
 }
 
 // ── Fullscreen Narration Overlay ─────────────────────────────────────
@@ -502,12 +503,6 @@ function drawMoodChart(sectionId, data, canvasId) {
 let narrationOverlay = null;
 let narrationSections = [];
 let narrationCurrentIdx = -1;
-
-const SECTION_LABEL_MAP = {
-    summary: 'Summary', mood_curve: 'Emotional Journey',
-    conversations: 'Conversations', faces: 'People & Smiles',
-    thoughts: 'Reflections', environment: 'Environment',
-};
 
 const SECTION_ACCENT = {
     summary: 'green', mood_curve: 'green', conversations: 'blue',
@@ -521,7 +516,7 @@ function createNarrationOverlay() {
     el.className = 'narration-overlay';
     el.id = 'narration-overlay';
     el.innerHTML = `
-        <button class="narration-stop" id="narration-stop-btn">\u2715 Stop</button>
+        <button class="narration-stop" id="narration-stop-btn">\u2715 ${t('diary.stop')}</button>
         <div class="narration-label" id="narration-label"></div>
         <div class="narration-content" id="narration-content-area"></div>
         <div class="narration-progress" id="narration-progress"></div>
@@ -586,7 +581,7 @@ function openNarrationOverlay() {
     const contentArea = document.getElementById('narration-content-area');
     const labelEl = document.getElementById('narration-label');
     labelEl.textContent = diaryData.date || '';
-    contentArea.innerHTML = `<div class="narration-text">${esc(diaryData.title || 'Daily Diary')}</div>`;
+    contentArea.innerHTML = `<div class="narration-text">${esc(diaryData.title || t('diary.defaultTitle'))}</div>`;
 
     narrationOverlay.classList.add('active');
 }
@@ -611,7 +606,7 @@ function showNarrationSection(sectionId) {
 
     setTimeout(() => {
         // Update label
-        labelEl.textContent = SECTION_LABEL_MAP[section.id] || section.id;
+        labelEl.textContent = sectionLabel(section.id);
 
         // Build section-specific content
         let html = `<div class="narration-text">${esc(section.content)}</div>`;
@@ -628,18 +623,18 @@ function showNarrationSection(sectionId) {
                 <div class="narration-stat">
                     <div class="narration-stat-value" style="color: #f0883e; text-shadow: 0 0 40px rgba(240,136,62,0.3);"
                          data-target="${d.faces_seen}">${d.faces_seen}</div>
-                    <div class="narration-stat-label">People</div>
+                    <div class="narration-stat-label">${t('diary.stat.people')}</div>
                 </div>`;
             if (d.smiles_captured != null) html += `
                 <div class="narration-stat">
                     <div class="narration-stat-value" style="color: #00d68f; text-shadow: 0 0 40px rgba(0,214,143,0.3);"
                          data-target="${d.smiles_captured}">${d.smiles_captured}</div>
-                    <div class="narration-stat-label">Smiles</div>
+                    <div class="narration-stat-label">${t('diary.stat.smiles')}</div>
                 </div>`;
             if (d.peak_hour) html += `
                 <div class="narration-stat">
                     <div class="narration-stat-value" style="color: #58a6ff; text-shadow: 0 0 40px rgba(88,166,255,0.3);">${d.peak_hour}</div>
-                    <div class="narration-stat-label">Peak</div>
+                    <div class="narration-stat-label">${t('diary.stat.peak')}</div>
                 </div>`;
             html += `</div>`;
         }
@@ -650,8 +645,8 @@ function showNarrationSection(sectionId) {
                 // Show top 2 conversations in narration
                 for (const item of section.items.slice(0, 2)) {
                     const emoji = DIARY_EMOJI[item.emotion] || '';
-                    if (item.user) html += `<div class="diary-conv-bubble user" style="max-width:90%"><div class="conv-sender">Visitor</div>${esc(item.user)}</div>`;
-                    if (item.reply) html += `<div class="diary-conv-bubble reply" style="max-width:90%"><div class="conv-sender"><span>\u{1F916}</span><span>Reachy Mini</span></div>${esc(item.reply)} ${emoji}</div>`;
+                    if (item.user) html += `<div class="diary-conv-bubble user" style="max-width:90%"><div class="conv-sender">${t('diary.visitor')}</div>${esc(item.user)}</div>`;
+                    if (item.reply) html += `<div class="diary-conv-bubble reply" style="max-width:90%"><div class="conv-sender"><span>\u{1F916}</span><span>${t('diary.reachy')}</span></div>${esc(item.reply)} ${emoji}</div>`;
                 }
                 html += '</div>';
             } else {
@@ -667,8 +662,8 @@ function showNarrationSection(sectionId) {
         if (section.type === 'sensors' && section.data) {
             const d = section.data;
             html += `<div class="narration-stats" style="margin-top: 24px;">`;
-            if (d.temperature != null) html += `<div class="narration-stat"><div class="narration-stat-value" style="color: #f0883e; font-size: 36px;">${d.temperature}\u00B0</div><div class="narration-stat-label">Temperature</div></div>`;
-            if (d.humidity != null) html += `<div class="narration-stat"><div class="narration-stat-value" style="color: #58a6ff; font-size: 36px;">${d.humidity}%</div><div class="narration-stat-label">Humidity</div></div>`;
+            if (d.temperature != null) html += `<div class="narration-stat"><div class="narration-stat-value" style="color: #f0883e; font-size: 36px;">${d.temperature}\u00B0</div><div class="narration-stat-label">${t('diary.sensor.temperature')}</div></div>`;
+            if (d.humidity != null) html += `<div class="narration-stat"><div class="narration-stat-value" style="color: #58a6ff; font-size: 36px;">${d.humidity}%</div><div class="narration-stat-label">${t('diary.sensor.humidity')}</div></div>`;
             if (d.weather) html += `<div class="narration-stat"><div class="narration-stat-value" style="color: #bc8cff; font-size: 36px;">${weatherIcon(d.weather)}</div><div class="narration-stat-label">${esc(d.weather)}</div></div>`;
             html += `</div>`;
         }
@@ -701,7 +696,7 @@ function stopNarrationUI() {
     narrationCurrentIdx = -1;
 
     narrateBtn?.classList.remove('active');
-    if (narrateBtn) narrateBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg> Narrate';
+    if (narrateBtn) narrateBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg> <span>' + t('diary.narrate') + '</span>';
 
     if (narrationOverlay) {
         narrationOverlay.classList.remove('active');
@@ -752,7 +747,7 @@ function handleNarrationMessage(data) {
                 contentArea.classList.add('fade-out');
                 setTimeout(() => {
                     labelEl.textContent = '';
-                    contentArea.innerHTML = '<div class="narration-text" style="color: #555;">End of diary</div>';
+                    contentArea.innerHTML = `<div class="narration-text" style="color: #555;">${t('diary.endOfDiary')}</div>`;
                     contentArea.classList.remove('fade-out');
                     // Close after a moment
                     setTimeout(() => stopNarrationUI(), 2000);
@@ -772,8 +767,8 @@ function showDiaryEmpty(date) {
         <div class="diary-inner">
             <div class="diary-empty">
                 <div class="diary-empty-icon">\u{1F4D6}</div>
-                <div class="diary-empty-text">${date ? `No diary for ${esc(date)}` : 'No diaries yet'}</div>
-                <div class="diary-empty-hint">Diaries are generated daily from interaction data</div>
+                <div class="diary-empty-text">${date ? t('diary.noDiaryFor', { date: esc(date) }) : t('diary.noDiariesYet')}</div>
+                <div class="diary-empty-hint">${t('diary.emptyHint')}</div>
             </div>
         </div>
     `;
@@ -787,8 +782,15 @@ function esc(str) {
     return div.innerHTML;
 }
 
+// Re-render the currently loaded diary (used on language change).
+function reloadCurrentDiary() {
+    updateDateNav();
+    if (diaryData) renderDiary(diaryData);
+}
+
 // Expose for WS handler and page switching
 window.initDiary = initDiary;
 window.loadDiary = loadDiary;
+window.reloadCurrentDiary = reloadCurrentDiary;
 window.handleNarrationMessage = handleNarrationMessage;
 window.stopNarrationUI = stopNarrationUI;

@@ -7,7 +7,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2-dev libgirepository1.0-dev gobject-introspection \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir --prefix=/install reachy-mini
+# Pin to match the reachy-claw client SDK (see pyproject.toml). Keep these in
+# sync: client and daemon should run the same reachy-mini major/minor so the
+# WebSocket transport + state API stay aligned. Was previously unpinned, which
+# is why the live v1.0 image floated to 1.5.1 while the client built at 1.8.0.
+RUN pip install --no-cache-dir --prefix=/install "reachy-mini>=1.8.0"
 
 FROM python:3.12-slim
 
