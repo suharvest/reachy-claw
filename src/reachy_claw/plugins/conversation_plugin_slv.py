@@ -520,6 +520,42 @@ class ConversationPlugin(Plugin):
         self.app.events.emit("mode_change", {"mode": mode, "prev": prev})
         logger.info("Conversation mode switched to: %s", mode)
 
+    # ── memory / history (dashboard "记忆" slider ↔ ollama_max_history) ───
+    def get_history_turns(self) -> int:
+        """Configured number of past turns kept in context (0 = stateless)."""
+        return max(0, int(getattr(self.app.config, "ollama_max_history", 3)))
+
+    def set_history_turns(self, turns: int) -> int:
+        """Apply the dashboard memory slider to the live SLV session.
+
+        SLV's Session is built without ``max_input_tokens`` and the runner only
+        ever appends to it, so history would otherwise grow unbounded and the
+        slider would be a no-op. Persist the value and trim immediately so the
+        change takes effect mid-conversation. Returns the clamped value.
+        """
+        turns = max(0, min(20, int(turns)))
+        self.app.config.ollama_max_history = turns
+        self._cap_history_turns()
+        return turns
+
+    def _cap_history_turns(self) -> None:
+        """Bound ``self._session.history`` to the last N user-anchored turns.
+
+        A *turn* starts at a ``user`` message and runs up to (but not
+        including) the next ``user`` — matching ovs_agent's own turn grouping.
+        N comes from ``ollama_max_history`` (0 = stateless → drop all prior
+        history). Called at the start of each turn (before the new user message
+        is added) and live when the slider changes.
+        """
+        n = max(0, int(getattr(self.app.config, "ollama_max_history", 3)))
+        hist = self._session.history
+        starts = [i for i, m in enumerate(hist) if m.get("role") == "user"]
+        if len(starts) <= n:
+            return
+        cut = len(hist) if n == 0 else starts[len(starts) - n]
+        if cut > 0:
+            del hist[:cut]
+
     def _queue_mode_gesture(self, emotion: str) -> None:
         self.app.emotions.queue_emotion(emotion)
 
@@ -993,6 +1029,9 @@ class ConversationPlugin(Plugin):
         self.app.emotions.queue_emotion("thinking")
 
         system_prompt = self._build_system_prompt()
+        # Honor the dashboard "memory" slider (ollama_max_history): trim older
+        # turns before adding the new user message, so context stays bounded.
+        self._cap_history_turns()
         self._session.add_user(text)
 
         full_text_parts: list[str] = []

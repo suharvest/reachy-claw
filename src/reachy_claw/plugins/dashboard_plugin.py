@@ -614,16 +614,21 @@ class DashboardPlugin(Plugin):
 
         elif msg_type == "get_history":
             conv = self.app.get_plugin("conversation")
-            turns = 0
-            if conv and hasattr(conv, "_client") and hasattr(conv._client, "_config"):
-                turns = conv._client._config.max_history
+            if conv and hasattr(conv, "get_history_turns"):
+                turns = conv.get_history_turns()  # SLV backend
+            elif conv and hasattr(conv, "_client") and hasattr(conv._client, "_config"):
+                turns = conv._client._config.max_history  # legacy backend
+            else:
+                turns = getattr(self.app.config, "ollama_max_history", 0)
             await self._broadcast({"type": "history", "turns": turns})
 
         elif msg_type == "set_history":
             turns = max(0, min(20, int(data.get("turns", 0))))
             conv = self.app.get_plugin("conversation")
-            if conv and hasattr(conv, "_client") and hasattr(conv._client, "_config"):
-                conv._client._config.max_history = turns
+            if conv and hasattr(conv, "set_history_turns"):
+                turns = conv.set_history_turns(turns)  # SLV: persist + trim live
+            elif conv and hasattr(conv, "_client") and hasattr(conv._client, "_config"):
+                conv._client._config.max_history = turns  # legacy backend
                 conv._client._history.clear()  # reset on change
             self.app.config.ollama_max_history = turns
             self._save_overrides(["ollama_max_history"])
