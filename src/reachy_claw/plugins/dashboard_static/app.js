@@ -31,9 +31,20 @@ let latestVisionFaces = [];  // from dashboard WS (vision_faces event)
 let currentLlmText = '';
 let currentRunId = null;
 let isStreaming = false;
+// Thought card ("想法") is gated on the robot actually SPEAKING. The LLM streams
+// tokens during `thinking` (before any audio), so we buffer them in
+// currentLlmText and only build the card once `state==='speaking'` arrives.
+let thoughtCardShown = false;
+let pendingThoughtEmotion = null;
+let llmEnded = false;
 let currentMode = 'conversation';
 let uploadFiles = [];
 let asrIdleTimer = null;
+// The recognized sentence reverts to the listening placeholder this long after
+// the last ASR activity (i.e. the user stopped speaking). This is the SINGLE
+// source of truth for the ASR transcript lifecycle — intentionally decoupled
+// from the robot's thinking/speaking turn state.
+const ASR_IDLE_REVERT_MS = 5000;
 let captureCount = 0;
 let asrActive = false;
 let asrActiveTimer = null;
@@ -196,7 +207,9 @@ function connectDashboard() {
         if (isStreaming) {
             isStreaming = false;
             currentRunId = null;
-            finalizeThoughtCard(null);
+            // Only keep a card the robot had already begun speaking; a reply
+            // buffered mid-`thinking` (never spoken) is dropped on disconnect.
+            if (thoughtCardShown) finalizeThoughtCard(null);
         }
         dashRetry = Math.min(dashRetry * 1.5, 10000);
         setTimeout(connectDashboard, dashRetry);
@@ -235,13 +248,19 @@ function handleDashboardMsg(msg) {
 
         case 'llm_delta':
             if (msg.run_id !== currentRunId) {
+                // New turn: start buffering tokens but DO NOT create the thought
+                // card yet — it appears only once the robot starts speaking
+                // (see updateState 'speaking'). Showing it now would surface the
+                // reply while the robot is still "thinking"/processing.
                 currentRunId = msg.run_id;
                 currentLlmText = '';
                 isStreaming = true;
-                addStreamingCard();
+                thoughtCardShown = false;
+                pendingThoughtEmotion = null;
+                llmEnded = false;
             }
             currentLlmText += msg.text;
-            updateStreamingCard();
+            if (thoughtCardShown) updateStreamingCard();
             break;
 
         case 'llm_end':
@@ -249,7 +268,14 @@ function handleDashboardMsg(msg) {
                 currentLlmText = msg.full_text;
                 isStreaming = false;
                 currentRunId = null;
-                finalizeThoughtCard(msg.emotion);
+                llmEnded = true;
+                pendingThoughtEmotion = msg.emotion;
+                // If the robot already started speaking, the card exists →
+                // finalize it. If `speaking` hasn't arrived yet (TTS lag can make
+                // llm_end land first), defer: the card is built and finalized
+                // when `speaking` comes. If the turn produced no speech at all,
+                // no card is ever shown.
+                if (thoughtCardShown) finalizeThoughtCard(msg.emotion);
             }
             break;
 
@@ -414,7 +440,7 @@ function resetAsrIdleTimer() {
         asrTextEl.innerHTML = '<i>' + t('asr.listening') + '</i>';
         asrTextEl.className = 'asr-text idle';
         asrActive = false;
-    }, 5000);
+    }, ASR_IDLE_REVERT_MS);
 }
 
 // ── Emotion display (center column) ─────────────────────────────────
@@ -451,14 +477,19 @@ function updateEmotionDisplay() {
 }
 
 // ── Thought bubbles (right column) ──────────────────────────────────
-function showThinkingCard() {
-    // Don't add if already streaming or thinking
-    if (thoughtList.querySelector('.thought-card.streaming')) return;
-    if (thoughtList.querySelector('.thought-card.thinking')) return;
-    const card = document.createElement('div');
-    card.className = 'thought-card thinking';
-    card.innerHTML = '<div class="thinking-dots"><span>.</span><span>.</span><span>.</span></div>';
-    thoughtList.prepend(card);
+function showThoughtCardForSpeaking() {
+    // Build the streaming thought card the moment the robot starts speaking,
+    // flushing whatever LLM text was buffered during `thinking`. Idempotent:
+    // the robot emits one `speaking` state per TTS sentence, so guard on the
+    // already-shown flag.
+    if (thoughtCardShown) return;
+    if (!currentLlmText || !currentLlmText.trim()) return;
+    addStreamingCard();
+    thoughtCardShown = true;
+    updateStreamingCard();
+    // llm_end may have already landed (TTS lag makes it race ahead of audio) —
+    // finalize immediately so the card isn't stuck in the streaming state.
+    if (llmEnded) finalizeThoughtCard(pendingThoughtEmotion);
 }
 
 function removeThinkingCard() {
@@ -570,14 +601,19 @@ function updateState(state) {
         el.textContent = state;
         el.dataset.state = state;
     }
-    if (state === 'thinking') showThinkingCard();
-    // When backend returns to idle/listening, reset ASR display immediately
+    // The thought card appears only when the robot actually starts speaking —
+    // not during `thinking`/token-streaming. This flushes any LLM text buffered
+    // during `thinking` into a freshly created card.
+    if (state === 'speaking') {
+        showThoughtCardForSpeaking();
+    }
+    // Leaving a turn: just clean up any stray streaming card state. The ASR
+    // transcript (#asr-text) is intentionally NOT reset here — its lifecycle is
+    // governed solely by the ASR_IDLE_REVERT_MS idle timer (resetAsrIdleTimer),
+    // so the recognized sentence reverts to the listening placeholder a fixed
+    // time after the user stops, independent of the robot's turn state.
     if (state === 'idle' || state === 'listening') {
         removeThinkingCard();
-        if (asrIdleTimer) clearTimeout(asrIdleTimer);
-        asrTextEl.innerHTML = '<i>' + t('asr.listening') + '</i>';
-        asrTextEl.className = 'asr-text idle';
-        asrActive = false;
     }
 }
 
@@ -2005,9 +2041,11 @@ function applyI18nDynamic() {
     try { syncModeUI(); } catch (e) { /* ignore */ }
     try { updateEmotionDisplay(); } catch (e) { /* ignore */ }
     try { updateMotorStatus(); } catch (e) { /* ignore */ }
-    // ASR idle bubble
+    // ASR idle bubble — only re-localize when showing the listening placeholder
+    // (the `idle` class). Never clobber a recognized sentence that is still
+    // within its ASR_IDLE_REVERT_MS display window.
     try {
-        if (!asrActive && asrTextEl) {
+        if (asrTextEl && asrTextEl.classList.contains('idle')) {
             asrTextEl.innerHTML = '<i>' + t('asr.listening') + '</i>';
         }
     } catch (e) { /* ignore */ }
