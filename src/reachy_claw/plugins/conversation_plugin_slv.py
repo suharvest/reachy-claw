@@ -26,6 +26,7 @@ import logging
 import re
 import time
 import uuid
+from difflib import SequenceMatcher
 from typing import Any, AsyncIterator, Coroutine
 
 import numpy as np
@@ -56,12 +57,47 @@ logger = logging.getLogger(__name__)
 # Strip reachy emotion tags ([happy] / [emotion:happy]) from the spoken
 # text. Identical to the legacy plugin's tag scanner.
 _EMOTION_TAG_RE = re.compile(r"\[(?:emotion:)?(\w+)\]\s*")
+_EMOTION_WORDS = {
+    "happy",
+    "sad",
+    "thinking",
+    "surprised",
+    "curious",
+    "excited",
+    "laugh",
+}
+_BARE_EMOTION_RE = re.compile(
+    r"^(\s*[.!?。！？…]*\s*)(" + "|".join(sorted(_EMOTION_WORDS)) + r")\s*$",
+    re.IGNORECASE,
+)
+_TRAILING_BARE_EMOTION_RE = re.compile(
+    r"\s+(" + "|".join(sorted(_EMOTION_WORDS)) + r")\s*$",
+    re.IGNORECASE,
+)
+_MONOLOGUE_ANGLES = (
+    "notice one concrete thing in the room",
+    "wonder what a nearby visitor might be thinking",
+    "react to the current mood or facial expression",
+    "share a tiny hopeful thought about meeting people",
+    "make a playful observation without repeating yourself",
+)
+_MONOLOGUE_GESTURES = ("curious", "thinking", "surprised", "happy", "laugh")
+_MODE_ENTRY_GESTURES = {
+    "conversation": "happy",
+    "monologue": "curious",
+    "interpreter": "listening",
+}
+
+_CONVERSATION_LANGUAGE_PROMPTS = {
+    "zh": "Reply only in Chinese. Do not switch languages unless the operator changes the language setting.",
+    "en": "Reply only in English. Do not switch languages unless the operator changes the language setting.",
+}
 
 
 # Relocated from llm.py (do NOT delete llm.py — this is an additive copy so
 # the new module has no dependency on the legacy backend tree).
 MONOLOGUE_SYSTEM_PROMPT = """\
-Your name is Reachy. You are a cheerful cute robot at an exhibition, mumbling happily to yourself. Always reply in English.
+Your name is Reachy. You are a cheerful cute robot at an exhibition, mumbling happily to yourself. Use the configured exhibition language.
 Reply with ONE short sentence (max 15 words), then exactly ONE emotion tag. Nothing else.
 You love people and get excited when someone shows up. Stay upbeat and warm — find the bright side of everything.
 Talk like a real person — no "sensors", no "circuits", no robot clichés.
@@ -71,7 +107,8 @@ You MUST end with one of: [happy] [sad] [thinking] [surprised] [curious] [excite
 Examples: "Ooh are you smiling at me?? [excited]" "What a lovely day to meet new friends! [happy]" "Wait who's that?? [curious]" "harvest is here, yay! [excited]\""""
 
 DEFAULT_SYSTEM_PROMPT = """\
-You are Reachy, a cute robot at an exhibition. Always reply in English. No emoji.
+You are Reachy, a cute robot at an exhibition. No emoji.
+Use the configured exhibition language.
 Reply in ONE short sentence (max 12 words). Be warm but brief — no filler, no lists, no follow-up questions unless asked.
 Names in [Faces: ...] are people you see, not your name.
 Never repeat or mention the [Faces: ...] tag in your reply.
@@ -141,17 +178,35 @@ class ConversationPlugin(Plugin):
         self._audio_queue: asyncio.Queue = asyncio.Queue(maxsize=_q_max)
         self._interrupt_event = asyncio.Event()
         self._gst_playing = False
+        self._playback_route: str | None = None
+        self._last_logged_playback_route: str | None = None
 
         # State machine (thin shim — preserves the event-bridge contract).
         self._state = ConvState.IDLE
         self._speaking_since_ts: float = 0.0
+        self._last_tts_done_ts: float = 0.0
+        self._last_tts_sentence: str = ""
+        self._post_tts_echo_ignore_s: float = float(
+            getattr(config, "post_tts_echo_ignore_s", 2.0)
+        )
 
         # Turn machinery.
         self._turn_task: asyncio.Task | None = None
         self._pending_tasks: set[asyncio.Task] = set()
         self._last_asr_final: str = ""
         self._last_asr_final_ts: float = 0.0
+        self._last_asr_partial: str = ""
+        self._last_asr_partial_ts: float = 0.0
         self._paused = False
+        self._voice_attention_window_s: float = float(
+            getattr(config, "voice_attention_window_s", 12.0)
+        )
+        self._voice_unattended_min_cjk_chars: int = int(
+            getattr(config, "voice_unattended_min_cjk_chars", 6)
+        )
+        self._voice_unattended_min_alpha_chars: int = int(
+            getattr(config, "voice_unattended_min_alpha_chars", 5)
+        )
         # Serialise text-injected turns (dashboard send_message) against each
         # other so two rapid injections don't fire overlapping LLM streams.
         self._send_lock = asyncio.Lock()
@@ -159,6 +214,8 @@ class ConversationPlugin(Plugin):
         # conversation_mode is "monologue", mirroring the legacy plugin).
         self._monologue_task: asyncio.Task | None = None
         self._monologue_last_ts: float = 0.0
+        self._monologue_turn_idx = 0
+        self._recent_monologue_lines: list[str] = []
 
         # Stream-safe TTS tag stripper state (reset per turn via
         # ``_reset_tag_stripper``). LLM tokens often split an emotion /
@@ -176,6 +233,145 @@ class ConversationPlugin(Plugin):
         self._barge_in_min_speaking_ms = float(
             getattr(config, "barge_in_min_speaking_ms", 500.0)
         )
+
+    @staticmethod
+    def _normalize_conversation_language(language: str | None) -> str | None:
+        lang = (language or "").strip().lower()
+        return lang if lang in _CONVERSATION_LANGUAGE_PROMPTS else None
+
+    def _conversation_language_instruction(self) -> str:
+        lang = self._conversation_language_code()
+        if lang:
+            return _CONVERSATION_LANGUAGE_PROMPTS[lang]
+        return ""
+
+    def _conversation_language_code(self) -> str | None:
+        config = self.app.config
+        asr_lang = self._normalize_conversation_language(
+            getattr(config, "v2v_asr_language", "auto")
+        )
+        tts_lang = self._normalize_conversation_language(
+            getattr(config, "v2v_tts_language", "auto")
+        )
+        return asr_lang if asr_lang and asr_lang == tts_lang else None
+
+    def _apply_conversation_language_to_prompt(self, prompt: str) -> str:
+        lang = self._conversation_language_code()
+        if lang == "zh":
+            prompt = re.sub(
+                r"Always reply in English\.",
+                "Always reply in Chinese.",
+                prompt,
+                flags=re.IGNORECASE,
+            )
+            prompt = re.sub(
+                r"Use 4 to 10 English words before the tag\.",
+                "Use one short Chinese sentence before the tag.",
+                prompt,
+                flags=re.IGNORECASE,
+            )
+            prompt = re.sub(
+                r'Example: "Welcome! Glad you stopped by\. \[happy\]"',
+                'Example: "欢迎，很高兴见到你。[happy]"',
+                prompt,
+                flags=re.IGNORECASE,
+            )
+            prompt = re.sub(
+                r'Good examples:\n(?:".*"\n?)+',
+                'Good examples:\n'
+                '"欢迎，这里展示边缘 AI 方案。[happy]"\n'
+                '"可以试试视觉或机械臂演示。[curious]"\n'
+                '"实时数据请看屏幕。[thinking]"\n',
+                prompt,
+                flags=re.IGNORECASE,
+            )
+        elif lang == "en":
+            prompt = re.sub(
+                r"Always reply in Chinese\.",
+                "Always reply in English.",
+                prompt,
+                flags=re.IGNORECASE,
+            )
+            prompt = re.sub(
+                r"Use one short Chinese sentence before the tag\.",
+                "Use 4 to 10 English words before the tag.",
+                prompt,
+                flags=re.IGNORECASE,
+            )
+        return prompt
+
+    @staticmethod
+    def _normalize_echo_text(text: str) -> str:
+        return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", text.lower())).strip()
+
+    def _looks_like_recent_tts_echo(self, text: str) -> bool:
+        heard = self._normalize_echo_text(text)
+        spoken = self._normalize_echo_text(self._last_tts_sentence)
+        if not heard or not spoken:
+            return False
+        if heard == spoken:
+            return True
+        if len(heard) < 4 or len(spoken) < 4:
+            return False
+        return SequenceMatcher(None, heard, spoken).ratio() >= 0.82
+
+    @staticmethod
+    def _compact_asr_text(text: str) -> str:
+        return re.sub(r"\s+", "", re.sub(r"[^\w\s]", "", text.lower()))
+
+    def _visual_attention_active(self, *, now: float | None = None) -> bool:
+        vision = self.app.get_plugin("vision_client")
+        if vision is None:
+            return False
+        now = time.monotonic() if now is None else now
+        # Attention = a face is present right now (or was within the window).
+        # Key off CONTINUOUS presence (_last_face_time / _last_face_count, which
+        # the vision plugin refreshes every frame a face is seen), NOT the sparse
+        # greeting trigger _last_face_trigger_time: that fires once per visitor
+        # arrival and then sits on _face_trigger_cooldown_s, so a visitor standing
+        # silently past the window would falsely read as inattentive and have
+        # their short utterances dropped even while clearly looking at the robot.
+        last_face = float(getattr(vision, "_last_face_time", 0.0) or 0.0)
+        face_count = int(getattr(vision, "_last_face_count", 0) or 0)
+        return (
+            face_count > 0
+            and last_face > 0.0
+            and (now - last_face) <= self._voice_attention_window_s
+        )
+
+    def _is_meaningful_asr_text(self, text: str, *, attended: bool = False) -> bool:
+        compact = self._compact_asr_text(text)
+        if not compact:
+            return False
+        filler_chars = set("嗯啊呃额哦噢唔唉哎")
+        if all(ch in filler_chars for ch in compact):
+            return False
+        has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in compact)
+        if has_cjk:
+            min_chars = 2 if attended else self._voice_unattended_min_cjk_chars
+            return len(compact) >= min_chars
+        alpha_count = sum(ch.isalpha() for ch in compact)
+        min_alpha = 2 if attended else self._voice_unattended_min_alpha_chars
+        return alpha_count >= min_alpha
+
+    async def set_conversation_language(self, language: str) -> None:
+        lang = self._normalize_conversation_language(language)
+        if not lang:
+            return
+        config = self.app.config
+        config.v2v_asr_language = lang
+        config.v2v_tts_language = lang
+        if self._slv is not None:
+            self._slv.config["asr_language"] = lang
+            self._slv.config["tts_language"] = lang
+            await self._cancel_turn()
+            try:
+                await self._slv.abort()
+            except Exception:  # noqa: BLE001
+                logger.debug("SLV abort before language reconnect failed", exc_info=True)
+            await self._slv.reconnect()
+        self._session.history.clear()
+        self._session.prefix_cache_warmed = False
 
     # ── lifecycle ───────────────────────────────────────────────────
 
@@ -231,6 +427,7 @@ class ConversationPlugin(Plugin):
                 sample_rate=config.sample_rate,
             )
         await self._audio.start_continuous()
+        self._set_state(ConvState.LISTENING)
 
         self.app.events.subscribe("monologue_trigger", self._on_monologue_trigger)
 
@@ -292,6 +489,101 @@ class ConversationPlugin(Plugin):
     async def on_rest_end(self) -> None:
         self._paused = False
 
+    # ── mode switching ──────────────────────────────────────────────
+
+    def switch_mode(self, mode: str) -> None:
+        """Hot-switch the SLV backend's lightweight mode state.
+
+        SLV does not use the legacy ModeManager, but dashboard and persisted
+        config still expect conversation_mode to reflect real runtime behavior.
+        """
+        if mode not in {"conversation", "monologue", "interpreter"}:
+            raise ValueError(f"unknown conversation mode: {mode}")
+        prev = getattr(self.app.config, "conversation_mode", "conversation")
+        self.app.config.conversation_mode = mode
+        if prev != mode:
+            self._session.reset()
+            logger.info("Conversation session reset for mode switch: %s → %s", prev, mode)
+        if mode == "conversation":
+            self._barge_in_enabled = True
+            self.app.config.barge_in_enabled = True
+        elif mode == "interpreter":
+            self._barge_in_enabled = False
+            self.app.config.barge_in_enabled = False
+
+        if mode == "monologue":
+            self._ensure_monologue_timer()
+        else:
+            self._cancel_monologue_timer()
+
+        self._queue_mode_gesture(_MODE_ENTRY_GESTURES[mode])
+        self.app.events.emit("mode_change", {"mode": mode, "prev": prev})
+        logger.info("Conversation mode switched to: %s", mode)
+
+    # ── memory / history (dashboard "记忆" slider ↔ ollama_max_history) ───
+    def get_history_turns(self) -> int:
+        """Configured number of past turns kept in context (0 = stateless)."""
+        return max(0, int(getattr(self.app.config, "ollama_max_history", 3)))
+
+    def set_history_turns(self, turns: int) -> int:
+        """Apply the dashboard memory slider to the live SLV session.
+
+        SLV's Session is built without ``max_input_tokens`` and the runner only
+        ever appends to it, so history would otherwise grow unbounded and the
+        slider would be a no-op. Persist the value and trim immediately so the
+        change takes effect mid-conversation. Returns the clamped value.
+        """
+        turns = max(0, min(20, int(turns)))
+        self.app.config.ollama_max_history = turns
+        self._cap_history_turns()
+        return turns
+
+    def _cap_history_turns(self) -> None:
+        """Bound ``self._session.history`` to the last N user-anchored turns.
+
+        A *turn* starts at a ``user`` message and runs up to (but not
+        including) the next ``user`` — matching ovs_agent's own turn grouping.
+        N comes from ``ollama_max_history`` (0 = stateless → drop all prior
+        history). Called at the start of each turn (before the new user message
+        is added) and live when the slider changes.
+        """
+        n = max(0, int(getattr(self.app.config, "ollama_max_history", 3)))
+        hist = self._session.history
+        starts = [i for i, m in enumerate(hist) if m.get("role") == "user"]
+        if len(starts) <= n:
+            return
+        cut = len(hist) if n == 0 else starts[len(starts) - n]
+        if cut > 0:
+            del hist[:cut]
+
+    def _queue_mode_gesture(self, emotion: str) -> None:
+        self.app.emotions.queue_emotion(emotion)
+
+    def _open_motion_interaction_window(self) -> None:
+        motion = self.app.get_plugin("motion")
+        if motion and hasattr(motion, "open_interaction_window"):
+            motion.open_interaction_window()
+
+    def _center_and_lock_motion(self) -> None:
+        motion = self.app.get_plugin("motion")
+        if motion and hasattr(motion, "center_and_lock_tracking"):
+            motion.center_and_lock_tracking()
+
+    def _ensure_monologue_timer(self) -> None:
+        if not self._running:
+            return
+        if self._monologue_task is not None and not self._monologue_task.done():
+            return
+        self._monologue_last_ts = time.monotonic()
+        self._monologue_task = asyncio.create_task(
+            self._monologue_timer_loop(), name="slv-monologue-timer"
+        )
+
+    def _cancel_monologue_timer(self) -> None:
+        if self._monologue_task is not None and not self._monologue_task.done():
+            self._monologue_task.cancel()
+        self._monologue_task = None
+
     # ── config helpers ──────────────────────────────────────────────
 
     @staticmethod
@@ -322,6 +614,7 @@ class ConversationPlugin(Plugin):
         old_state = self._state
         logger.debug("State: %s → %s", old_state.value, new_state.value)
         self._state = new_state
+        self.app.is_speaking = new_state == ConvState.SPEAKING
         self.app.events.emit("state_change", {"state": new_state.value})
         if new_state == ConvState.SPEAKING:
             self._speaking_since_ts = time.monotonic()
@@ -364,6 +657,8 @@ class ConversationPlugin(Plugin):
             if self._paused:
                 continue
             if isinstance(chunk, np.ndarray):
+                if chunk.ndim > 1:
+                    chunk = chunk.mean(axis=1)
                 if chunk.dtype != np.int16:
                     boosted = np.clip(chunk * 4.0, -1.0, 1.0)
                     pcm = np.clip(
@@ -399,6 +694,41 @@ class ConversationPlugin(Plugin):
 
         config = self.app.config
         sample_rate = int(getattr(config, "sample_rate", 16000) or 16000)
+        server_vad = getattr(config, "v2v_vad", "none") != "none"
+
+        if server_vad:
+            vad_name = getattr(config, "v2v_vad", "silero")
+            logger.info(
+                "SLV audio uplink loop started (server VAD=%s, pass-through)",
+                vad_name,
+            )
+            chunks_sent = 0
+            bytes_sent = 0
+            try:
+                async for payload in self._mic_chunks():
+                    if not self._running:
+                        break
+                    try:
+                        await self._slv.send_audio(payload)
+                        chunks_sent += 1
+                        bytes_sent += len(payload)
+                        if chunks_sent % 100 == 0:
+                            logger.info(
+                                "SLV server-VAD uplink: chunks=%d bytes=%d",
+                                chunks_sent,
+                                bytes_sent,
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("SLV send_audio failed: %s", e)
+                        await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("SLV server-VAD audio uplink loop crashed")
+            finally:
+                logger.info("SLV audio uplink loop stopped")
+            return
+
         chunk_ms = int(
             round((1024 / float(sample_rate)) * 1000.0)
         )  # AudioCapture reads 1024-frame chunks
@@ -423,6 +753,9 @@ class ConversationPlugin(Plugin):
             getattr(vad, "name", "?"), chunk_ms, preroll_ms, silence_ms,
         )
 
+        segment_idx = 0
+        segment_bytes = 0
+        segment_started_at = 0.0
         try:
             async for event, payload in vad_gated(
                 self._mic_chunks(),
@@ -434,16 +767,30 @@ class ConversationPlugin(Plugin):
                 if not self._running:
                     break
                 if event == "speech_start":
+                    segment_idx += 1
+                    segment_bytes = 0
+                    segment_started_at = time.monotonic()
+                    logger.info(
+                        "SLV client-VAD speech_start #%d", segment_idx
+                    )
                     # Barge-in on local speech onset while speaking — does
                     # NOT depend on the engine emitting ASR partials.
                     await self._maybe_barge_in_on_speech_start()
                 elif event == "audio" and payload is not None:
                     try:
                         await self._slv.send_audio(payload)
+                        segment_bytes += len(payload)
                     except Exception as e:  # noqa: BLE001
                         logger.warning("SLV send_audio failed: %s", e)
                         await asyncio.sleep(0.05)
                 elif event == "speech_end":
+                    duration = max(0.0, time.monotonic() - segment_started_at)
+                    logger.info(
+                        "SLV client-VAD speech_end #%d bytes=%d duration=%.2fs",
+                        segment_idx,
+                        segment_bytes,
+                        duration,
+                    )
                     try:
                         await self._slv.asr_eos()
                     except Exception as e:  # noqa: BLE001
@@ -474,6 +821,7 @@ class ConversationPlugin(Plugin):
         logger.info(
             "BARGE-IN: client-VAD speech onset (%.0fms into speech)", elapsed_ms
         )
+        self._center_and_lock_motion()
         self._set_state(ConvState.BARGED_IN)
         await self._cancel_turn()
         if self._audio is not None:
@@ -483,7 +831,7 @@ class ConversationPlugin(Plugin):
                     await stop()
                 except Exception:  # noqa: BLE001
                     logger.debug("audio.stop_playback failed", exc_info=True)
-        await self._stop_gst_playback()
+        await self._stop_gst_playback(immediate=True)
         if self._slv is not None:
             try:
                 await self._slv.abort()
@@ -515,12 +863,18 @@ class ConversationPlugin(Plugin):
         if isinstance(ev, ASRPartial):
             text = (ev.text or "").strip()
             if text:
+                self._last_asr_partial = text
+                self._last_asr_partial_ts = time.monotonic()
                 self.app.events.emit(
                     "asr_partial", {"text": ev.text, "is_stable": ev.is_stable}
                 )
                 # BARGE-IN: an ASRPartial with real text during SPEAKING.
                 await self._maybe_barge_in(text)
-                if self._state == ConvState.IDLE:
+                if self._state in (
+                    ConvState.IDLE,
+                    ConvState.LISTENING,
+                    ConvState.BARGED_IN,
+                ):
                     self._set_state(ConvState.TRANSCRIBING)
             return
 
@@ -530,18 +884,63 @@ class ConversationPlugin(Plugin):
             if ev.session_complete or ev.duplicate_of_streamed:
                 return
             text = (ev.text or "").strip()
+            now = time.monotonic()
+            attended = self._visual_attention_active(now=now)
+            if self._state == ConvState.SPEAKING:
+                logger.info("asr_final ignored during speaking: %r", text)
+                return
+            if (
+                self._last_tts_done_ts > 0
+                and now - self._last_tts_done_ts < self._post_tts_echo_ignore_s
+                and self._looks_like_recent_tts_echo(text)
+            ):
+                logger.info(
+                    "asr_final ignored during post-TTS echo guard: %r", text
+                )
+                if self._state == ConvState.TRANSCRIBING:
+                    self._set_state(ConvState.LISTENING)
+                self._last_asr_partial = ""
+                return
             if not text:
-                self.app.events.emit("asr_final", {"text": ""})
+                if (
+                    self._last_asr_partial
+                    and now - self._last_asr_partial_ts < 2.5
+                    and self._is_meaningful_asr_text(
+                        self._last_asr_partial, attended=attended
+                    )
+                ):
+                    text = self._last_asr_partial
+                    logger.info("asr_final empty; using recent partial: %r", text)
+                else:
+                    self.app.events.emit("asr_final", {"text": ""})
+                    if self._state == ConvState.TRANSCRIBING:
+                        self._set_state(ConvState.LISTENING)
+                    self._last_asr_partial = ""
+                    return
+            if not self._is_meaningful_asr_text(text, attended=attended):
+                logger.info(
+                    "asr_final ignored as short filler/noise: %r attended=%s",
+                    text,
+                    attended,
+                )
+                if self._state == ConvState.TRANSCRIBING:
+                    self._set_state(ConvState.LISTENING)
+                self._last_asr_partial = ""
                 return
             # Drop a fresh utterance while a turn is already in flight to
             # avoid overlapping LLM streams (option A from legacy).
             if self._turn_task is not None and not self._turn_task.done():
                 logger.debug("asr_final dropped: turn already in flight: %r", text)
+                self._last_asr_partial = ""
                 return
+            if self._state in (ConvState.IDLE, ConvState.LISTENING):
+                self._set_state(ConvState.TRANSCRIBING)
             self._last_asr_final = text
             self._last_asr_final_ts = time.monotonic()
             self._monologue_last_ts = time.monotonic()
+            self._open_motion_interaction_window()
             self.app.events.emit("asr_final", {"text": text})
+            self._last_asr_partial = ""
             self._turn_task = self._spawn_task(
                 self._drive_turn(text), name="slv-turn"
             )
@@ -550,6 +949,7 @@ class ConversationPlugin(Plugin):
         if isinstance(ev, TTSStarted):
             self._set_state(ConvState.SPEAKING)
             self._speaking_since_ts = time.monotonic()
+            self._last_tts_sentence = ev.sentence or ""
             self.app.events.emit("tts_started", {"sentence": ev.sentence})
             return
 
@@ -559,10 +959,12 @@ class ConversationPlugin(Plugin):
 
         if isinstance(ev, TTSDone):
             await self._stop_gst_playback()
+            self._last_tts_done_ts = time.monotonic()
             # Guard: don't stomp a barge-in that already moved us to
             # LISTENING / BARGED_IN.
             if self._state == ConvState.SPEAKING:
-                self._set_state(ConvState.IDLE)
+                self._center_and_lock_motion()
+                self._set_state(ConvState.LISTENING)
             return
 
         if isinstance(ev, SLVError):
@@ -587,6 +989,7 @@ class ConversationPlugin(Plugin):
         logger.info(
             "BARGE-IN: partial=%r (%.0fms into speech)", partial_text, elapsed_ms
         )
+        self._center_and_lock_motion()
         self._set_state(ConvState.BARGED_IN)
         await self._cancel_turn()
         if self._audio is not None:
@@ -596,7 +999,7 @@ class ConversationPlugin(Plugin):
                     await stop()
                 except Exception:  # noqa: BLE001
                     logger.debug("audio.stop_playback failed", exc_info=True)
-        await self._stop_gst_playback()
+        await self._stop_gst_playback(immediate=True)
         if self._slv is not None:
             try:
                 await self._slv.abort()
@@ -626,6 +1029,9 @@ class ConversationPlugin(Plugin):
         self.app.emotions.queue_emotion("thinking")
 
         system_prompt = self._build_system_prompt()
+        # Honor the dashboard "memory" slider (ollama_max_history): trim older
+        # turns before adding the new user message, so context stays bounded.
+        self._cap_history_turns()
         self._session.add_user(text)
 
         full_text_parts: list[str] = []
@@ -638,6 +1044,12 @@ class ConversationPlugin(Plugin):
             session=self._session,
             event_bus=self.app.events,
             config=self.app.config,
+        )
+        allowed_tools = (
+            set()
+            if getattr(self.app.config, "conversation_mode", "conversation")
+            == "interpreter"
+            else None
         )
 
         async def _on_tok(tok: str) -> None:
@@ -675,7 +1087,7 @@ class ConversationPlugin(Plugin):
                 messages,
                 session=self._session,
                 registry=self._registry,
-                allowed_tools=None,  # expose every registered tool
+                allowed_tools=allowed_tools,
                 ctx=ctx,
                 max_iterations=int(getattr(cfg, "tools_max_iterations", 5)),
                 on_assistant_token=_on_tok,
@@ -692,7 +1104,7 @@ class ConversationPlugin(Plugin):
                     await self._slv.abort()
                 except Exception:  # noqa: BLE001
                     logger.debug("slv.abort on cancel failed", exc_info=True)
-                await self._stop_gst_playback()
+                await self._stop_gst_playback(immediate=True)
             self.app.events.emit("llm_end", {"full_text": "", "run_id": run_id})
             raise
         except Exception:
@@ -701,7 +1113,7 @@ class ConversationPlugin(Plugin):
                 await self._slv.abort()
             except Exception:  # noqa: BLE001
                 logger.debug("slv.abort on error failed", exc_info=True)
-            await self._stop_gst_playback()
+            await self._stop_gst_playback(immediate=True)
             self.app.events.emit("llm_end", {"full_text": "", "run_id": run_id})
             return
         finally:
@@ -821,9 +1233,32 @@ class ConversationPlugin(Plugin):
 
     def _build_system_prompt(self) -> str:
         config = self.app.config
-        base = getattr(config, "ollama_system_prompt", "") or DEFAULT_SYSTEM_PROMPT
+        mode = getattr(config, "conversation_mode", "conversation")
+        if mode == "interpreter":
+            from ..llm import INTERPRETER_SYSTEM_PROMPT
+
+            base = (
+                getattr(config, "interpreter_prompt", "")
+                or INTERPRETER_SYSTEM_PROMPT.format(
+                    source_lang=getattr(
+                        config, "interpreter_source_lang", "Chinese"
+                    ),
+                    target_lang=getattr(
+                        config, "interpreter_target_lang", "English"
+                    ),
+                )
+            )
+            return "\n".join([base, "/no_think"])
+
+        base = self._apply_conversation_language_to_prompt(
+            getattr(config, "ollama_system_prompt", "") or DEFAULT_SYSTEM_PROMPT
+        )
+        lang_instruction = self._conversation_language_instruction()
         vision = self._get_vision_context()
-        parts = [base, "/no_think"]  # /no_think REQUIRED for qwen3
+        parts = [base]
+        if lang_instruction:
+            parts.append(lang_instruction)
+        parts.append("/no_think")  # /no_think REQUIRED for qwen3
         if vision:
             parts.append(f"[Faces: {vision}]")
         return "\n".join(parts)
@@ -943,11 +1378,18 @@ class ConversationPlugin(Plugin):
     async def _run_monologue(self) -> None:
         assert self._slv is not None and self._llm is not None
         config = self.app.config
-        base = getattr(config, "ollama_monologue_prompt", "") or MONOLOGUE_SYSTEM_PROMPT
-        vision = self._get_vision_context()
-        system_prompt = "\n".join(
-            [base, "/no_think"] + ([f"[Faces: {vision}]"] if vision else [])
+        base = self._apply_conversation_language_to_prompt(
+            getattr(config, "ollama_monologue_prompt", "") or MONOLOGUE_SYSTEM_PROMPT
         )
+        vision = self._get_vision_context()
+        parts = [base]
+        lang_instruction = self._conversation_language_instruction()
+        if lang_instruction:
+            parts.append(lang_instruction)
+        parts.append("/no_think")
+        if vision:
+            parts.append(f"[Faces: {vision}]")
+        system_prompt = "\n".join(parts)
         run_id = uuid.uuid4().hex
         self._set_state(ConvState.THINKING)
         self.app.emotions.queue_emotion("thinking")
@@ -965,12 +1407,13 @@ class ConversationPlugin(Plugin):
                 return
             full_text_parts.append(tok)
             clean = self._strip_tags_for_tts(tok)
+            clean = self._strip_bare_emotion_for_tts(clean)
             if clean:
                 await self._slv.send_text(clean)
             self.app.events.emit("llm_delta", {"text": clean, "run_id": run_id})
 
-        # Synthetic self-prompt message — monologue has no user turn.
-        synthetic = "(You glance around the exhibition and think out loud.)"
+        synthetic, gesture = self._compose_monologue_user_prompt(vision)
+        self._queue_mode_gesture(gesture)
         # Use a throwaway session so the monologue doesn't pollute the
         # dialogue history.
         mono_session = Session()
@@ -985,9 +1428,14 @@ class ConversationPlugin(Plugin):
                 allowed_tools=set(),  # monologue: no tools
                 ctx=ctx,
                 on_assistant_token=_on_tok,
-                llm_kwargs={"session": mono_session},
+                llm_kwargs={
+                    "session": mono_session,
+                    "temperature": 0.8,
+                    "top_p": 0.9,
+                },
             )
             tail = self._flush_tag_stripper()
+            tail = self._strip_bare_emotion_for_tts(tail)
             if tail:
                 await self._slv.send_text(tail)
             await self._slv.flush_tts()
@@ -999,12 +1447,66 @@ class ConversationPlugin(Plugin):
             raise
         except Exception:
             logger.exception("monologue turn failed")
-        full_text = _EMOTION_TAG_RE.sub("", "".join(full_text_parts))
+        full_text = self._strip_trailing_bare_emotion(
+            _EMOTION_TAG_RE.sub("", "".join(full_text_parts))
+        )
+        if full_text:
+            self._recent_monologue_lines.append(full_text.strip())
+            self._recent_monologue_lines = self._recent_monologue_lines[-3:]
         self._monologue_last_ts = time.monotonic()
         self.app.events.emit("observation", {"text": full_text})
         self.app.events.emit("llm_end", {"full_text": full_text, "run_id": run_id})
 
-    # ── audio playback (reachy GStreamer path, unchanged) ────────────
+    def _compose_monologue_user_prompt(self, vision: str) -> tuple[str, str]:
+        idx = self._monologue_turn_idx
+        self._monologue_turn_idx += 1
+        angle = _MONOLOGUE_ANGLES[idx % len(_MONOLOGUE_ANGLES)]
+        gesture = _MONOLOGUE_GESTURES[idx % len(_MONOLOGUE_GESTURES)]
+        parts = [
+            "(You glance around the exhibition and think out loud.)",
+            f"Angle: {angle}.",
+            f"Moment: idle monologue #{idx + 1}.",
+        ]
+        if vision:
+            parts.append(f"Current view: {vision}.")
+        else:
+            parts.append("Current view: no clear visitor detail right now.")
+        if self._recent_monologue_lines:
+            recent = " | ".join(self._recent_monologue_lines[-3:])
+            parts.append(f"Avoid repeating recent lines: {recent}")
+        return "\n".join(parts), gesture
+
+    def _strip_bare_emotion_for_tts(self, text: str) -> str:
+        if not text:
+            return text
+        match = _BARE_EMOTION_RE.match(text)
+        if not match:
+            return text
+        prefix, emotion = match.groups()
+        emotion = emotion.lower()
+        self.app.events.emit("emotion", {"emotion": emotion})
+        self.app.emotions.queue_emotion(emotion)
+        return prefix if prefix.strip() else ""
+
+    @staticmethod
+    def _strip_trailing_bare_emotion(text: str) -> str:
+        return _TRAILING_BARE_EMOTION_RE.sub("", text).rstrip()
+
+    # ── audio playback ───────────────────────────────────────────────
+
+    def _duplex_playback_available(self) -> bool:
+        if self._audio is None:
+            return False
+        available = getattr(self._audio, "duplex_playback_available", None)
+        if available is not None:
+            return bool(available)
+        return getattr(self._audio, "_duplex_stream", None) is not None
+
+    def _log_playback_route_once(self, route: str) -> None:
+        if route == self._last_logged_playback_route:
+            return
+        self._last_logged_playback_route = route
+        logger.info("SLV V2V playback route: %s", route)
 
     async def _output_pipeline(self) -> None:
         while self._running:
@@ -1034,49 +1536,72 @@ class ConversationPlugin(Plugin):
         vol = self.app.config.audio_volume
         if vol != 1.0:
             samples = np.clip(samples * vol, -1.0, 1.0).astype(np.float32)
-        reachy = self.app.reachy
-        has_sdk_audio = bool(
-            reachy and getattr(getattr(reachy, "media", None), "audio", None)
-        )
-        if has_sdk_audio:
+        if self._duplex_playback_available():
+            self._gst_playing = True
+            self._playback_route = "duplex"
+            self._log_playback_route_once("duplex")
+            await self._audio.enqueue_playback_async(samples)
+        else:
+            reachy = self.app.reachy
+            has_sdk_audio = bool(
+                reachy and getattr(getattr(reachy, "media", None), "audio", None)
+            )
+            if not has_sdk_audio:
+                logger.warning("SLV V2V playback dropped: no duplex or SDK audio")
+                return
             if not self._gst_playing:
                 try:
                     reachy.media.start_playing()
                 except Exception:  # noqa: BLE001
                     pass
                 self._gst_playing = True
+            self._playback_route = "sdk"
+            self._log_playback_route_once("sdk")
             try:
                 reachy.media.push_audio_sample(samples)
             except Exception as e:  # noqa: BLE001
                 logger.warning("V2V push_audio_sample failed: %s", e)
-        elif self._audio is not None:
-            self._gst_playing = True
-            await self._audio.enqueue_playback_async(samples)
         if self._wobbler:
             self._wobbler.feed(samples)
 
-    async def _stop_gst_playback(self) -> None:
+    async def _stop_gst_playback(self, *, immediate: bool = False) -> None:
         if not self._gst_playing:
             return
-        reachy = self.app.reachy
-        has_sdk_audio = bool(
-            reachy and getattr(getattr(reachy, "media", None), "audio", None)
-        )
-        if has_sdk_audio:
+        route = self._playback_route
+        if route == "duplex" and self._audio is not None:
+            if immediate:
+                drain = getattr(self._audio, "drain_playback", None)
+                if callable(drain):
+                    try:
+                        drain()
+                    except Exception:  # noqa: BLE001
+                        logger.debug("drain_playback failed", exc_info=True)
+            else:
+                try:
+                    await self._audio.await_playback_drained()
+                except Exception:  # noqa: BLE001
+                    logger.debug("await_playback_drained failed", exc_info=True)
+                await asyncio.sleep(0.25)
+        elif route == "sdk":
+            reachy = self.app.reachy
+            has_sdk_audio = bool(
+                reachy and getattr(getattr(reachy, "media", None), "audio", None)
+            )
+            if not has_sdk_audio:
+                self._gst_playing = False
+                self._playback_route = None
+                return
             try:
-                silence = np.zeros(1600, dtype=np.float32)
-                for _ in range(5):
-                    reachy.media.push_audio_sample(silence)
-                await asyncio.sleep(0.4)
+                if not immediate:
+                    silence = np.zeros(1600, dtype=np.float32)
+                    for _ in range(5):
+                        reachy.media.push_audio_sample(silence)
+                    await asyncio.sleep(0.4)
                 reachy.media.stop_playing()
             except Exception:  # noqa: BLE001
                 pass
-        elif self._audio is not None:
-            try:
-                await self._audio.await_playback_drained()
-            except Exception:  # noqa: BLE001
-                logger.debug("await_playback_drained failed", exc_info=True)
         self._gst_playing = False
+        self._playback_route = None
         if self._wobbler:
             self._wobbler.reset()
 

@@ -61,6 +61,145 @@ def test_event_bus_on_app(dashboard_app):
     assert isinstance(dashboard_app.events, EventBus)
 
 
+def test_chinese_conversation_mind_label_is_first_person():
+    """Chinese live dashboard should say 我说了, not Reachy 的 说."""
+    i18n = (
+        Path(__file__).parents[1]
+        / "src"
+        / "reachy_claw"
+        / "plugins"
+        / "dashboard_static"
+        / "i18n.js"
+    ).read_text(encoding="utf-8")
+
+    assert '"mind.possessive": ""' in i18n
+    assert '"mind.says": "我说了"' in i18n
+    assert '"mind.possessive": "Reachy 的"' not in i18n
+
+
+def test_dashboard_exposes_conversation_language_select():
+    static_dir = (
+        Path(__file__).parents[1]
+        / "src"
+        / "reachy_claw"
+        / "plugins"
+        / "dashboard_static"
+    )
+    html = (static_dir / "index.html").read_text(encoding="utf-8")
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    i18n = (static_dir / "i18n.js").read_text(encoding="utf-8")
+
+    assert 'id="conversation-language"' in html
+    assert 'id="conversation-language-status"' in html
+    assert 'id="settings-diagnostics"' in html
+    assert "set_conversation_language" in app_js
+    assert "syncConversationLanguageUI" in app_js
+    assert "updateSettingsDiagnostics" in app_js
+    assert '"conversationLanguage.title"' in i18n
+    assert '"toggle.vlm": "Visual Understanding (VLM)"' in i18n
+    assert '"toggle.vlm": "视觉理解 (VLM)"' in i18n
+    assert '"settingsDiag.title"' in i18n
+    assert '"panelLanguage.title"' in i18n
+
+
+def test_dashboard_restart_copy_targets_robot_services():
+    i18n = (
+        Path(__file__).parents[1]
+        / "src"
+        / "reachy_claw"
+        / "plugins"
+        / "dashboard_static"
+        / "i18n.js"
+    ).read_text(encoding="utf-8")
+
+    assert '"services.restartAll": "Restart Robot Services"' in i18n
+    assert '"services.restartAll": "重启机器人服务"' in i18n
+    assert "Restarting {container}" in i18n
+
+
+class FakeConversationPlugin:
+    name = "conversation"
+
+    def __init__(self):
+        self.languages: list[str] = []
+
+    async def set_conversation_language(self, language: str) -> None:
+        self.languages.append(language)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_sets_conversation_language_pair(dashboard_app):
+    """Panel language choice keeps ASR and TTS language unified."""
+    from reachy_claw.plugins.dashboard_plugin import DashboardPlugin
+
+    conv = FakeConversationPlugin()
+    dashboard_app._plugins.append(conv)
+    plugin = DashboardPlugin(dashboard_app)
+    captured = []
+
+    async def capture(msg):
+        captured.append(msg)
+
+    plugin._broadcast = capture
+
+    await plugin._handle_ws_message({"type": "set_conversation_language", "language": "en"})
+
+    assert dashboard_app.config.v2v_asr_language == "en"
+    assert dashboard_app.config.v2v_tts_language == "en"
+    assert conv.languages == ["en"]
+    assert captured[-1] == {
+        "type": "conversation_language",
+        "language": "en",
+        "asr_language": "en",
+        "tts_language": "en",
+    }
+
+
+@pytest.mark.asyncio
+async def test_dashboard_reports_conversation_language(dashboard_app):
+    from reachy_claw.plugins.dashboard_plugin import DashboardPlugin
+
+    dashboard_app.config.v2v_asr_language = "zh"
+    dashboard_app.config.v2v_tts_language = "zh"
+    plugin = DashboardPlugin(dashboard_app)
+    captured = []
+
+    async def capture(msg):
+        captured.append(msg)
+
+    plugin._broadcast = capture
+
+    await plugin._handle_ws_message({"type": "get_conversation_language"})
+
+    assert captured[-1] == {
+        "type": "conversation_language",
+        "language": "zh",
+        "asr_language": "zh",
+        "tts_language": "zh",
+    }
+
+
+@pytest.mark.asyncio
+async def test_dashboard_rejects_mixed_or_auto_conversation_language(dashboard_app):
+    from reachy_claw.plugins.dashboard_plugin import DashboardPlugin
+
+    dashboard_app.config.v2v_asr_language = "zh"
+    dashboard_app.config.v2v_tts_language = "zh"
+    plugin = DashboardPlugin(dashboard_app)
+    captured = []
+
+    async def capture(msg):
+        captured.append(msg)
+
+    plugin._broadcast = capture
+
+    await plugin._handle_ws_message({"type": "set_conversation_language", "language": "auto"})
+
+    assert dashboard_app.config.v2v_asr_language == "zh"
+    assert dashboard_app.config.v2v_tts_language == "zh"
+    assert captured == []
+
+
 @pytest.mark.asyncio
 async def test_dashboard_broadcast_robot_state(dashboard_app):
     """Test that _broadcast_robot_state produces correct JSON shape."""
@@ -85,6 +224,8 @@ async def test_dashboard_broadcast_robot_state(dashboard_app):
     assert "antenna" in msg
     assert "emotion" in msg
     assert "speaking" in msg
+    assert "motor_enabled" in msg
+    assert "motion_enabled" in msg
     assert "tracking" in msg
     assert "source" in msg["tracking"]
     assert "confidence" in msg["tracking"]

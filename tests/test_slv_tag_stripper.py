@@ -8,22 +8,74 @@ working). Reuses the fake-SLV harness style from
 """
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
 
 from reachy_claw.config import Config
 from reachy_claw.app import ReachyClawApp
+from reachy_claw.plugins import conversation_plugin_slv
 from reachy_claw.plugins.conversation_plugin_slv import ConversationPlugin
+from ovs_agent.slv_client import ASRFinal
 
 
 class FakeSLV:
     """Stub SLVClient: records every send_text chunk; no real WS."""
 
     def __init__(self):
+        self.config: dict[str, object] = {}
         self.text_chunks: list[str] = []
+        self.audio_chunks: list[bytes] = []
+        self.flushed = False
+        self.aborted = False
+        self.asr_eos_count = 0
+        self.reconnect_count = 0
 
     async def send_text(self, text: str):
         if text:
             self.text_chunks.append(text)
+
+    async def send_audio(self, pcm: bytes):
+        self.audio_chunks.append(pcm)
+
+    async def asr_eos(self):
+        self.asr_eos_count += 1
+
+    async def flush_tts(self):
+        self.flushed = True
+
+    async def abort(self):
+        self.aborted = True
+
+    async def reconnect(self):
+        self.reconnect_count += 1
+
+
+class FakeMotion:
+    name = "motion"
+
+    def __init__(self):
+        self.opened: list[float | None] = []
+        self.locked: list[float | None] = []
+
+    def open_interaction_window(self, duration=None):
+        self.opened.append(duration)
+
+    def center_and_lock_tracking(self, duration=None):
+        self.locked.append(duration)
+
+
+class FakeVision:
+    name = "vision_client"
+
+    def __init__(self, *, face_trigger_age_s: float | None = None, face_count: int = 1):
+        now = time.monotonic()
+        self._last_face_trigger_time = (
+            now - face_trigger_age_s if face_trigger_age_s is not None else 0.0
+        )
+        self._last_face_time = now
+        self._last_face_count = face_count
 
 
 @pytest.fixture
@@ -116,3 +168,565 @@ class TestTagStripper:
         await _feed(slv_plugin, ["Hello ", "[part", "ial"])
         spoken = "".join(slv_plugin._slv.text_chunks)
         assert spoken == "Hello [partial"
+
+
+class TestSlvModeSwitching:
+    def test_switch_mode_queues_mode_entry_gesture(self, slv_plugin):
+        emotions: list[str] = []
+        slv_plugin.app.emotions.queue_emotion = lambda e: emotions.append(e)
+
+        slv_plugin.switch_mode("conversation")
+        slv_plugin.switch_mode("interpreter")
+        slv_plugin.switch_mode("monologue")
+
+        assert emotions == ["happy", "listening", "curious"]
+
+    @pytest.mark.asyncio
+    async def test_switch_to_monologue_updates_config_and_starts_timer(self, slv_plugin):
+        slv_plugin._running = True
+
+        slv_plugin.switch_mode("monologue")
+
+        assert slv_plugin.app.config.conversation_mode == "monologue"
+        assert slv_plugin._monologue_task is not None
+        assert not slv_plugin._monologue_task.done()
+
+        task = slv_plugin._monologue_task
+        slv_plugin.switch_mode("conversation")
+        await asyncio.sleep(0)
+
+        assert slv_plugin.app.config.conversation_mode == "conversation"
+        assert slv_plugin._monologue_task is None
+        assert task.cancelled()
+
+    def test_interpreter_mode_uses_translation_prompt(self, slv_plugin):
+        slv_plugin.app.config.interpreter_source_lang = "Chinese"
+        slv_plugin.app.config.interpreter_target_lang = "English"
+
+        slv_plugin.switch_mode("interpreter")
+
+        prompt = slv_plugin._build_system_prompt()
+        assert "translation machine" in prompt
+        assert "Chinese to English" in prompt
+        assert "cute robot at an exhibition" not in prompt
+
+    def test_switch_mode_resets_session_when_mode_changes(self, slv_plugin):
+        slv_plugin._session.add_user("previous request")
+        slv_plugin._session.add_assistant("previous answer")
+        slv_plugin._session.prefix_cache_warmed = True
+
+        slv_plugin.switch_mode("interpreter")
+
+        assert slv_plugin._session.history == []
+        assert slv_plugin._session.prefix_cache_warmed is False
+
+    def test_switch_mode_keeps_session_when_mode_is_unchanged(self, slv_plugin):
+        slv_plugin.app.config.conversation_mode = "conversation"
+        slv_plugin._session.add_user("previous request")
+
+        slv_plugin.switch_mode("conversation")
+
+        assert slv_plugin._session.history == [
+            {"role": "user", "content": "previous request"}
+        ]
+
+    def test_conversation_prompt_uses_configured_exhibition_language(self, slv_plugin):
+        prompt = slv_plugin._build_system_prompt()
+
+        assert "configured exhibition language" in prompt
+
+    def test_conversation_prompt_forces_chinese_when_configured(self, slv_plugin):
+        slv_plugin.app.config.v2v_asr_language = "zh"
+        slv_plugin.app.config.v2v_tts_language = "zh"
+
+        prompt = slv_plugin._build_system_prompt()
+
+        assert "Reply only in Chinese." in prompt
+        assert "Do not switch languages" in prompt
+
+    def test_chinese_language_rewrites_saved_english_prompt_constraint(self, slv_plugin):
+        slv_plugin.app.config.v2v_asr_language = "zh"
+        slv_plugin.app.config.v2v_tts_language = "zh"
+        slv_plugin.app.config.ollama_system_prompt = (
+            "Always reply in English. No emoji.\n"
+            "Use 4 to 10 English words before the tag.\n"
+            'Good examples:\n"Welcome, this vehicle brings edge AI to the field. [happy]"\n'
+        )
+
+        prompt = slv_plugin._build_system_prompt()
+
+        assert "Always reply in English." not in prompt
+        assert "English words" not in prompt
+        assert "Welcome, this vehicle" not in prompt
+        assert "Always reply in Chinese." in prompt
+        assert "欢迎，这里展示边缘 AI 方案。[happy]" in prompt
+        assert "Reply only in Chinese." in prompt
+
+    def test_conversation_prompt_forces_english_when_configured(self, slv_plugin):
+        slv_plugin.app.config.v2v_asr_language = "en"
+        slv_plugin.app.config.v2v_tts_language = "en"
+
+        prompt = slv_plugin._build_system_prompt()
+
+        assert "Reply only in English." in prompt
+        assert "Do not switch languages" in prompt
+
+    @pytest.mark.asyncio
+    async def test_set_conversation_language_reconnects_slv_with_matched_pair(self, slv_plugin):
+        await slv_plugin.set_conversation_language("en")
+
+        assert slv_plugin.app.config.v2v_asr_language == "en"
+        assert slv_plugin.app.config.v2v_tts_language == "en"
+        assert slv_plugin._slv.config["asr_language"] == "en"
+        assert slv_plugin._slv.config["tts_language"] == "en"
+        assert slv_plugin._slv.reconnect_count == 1
+
+    @pytest.mark.asyncio
+    async def test_set_conversation_language_rejects_auto(self, slv_plugin):
+        slv_plugin.app.config.v2v_asr_language = "zh"
+        slv_plugin.app.config.v2v_tts_language = "zh"
+
+        await slv_plugin.set_conversation_language("auto")
+
+        assert slv_plugin.app.config.v2v_asr_language == "zh"
+        assert slv_plugin.app.config.v2v_tts_language == "zh"
+        assert slv_plugin._slv.reconnect_count == 0
+
+
+class TestSlvInteractionWindow:
+    @pytest.mark.asyncio
+    async def test_server_vad_mode_passes_mic_audio_through(self, slv_plugin):
+        import numpy as np
+
+        class FakeAudio:
+            def __init__(self):
+                self.calls = 0
+
+            async def read_chunk(self, frames):
+                self.calls += 1
+                if self.calls <= 2:
+                    return np.ones(1024, dtype=np.float32) * 0.01
+                slv_plugin._running = False
+                return None
+
+        slv_plugin.app.config.v2v_vad = "silero"
+        slv_plugin._running = True
+        slv_plugin._audio = FakeAudio()
+
+        await slv_plugin._v2v_audio_uplink_loop()
+
+        assert len(slv_plugin._slv.audio_chunks) == 2
+        assert slv_plugin._slv.asr_eos_count == 0
+
+    @pytest.mark.asyncio
+    async def test_mic_chunks_downmixes_stereo_to_mono_pcm16(self, slv_plugin):
+        import numpy as np
+
+        class FakeAudio:
+            def __init__(self):
+                self.calls = 0
+
+            async def read_chunk(self, frames):
+                self.calls += 1
+                if self.calls == 1:
+                    left = np.ones(1024, dtype=np.float32) * 0.25
+                    right = np.ones(1024, dtype=np.float32) * -0.25
+                    return np.stack([left, right], axis=1)
+                slv_plugin._running = False
+                return None
+
+        slv_plugin._running = True
+        slv_plugin._audio = FakeAudio()
+
+        chunk = await anext(slv_plugin._mic_chunks())
+        pcm = np.frombuffer(chunk, dtype=np.int16)
+
+        assert len(chunk) == 1024 * 2
+        assert pcm.shape == (1024,)
+        assert np.max(np.abs(pcm)) == 0
+
+    @pytest.mark.asyncio
+    async def test_tts_started_and_done_updates_shared_speaking_flag(self, slv_plugin):
+        assert slv_plugin.app.is_speaking is False
+
+        await slv_plugin._dispatch_slv_event(
+            conversation_plugin_slv.TTSStarted("hello")
+        )
+
+        assert slv_plugin.app.is_speaking is True
+
+        await slv_plugin._dispatch_slv_event(conversation_plugin_slv.TTSDone())
+
+        assert slv_plugin.app.is_speaking is False
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.LISTENING
+
+    @pytest.mark.asyncio
+    async def test_asr_partial_moves_listening_to_transcribing(self, slv_plugin):
+        states: list[str] = []
+        partials: list[dict] = []
+        slv_plugin.app.events.subscribe(
+            "state_change", lambda data: states.append(data["state"])
+        )
+        slv_plugin.app.events.subscribe(
+            "asr_partial", lambda data: partials.append(data)
+        )
+        slv_plugin._set_state(conversation_plugin_slv.ConvState.LISTENING)
+
+        await slv_plugin._dispatch_slv_event(
+            conversation_plugin_slv.ASRPartial("hello", is_stable=False)
+        )
+
+        assert partials[-1]["text"] == "hello"
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.TRANSCRIBING
+        assert states[-1] == "transcribing"
+
+    @pytest.mark.asyncio
+    async def test_empty_asr_final_returns_transcribing_to_listening(self, slv_plugin):
+        finals: list[dict] = []
+        slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
+        slv_plugin._state = conversation_plugin_slv.ConvState.TRANSCRIBING
+        slv_plugin._running = True
+
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("", session_complete=False)
+        )
+
+        assert finals[-1]["text"] == ""
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.LISTENING
+
+    @pytest.mark.asyncio
+    async def test_empty_asr_final_uses_recent_meaningful_partial(self, slv_plugin, monkeypatch):
+        finals: list[dict] = []
+        slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
+        slv_plugin._set_state(conversation_plugin_slv.ConvState.LISTENING)
+        slv_plugin._running = True
+
+        def fake_spawn(coro, *, name):
+            coro.close()
+
+            class DoneTask:
+                def done(self):
+                    return True
+
+            return DoneTask()
+
+        monkeypatch.setattr(slv_plugin, "_spawn_task", fake_spawn)
+
+        await slv_plugin._dispatch_slv_event(
+            conversation_plugin_slv.ASRPartial("能给我介绍一下吗？", is_stable=False)
+        )
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("", session_complete=False)
+        )
+
+        assert finals[-1]["text"] == "能给我介绍一下吗？"
+        assert slv_plugin._last_asr_final == "能给我介绍一下吗？"
+
+    @pytest.mark.asyncio
+    async def test_short_filler_asr_final_is_not_sent_to_llm(self, slv_plugin):
+        finals: list[dict] = []
+        slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
+        slv_plugin._state = conversation_plugin_slv.ConvState.TRANSCRIBING
+        slv_plugin._running = True
+
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("嗯。", session_complete=False)
+        )
+
+        assert finals == []
+        assert slv_plugin._turn_task is None
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.LISTENING
+
+    @pytest.mark.asyncio
+    async def test_short_unattended_asr_final_is_not_sent_to_llm(self, slv_plugin):
+        finals: list[dict] = []
+        slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
+        slv_plugin._state = conversation_plugin_slv.ConvState.TRANSCRIBING
+        slv_plugin._running = True
+
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("桌台上下。", session_complete=False)
+        )
+
+        assert finals == []
+        assert slv_plugin._turn_task is None
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.LISTENING
+
+    @pytest.mark.asyncio
+    async def test_visual_attention_allows_short_asr_final(self, slv_plugin, monkeypatch):
+        finals: list[dict] = []
+        slv_plugin.app._plugins.append(FakeVision(face_trigger_age_s=1.0))
+        slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
+        slv_plugin._state = conversation_plugin_slv.ConvState.TRANSCRIBING
+        slv_plugin._running = True
+
+        def fake_spawn(coro, *, name):
+            coro.close()
+
+            class DoneTask:
+                def done(self):
+                    return True
+
+            return DoneTask()
+
+        monkeypatch.setattr(slv_plugin, "_spawn_task", fake_spawn)
+
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("桌台上下。", session_complete=False)
+        )
+
+        assert finals[-1]["text"] == "桌台上下。"
+        assert slv_plugin._last_asr_final == "桌台上下。"
+
+    @pytest.mark.asyncio
+    async def test_asr_final_ignored_while_speaking(self, slv_plugin):
+        finals: list[dict] = []
+        slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
+        slv_plugin._state = conversation_plugin_slv.ConvState.SPEAKING
+        slv_plugin._running = True
+
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("I'm Reachy, your robot guide.", session_complete=False)
+        )
+
+        assert finals == []
+        assert slv_plugin._turn_task is None
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.SPEAKING
+
+    @pytest.mark.asyncio
+    async def test_matching_asr_final_ignored_during_post_tts_echo_guard(self, slv_plugin):
+        finals: list[dict] = []
+        slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
+        slv_plugin._state = conversation_plugin_slv.ConvState.TRANSCRIBING
+        slv_plugin._last_tts_done_ts = time.monotonic()
+        slv_plugin._last_tts_sentence = "Exactly."
+        slv_plugin._running = True
+
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("Exactly.", session_complete=False)
+        )
+
+        assert finals == []
+        assert slv_plugin._turn_task is None
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.LISTENING
+
+    @pytest.mark.asyncio
+    async def test_different_asr_final_after_tts_is_not_echo_guarded(self, slv_plugin, monkeypatch):
+        finals: list[dict] = []
+        slv_plugin.app.events.subscribe("asr_final", lambda data: finals.append(data))
+        slv_plugin._state = conversation_plugin_slv.ConvState.TRANSCRIBING
+        slv_plugin._last_tts_done_ts = time.monotonic()
+        slv_plugin._last_tts_sentence = "Hello, I'm Reachy."
+        slv_plugin._running = True
+
+        def fake_spawn(coro, *, name):
+            coro.close()
+
+            class DoneTask:
+                def done(self):
+                    return True
+
+            return DoneTask()
+
+        monkeypatch.setattr(slv_plugin, "_spawn_task", fake_spawn)
+
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("能给我介绍一下吗？", session_complete=False)
+        )
+
+        assert finals[-1]["text"] == "能给我介绍一下吗？"
+        assert slv_plugin._last_asr_final == "能给我介绍一下吗？"
+
+    @pytest.mark.asyncio
+    async def test_asr_final_opens_motion_interaction_window(self, slv_plugin, monkeypatch):
+        motion = FakeMotion()
+        slv_plugin.app._plugins.append(motion)
+        slv_plugin._running = True
+
+        def fake_spawn(coro, *, name):
+            coro.close()
+
+            class DoneTask:
+                def done(self):
+                    return True
+
+            return DoneTask()
+
+        monkeypatch.setattr(slv_plugin, "_spawn_task", fake_spawn)
+
+        await slv_plugin._dispatch_slv_event(
+            ASRFinal("hello", session_complete=False)
+        )
+
+        assert motion.opened == [None]
+
+    @pytest.mark.asyncio
+    async def test_barge_in_centers_and_locks_motion(self, slv_plugin):
+        motion = FakeMotion()
+        slv_plugin.app._plugins.append(motion)
+        slv_plugin._state = conversation_plugin_slv.ConvState.SPEAKING
+        slv_plugin._gst_playing = True
+        slv_plugin._speaking_since_ts = 0.0
+
+        await slv_plugin._maybe_barge_in("hello")
+
+        assert motion.locked == [None]
+
+    @pytest.mark.asyncio
+    async def test_tts_done_centers_and_locks_motion_after_speaking(self, slv_plugin):
+        motion = FakeMotion()
+        slv_plugin.app._plugins.append(motion)
+        slv_plugin._state = conversation_plugin_slv.ConvState.SPEAKING
+        slv_plugin._gst_playing = False
+
+        await slv_plugin._dispatch_slv_event(conversation_plugin_slv.TTSDone())
+
+        assert motion.locked == [None]
+        assert slv_plugin._state == conversation_plugin_slv.ConvState.LISTENING
+
+
+class TestSlvAudioRouting:
+    @pytest.mark.asyncio
+    async def test_v2v_pcm_prefers_duplex_audio_when_sdk_audio_exists(
+        self, slv_plugin, mock_reachy
+    ):
+        class FakeDuplexAudio:
+            def __init__(self):
+                self.enqueued = []
+                self._duplex_stream = object()
+
+            async def enqueue_playback_async(self, samples):
+                self.enqueued.append(samples)
+
+        duplex_audio = FakeDuplexAudio()
+        mock_reachy.media.audio = object()
+        slv_plugin.app.reachy = mock_reachy
+        slv_plugin._audio = duplex_audio
+
+        pcm = b"\x00\x01" * 320
+
+        await slv_plugin._play_v2v_pcm(16000, pcm)
+
+        assert len(duplex_audio.enqueued) == 1
+        mock_reachy.media.start_playing.assert_not_called()
+        mock_reachy.media.push_audio_sample.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stop_playback_drains_duplex_route_when_sdk_audio_exists(
+        self, slv_plugin, mock_reachy
+    ):
+        class FakeDuplexAudio:
+            def __init__(self):
+                self.drained = 0
+
+            async def await_playback_drained(self):
+                self.drained += 1
+
+        duplex_audio = FakeDuplexAudio()
+        mock_reachy.media.audio = object()
+        slv_plugin.app.reachy = mock_reachy
+        slv_plugin._audio = duplex_audio
+        slv_plugin._gst_playing = True
+        slv_plugin._playback_route = "duplex"
+
+        await slv_plugin._stop_gst_playback()
+
+        assert duplex_audio.drained == 1
+        assert slv_plugin._gst_playing is False
+        assert slv_plugin._playback_route is None
+        mock_reachy.media.stop_playing.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_immediate_stop_drops_duplex_playback_without_drain(
+        self, slv_plugin
+    ):
+        class FakeDuplexAudio:
+            def __init__(self):
+                self.drained = 0
+                self.dropped = 0
+
+            async def await_playback_drained(self):
+                self.drained += 1
+
+            def drain_playback(self):
+                self.dropped += 1
+
+        duplex_audio = FakeDuplexAudio()
+        slv_plugin._audio = duplex_audio
+        slv_plugin._gst_playing = True
+        slv_plugin._playback_route = "duplex"
+
+        await slv_plugin._stop_gst_playback(immediate=True)
+
+        assert duplex_audio.dropped == 1
+        assert duplex_audio.drained == 0
+        assert slv_plugin._gst_playing is False
+        assert slv_plugin._playback_route is None
+
+
+class TestSlvMonologue:
+    @pytest.mark.asyncio
+    async def test_monologue_queues_angle_specific_micro_gesture(
+        self, slv_plugin, monkeypatch
+    ):
+        emotions: list[str] = []
+        slv_plugin.app.emotions.queue_emotion = lambda e: emotions.append(e)
+
+        async def fake_stream_with_tools(*args, **kwargs):
+            await kwargs["on_assistant_token"]("I notice something new.")
+            return "I notice something new."
+
+        monkeypatch.setattr(
+            conversation_plugin_slv, "stream_with_tools", fake_stream_with_tools
+        )
+        slv_plugin._llm = object()
+
+        await slv_plugin._run_monologue()
+
+        assert emotions == ["thinking", "curious"]
+
+    @pytest.mark.asyncio
+    async def test_monologue_adds_variation_and_sampling(self, slv_plugin, monkeypatch):
+        calls: list[dict] = []
+
+        async def fake_stream_with_tools(*args, **kwargs):
+            messages = args[1]
+            calls.append({"messages": messages, "kwargs": kwargs})
+            await kwargs["on_assistant_token"]("I notice something new. [curious]")
+            return "I notice something new. [curious]"
+
+        monkeypatch.setattr(
+            conversation_plugin_slv, "stream_with_tools", fake_stream_with_tools
+        )
+        slv_plugin._llm = object()
+
+        await slv_plugin._run_monologue()
+        await slv_plugin._run_monologue()
+
+        prompts = [call["messages"][-1]["content"] for call in calls]
+        assert prompts[0] != prompts[1]
+        assert "Avoid repeating recent lines" in prompts[1]
+        assert calls[0]["kwargs"]["llm_kwargs"]["temperature"] == 0.8
+        assert calls[0]["kwargs"]["llm_kwargs"]["top_p"] == 0.9
+
+    @pytest.mark.asyncio
+    async def test_monologue_does_not_speak_bare_emotion_word(self, slv_plugin, monkeypatch):
+        emotions: list[str] = []
+        slv_plugin.app.emotions.queue_emotion = lambda e: emotions.append(e)
+
+        async def fake_stream_with_tools(*args, **kwargs):
+            await kwargs["on_assistant_token"]("I'm glad to meet everyone! ")
+            await kwargs["on_assistant_token"]("excited")
+            return "I'm glad to meet everyone! excited"
+
+        monkeypatch.setattr(
+            conversation_plugin_slv, "stream_with_tools", fake_stream_with_tools
+        )
+        slv_plugin._llm = object()
+
+        await slv_plugin._run_monologue()
+
+        spoken = "".join(slv_plugin._slv.text_chunks)
+        assert spoken == "I'm glad to meet everyone! "
+        assert "excited" not in spoken
+        assert emotions == ["thinking", "curious", "excited"]

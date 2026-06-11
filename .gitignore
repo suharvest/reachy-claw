@@ -38,7 +38,9 @@ htmlcov/
 
 # Local data
 .reachy-claw/
+.antigravitycli/
 captures/
+runtime-overrides.yaml
 
 # Whisper models cache
 ~/.cache/whisper/

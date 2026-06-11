@@ -995,9 +995,8 @@ class ConversationPlugin(Plugin):
             getattr(config, "v2v_client_vad_silence_ms", 400)
         )
         preroll_ms = float(getattr(config, "v2v_client_vad_preroll_ms", 300))
-        vad_threshold = float(
-            getattr(config, "v2v_client_vad_threshold", 0.5)
-        )
+        raw_vad_threshold = getattr(config, "v2v_client_vad_threshold", None)
+        vad_threshold = 0.5 if raw_vad_threshold is None else float(raw_vad_threshold)
 
         # Reset gate state on (re)entry.
         self._client_vad_state = "idle"

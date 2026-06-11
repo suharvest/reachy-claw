@@ -71,6 +71,7 @@ class Config:
 
     # Audio settings
     audio_device: str | None = None
+    audio_input_channel: int | None = None
     audio_volume: float = 1.0  # playback gain multiplier (e.g. 2.0 = double volume)
 
     # ── Rest window ─────────────────────────────────────────────
@@ -143,7 +144,7 @@ class Config:
     # Client-side VAD tuning (only used when v2v_vad == "none").
     v2v_client_vad_silence_ms: int = 400  # local silence → send asr_eos
     v2v_client_vad_preroll_ms: int = 300  # ring buffer before speech_start
-    v2v_client_vad_threshold: float = 0.5  # silero score threshold
+    v2v_client_vad_threshold: float | None = None  # silero score threshold; None = backend default
     v2v_multi_utterance: bool = True
     # Optional voice cloning (forwarded into the V2V config frame).
     # voice_id    : id of an OVS-registered voice (cloned or built-in).
@@ -152,6 +153,13 @@ class Config:
     #               can use for on-the-fly cloning (where supported).
     v2v_voice_id: str = ""
     v2v_voice_clone_sample: str = ""
+
+    # Voice interaction gating. These do not expose a wake-word; they tune
+    # the internal attention gate that decides whether short ASR snippets
+    # are likely to be intentional user speech.
+    voice_attention_window_s: float = 12.0
+    voice_unattended_min_cjk_chars: int = 6
+    voice_unattended_min_alpha_chars: int = 5
 
     # VLM (Vision Language Model)
     enable_vlm: bool = False
@@ -180,7 +188,13 @@ class Config:
     motion_emotion_intensity: float = 1.0
     motion_head_tracking_smoothing: float = 0.35
     motion_head_tracking_poll_interval: float = 0.05
-    motion_idle_animation_interval: float = 5.0
+    motion_idle_animation_interval: float = 10.0
+    # Head compositor: emotion accents are layered on top of the gaze anchor.
+    motion_emotion_accent_gain: float = 0.6  # scale of emotion head accents (0 = none)
+    motion_head_idle_micro: bool = False  # subtle idle head drift so it's not frozen
+    motion_head_yaw_limit: float = 25.0  # safe envelope for composed head output (deg)
+    motion_head_pitch_limit: float = 18.0
+    motion_head_roll_limit: float = 18.0
 
     # Vision / face tracking
     vision_tracker_type: str = "mediapipe"  # "mediapipe", "remote", "none"
@@ -195,6 +209,9 @@ class Config:
     vision_deadzone: float = 0.01
     vision_min_face_size: float = 0.05  # minimum face bbox fraction (0-1), smaller = ignored
     vision_face_lost_delay: float = 2.0
+    vision_interaction_face_stable_s: float = 1.0
+    vision_interaction_face_min_area: float = 0.008
+    vision_interaction_face_cooldown_s: float = 12.0
 
     # Vision TRT service (used when vision_tracker_type == "remote")
     vision_service_url: str = "tcp://127.0.0.1:8631"
@@ -290,6 +307,7 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("vad", "backend"): "vad_backend",
     ("vad", "threshold"): "silero_threshold",
     ("audio", "device"): "audio_device",
+    ("audio", "input_channel"): "audio_input_channel",
     ("audio", "volume"): "audio_volume",
     ("audio", "sample_rate"): "sample_rate",
     ("audio", "silence_threshold"): "silence_threshold",
@@ -338,6 +356,11 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("motion", "head_tracking_smoothing"): "motion_head_tracking_smoothing",
     ("motion", "head_tracking_poll_interval"): "motion_head_tracking_poll_interval",
     ("motion", "idle_animation_interval"): "motion_idle_animation_interval",
+    ("motion", "emotion_accent_gain"): "motion_emotion_accent_gain",
+    ("motion", "head_idle_micro"): "motion_head_idle_micro",
+    ("motion", "head_yaw_limit"): "motion_head_yaw_limit",
+    ("motion", "head_pitch_limit"): "motion_head_pitch_limit",
+    ("motion", "head_roll_limit"): "motion_head_roll_limit",
     ("vision", "tracker"): "vision_tracker_type",
     ("vision", "camera_source"): "vision_camera_source",
     ("vision", "camera_index"): "vision_camera_index",
@@ -349,10 +372,16 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("vision", "deadzone"): "vision_deadzone",
     ("vision", "min_face_size"): "vision_min_face_size",
     ("vision", "face_lost_delay"): "vision_face_lost_delay",
+    ("vision", "interaction_face_stable_s"): "vision_interaction_face_stable_s",
+    ("vision", "interaction_face_min_area"): "vision_interaction_face_min_area",
+    ("vision", "interaction_face_cooldown_s"): "vision_interaction_face_cooldown_s",
     ("vision", "service_url"): "vision_service_url",
     ("vision", "emotion_threshold"): "vision_emotion_threshold",
     ("vision", "emotion_cooldown"): "vision_emotion_cooldown",
     ("vision", "identity_threshold"): "vision_identity_threshold",
+    ("voice", "attention_window_s"): "voice_attention_window_s",
+    ("voice", "unattended_min_cjk_chars"): "voice_unattended_min_cjk_chars",
+    ("voice", "unattended_min_alpha_chars"): "voice_unattended_min_alpha_chars",
     ("conversation", "mode"): "conversation_mode",
     ("conversation", "monologue_interval"): "monologue_interval",
 ("dashboard", "enabled"): "dashboard_enabled",
@@ -386,6 +415,7 @@ _ENV_FIELD_MAP: dict[str, str] = {
     "TTS_BACKEND": "tts_backend",
     "WAKE_WORD": "wake_word",
     "SPEECH_SERVICE_URL": "speech_service_url",
+    "CLAWD_AUDIO_INPUT_CHANNEL": "audio_input_channel",
     "SENSEVOICE_LANGUAGE": "sensevoice_language",
     "VAD_BACKEND": "vad_backend",
     "CLAWD_EDGE_LLM_URL": "edge_llm_url",
@@ -403,6 +433,9 @@ _ENV_FIELD_MAP: dict[str, str] = {
     "CLAWD_V2V_MULTI_UTTERANCE": "v2v_multi_utterance",
     "CLAWD_V2V_VOICE_ID": "v2v_voice_id",
     "CLAWD_V2V_VOICE_CLONE_SAMPLE": "v2v_voice_clone_sample",
+    "CLAWD_VOICE_ATTENTION_WINDOW_S": "voice_attention_window_s",
+    "CLAWD_VOICE_UNATTENDED_MIN_CJK_CHARS": "voice_unattended_min_cjk_chars",
+    "CLAWD_VOICE_UNATTENDED_MIN_ALPHA_CHARS": "voice_unattended_min_alpha_chars",
     "CLAWD_DASHBOARD_RESTART_CONTAINERS": "dashboard_restart_containers",
 }
 

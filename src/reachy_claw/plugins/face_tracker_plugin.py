@@ -77,7 +77,7 @@ class FaceTrackerPlugin(Plugin):
             for attempt in range(5):
                 if self._has_sdk_camera():
                     self._use_sdk_camera = True
-                    logger.info("Using SDK camera (zenoh) for face tracking")
+                    logger.info("Using SDK camera for face tracking")
                     return True
                 if attempt < 4:
                     import time as _time
@@ -172,7 +172,7 @@ class FaceTrackerPlugin(Plugin):
         if self._gst_cam:
             source_desc = f"gst-subprocess/{self._gst_cam.device}"
         elif self._use_sdk_camera:
-            source_desc = "sdk/zenoh"
+            source_desc = "sdk/websocket"
         else:
             source_desc = f"opencv/{self._camera_index}"
         logger.info(

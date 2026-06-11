@@ -328,6 +328,27 @@ class DashboardPlugin(Plugin):
         except Exception as e:
             logger.warning("Failed to save config overrides: %s", e)
 
+    @staticmethod
+    def _normalize_conversation_language(language: str | None) -> str | None:
+        lang = (language or "").strip().lower()
+        return lang if lang in {"zh", "en"} else None
+
+    def _conversation_language_payload(self) -> dict:
+        cfg = self.app.config
+        asr_lang = self._normalize_conversation_language(
+            getattr(cfg, "v2v_asr_language", "auto")
+        )
+        tts_lang = self._normalize_conversation_language(
+            getattr(cfg, "v2v_tts_language", "auto")
+        )
+        language = asr_lang if asr_lang and asr_lang == tts_lang else "zh"
+        return {
+            "type": "conversation_language",
+            "language": language,
+            "asr_language": getattr(cfg, "v2v_asr_language", "auto"),
+            "tts_language": getattr(cfg, "v2v_tts_language", "auto"),
+        }
+
     # ── HTTP handlers ─────────────────────────────────────────────────
 
     async def _handle_health(self, request):
@@ -479,6 +500,30 @@ class DashboardPlugin(Plugin):
                 "target": target,
             })
 
+        elif msg_type == "get_conversation_language":
+            await self._broadcast(self._conversation_language_payload())
+
+        elif msg_type == "set_conversation_language":
+            language = self._normalize_conversation_language(data.get("language"))
+            if not language:
+                return
+            self.app.config.v2v_asr_language = language
+            self.app.config.v2v_tts_language = language
+            conv = self.app.get_plugin("conversation")
+            if conv and hasattr(conv, "set_conversation_language"):
+                try:
+                    await conv.set_conversation_language(language)
+                except Exception as e:  # noqa: BLE001
+                    logger.error("Conversation language switch failed: %s", e)
+                    await self._broadcast({
+                        "type": "toast",
+                        "text": f"Language switch failed: {e}",
+                        "error": True,
+                    })
+                    return
+            self._save_overrides(["v2v_asr_language", "v2v_tts_language"])
+            await self._broadcast(self._conversation_language_payload())
+
         elif msg_type == "get_prompts":
             from ..llm import DEFAULT_SYSTEM_PROMPT, MONOLOGUE_SYSTEM_PROMPT, INTERPRETER_SYSTEM_PROMPT
 
@@ -569,16 +614,21 @@ class DashboardPlugin(Plugin):
 
         elif msg_type == "get_history":
             conv = self.app.get_plugin("conversation")
-            turns = 0
-            if conv and hasattr(conv, "_client") and hasattr(conv._client, "_config"):
-                turns = conv._client._config.max_history
+            if conv and hasattr(conv, "get_history_turns"):
+                turns = conv.get_history_turns()  # SLV backend
+            elif conv and hasattr(conv, "_client") and hasattr(conv._client, "_config"):
+                turns = conv._client._config.max_history  # legacy backend
+            else:
+                turns = getattr(self.app.config, "ollama_max_history", 0)
             await self._broadcast({"type": "history", "turns": turns})
 
         elif msg_type == "set_history":
             turns = max(0, min(20, int(data.get("turns", 0))))
             conv = self.app.get_plugin("conversation")
-            if conv and hasattr(conv, "_client") and hasattr(conv._client, "_config"):
-                conv._client._config.max_history = turns
+            if conv and hasattr(conv, "set_history_turns"):
+                turns = conv.set_history_turns(turns)  # SLV: persist + trim live
+            elif conv and hasattr(conv, "_client") and hasattr(conv._client, "_config"):
+                conv._client._config.max_history = turns  # legacy backend
                 conv._client._history.clear()  # reset on change
             self.app.config.ollama_max_history = turns
             self._save_overrides(["ollama_max_history"])
@@ -1345,6 +1395,8 @@ class DashboardPlugin(Plugin):
             "emotion": emotion,
             "emotion_mapping": mapping_info,
             "speaking": self.app.is_speaking,
+            "motor_enabled": self.app.motor_enabled,
+            "motion_enabled": self.app.config.enable_motion,
             "tracking": {
                 "source": target.source,
                 "confidence": round(target.confidence, 2),

@@ -312,10 +312,17 @@ class ReachyClawApp:
         """Start Reachy Mini daemon if not already running."""
         import socket
 
-        # Check if daemon is already running on port 7447
+        # reachy-mini dropped Zenoh (:7447) for a WebSocket transport in SDK
+        # 1.5.0; the daemon now serves FastAPI/WebSocket on its --fastapi-port
+        # (default 8000). Spawn the daemon on, probe, and connect to the *same*
+        # port the SDK client uses (reachy_daemon_port) — matching how the
+        # Jetson docker deploy runs the daemon with `--fastapi-port`.
+        port = self.config.reachy_daemon_port
+
+        # Check if daemon is already running
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            if s.connect_ex(("localhost", 7447)) == 0:
-                logger.info("Reachy daemon already running on :7447")
+            if s.connect_ex(("localhost", port)) == 0:
+                logger.info("Reachy daemon already running on :%d", port)
                 return
 
         logger.info(f"Starting Reachy daemon (serialport={serialport})...")
@@ -328,17 +335,23 @@ class ReachyClawApp:
             logger.error("reachy-mini-daemon not found in PATH")
             return
 
-        cmd = [daemon_bin, "--serialport", serialport, "--localhost-only", "--deactivate-audio"]
+        cmd = [
+            daemon_bin,
+            "--serialport", serialport,
+            "--localhost-only",
+            "--deactivate-audio",
+            "--fastapi-port", str(port),
+        ]
         self._daemon_proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
 
-        # Wait for daemon to be ready (zenoh on 7447)
+        # Wait for daemon to be ready (WebSocket transport on the FastAPI port)
         for i in range(30):
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                if s.connect_ex(("localhost", 7447)) == 0:
+                if s.connect_ex(("localhost", port)) == 0:
                     logger.info(f"Reachy daemon ready ({(i+1)*0.5:.1f}s)")
                     return
             if self._daemon_proc.poll() is not None:

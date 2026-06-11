@@ -9,8 +9,6 @@ import asyncio
 import logging
 import time
 
-import numpy as np
-
 from ..motion.head_target import HeadTarget
 from ..plugin import Plugin
 
@@ -58,6 +56,15 @@ class VisionClientPlugin(Plugin):
         self._smoothing_alpha = cfg.vision_smoothing_alpha
         self._deadzone = cfg.vision_deadzone
         self._face_lost_delay = cfg.vision_face_lost_delay
+        self._face_trigger_stable_s = getattr(
+            cfg, "vision_interaction_face_stable_s", 1.0
+        )
+        self._face_trigger_min_area = getattr(
+            cfg, "vision_interaction_face_min_area", 0.008
+        )
+        self._face_trigger_cooldown_s = getattr(
+            cfg, "vision_interaction_face_cooldown_s", 12.0
+        )
         self._emotion_threshold = cfg.vision_emotion_threshold
         self._emotion_cooldown = cfg.vision_emotion_cooldown
 
@@ -67,6 +74,8 @@ class VisionClientPlugin(Plugin):
         self._smooth_roll = 0.0
         self._last_face_time = 0.0
         self._face_lost_published = False
+        self._face_trigger_seen_since = 0.0
+        self._last_face_trigger_time = 0.0
 
         # Body yaw: accumulated angle (closed-loop centering)
         self._body_yaw_acc = 0.0
@@ -174,173 +183,204 @@ class VisionClientPlugin(Plugin):
                 faces_n = len(msg.get("faces", []))
                 logger.info(f"ZMQ recv #{recv_count}: {faces_n} faces")
 
-            # Emit vision_faces for dashboard (capped at 5)
-            faces_for_dash = [
-                {
-                    "bbox": f.get("bbox", []),
-                    "emotion": _EMOTION_REMAP.get(f.get("emotion", ""), "neutral"),
-                    "emotion_confidence": float(f.get("emotion_confidence", 0)),
-                    "identity": f.get("identity"),
-                }
-                for f in msg.get("faces", [])[:5]
-            ]
-            self._emit_threadsafe("vision_faces", {"faces": faces_for_dash})
+            self._process_vision_message(msg, now=time.monotonic())
 
-            # Check for smile capture event
-            capture = msg.get("capture")
-            if capture and capture.get("event"):
-                self._emit_threadsafe("smile_capture", {
-                    "count": capture.get("count", 0),
-                    "file": capture.get("file"),
-                })
+    def _face_area(self, face: dict) -> float:
+        bbox = face.get("bbox")
+        if not bbox or len(bbox) < 4:
+            return 0.0
+        width = max(0.0, float(bbox[2]) - float(bbox[0]))
+        height = max(0.0, float(bbox[3]) - float(bbox[1]))
+        return width * height
 
-            faces = msg.get("faces", [])
+    def _is_effective_tracking_face(self, face: dict) -> bool:
+        return self._face_area(face) >= self._face_trigger_min_area
+
+    def _process_vision_message(self, msg: dict, *, now: float | None = None) -> None:
+        """Process one ZMQ vision result.
+
+        Dashboard still sees all faces, but motion/conversation attention only
+        follows faces that are large enough to represent a nearby visitor.
+        """
+        if now is None:
             now = time.monotonic()
 
-            if not faces:
-                self._last_face_count = 0
-                self._last_faces_summary = []
-                if (now - self._last_face_time) > self._face_lost_delay:
-                    if not self._face_lost_published:
-                        self.app.head_targets.publish(
-                            HeadTarget(
-                                yaw=0.0, pitch=0.0, confidence=0.0,
-                                source="face", timestamp=now,
-                            )
+        # Emit vision_faces for dashboard (capped at 5)
+        faces_for_dash = [
+            {
+                "bbox": f.get("bbox", []),
+                "emotion": _EMOTION_REMAP.get(f.get("emotion", ""), "neutral"),
+                "emotion_confidence": float(f.get("emotion_confidence", 0)),
+                "identity": f.get("identity"),
+            }
+            for f in msg.get("faces", [])[:5]
+        ]
+        self._emit_threadsafe("vision_faces", {"faces": faces_for_dash})
+
+        # Check for smile capture event
+        capture = msg.get("capture")
+        if capture and capture.get("event"):
+            self._emit_threadsafe("smile_capture", {
+                "count": capture.get("count", 0),
+                "file": capture.get("file"),
+            })
+
+        faces = [
+            f for f in msg.get("faces", [])
+            if self._is_effective_tracking_face(f)
+        ]
+
+        if not faces:
+            self._last_face_count = 0
+            self._last_faces_summary = []
+            if (now - self._last_face_time) > self._face_lost_delay:
+                if not self._face_lost_published:
+                    self.app.head_targets.publish(
+                        HeadTarget(
+                            yaw=0.0, pitch=0.0, confidence=0.0,
+                            source="face", timestamp=now,
                         )
-                        self._face_lost_published = True
-                        self.current_identity = None
-                continue
-
-            # Update multi-face summary (sorted by bbox area descending)
-            self._last_face_count = len(faces)
-            sorted_faces = sorted(
-                faces,
-                key=lambda f: (
-                    (f["bbox"][2] - f["bbox"][0]) * (f["bbox"][3] - f["bbox"][1])
-                    if "bbox" in f else 0
-                ),
-                reverse=True,
-            )
-            self._last_faces_summary = [
-                {
-                    "identity": f.get("identity"),
-                    "emotion": _EMOTION_REMAP.get(f.get("emotion", ""), "neutral"),
-                }
-                for f in sorted_faces
-            ]
-
-            # Select primary face (largest bbox area)
-            primary = max(
-                faces,
-                key=lambda f: (
-                    (f["bbox"][2] - f["bbox"][0]) * (f["bbox"][3] - f["bbox"][1])
-                    if "bbox" in f else 0
-                ),
-            )
-
-            self._last_face_time = now
-            self._face_lost_published = False
-
-            # Head tracking (same logic as FaceTrackerPlugin)
-            center = primary.get("center")
-            if center:
-                face_x, face_y = float(center[0]), float(center[1])
-
-                if (
-                    abs(face_x - self._smooth_x) >= self._deadzone
-                    or abs(face_y - self._smooth_y) >= self._deadzone
-                ):
-                    self._smooth_x += self._smoothing_alpha * (face_x - self._smooth_x)
-                    self._smooth_y += self._smoothing_alpha * (face_y - self._smooth_y)
-
-                # Body rotation: proportional centering
-                # Camera is on robot head, so as body rotates, face naturally
-                # moves toward center — no integral needed
-                body_yaw = -self._smooth_x * self._max_yaw
-                # Head pitch: face in upper frame (y<0) → look up (negative pitch in SDK)
-                # SDK convention: positive pitch = look DOWN, negative = look UP
-                pitch = self._smooth_y * self._max_pitch - self._pitch_offset
-
-                # Roll estimation from eye landmarks (points 0=left_eye, 1=right_eye)
-                roll = 0.0
-                landmarks = primary.get("landmarks")
-                if landmarks and len(landmarks) >= 2:
-                    left_eye, right_eye = landmarks[0], landmarks[1]
-                    eye_dx = right_eye[0] - left_eye[0]
-                    eye_dy = right_eye[1] - left_eye[1]
-                    raw_roll = float(np.degrees(np.arctan2(eye_dy, eye_dx)))
-                    # EMA smoothing
-                    self._smooth_roll += self._smoothing_alpha * (raw_roll - self._smooth_roll)
-                    roll = float(np.clip(self._smooth_roll, -self._max_roll, self._max_roll))
-
-                # Head yaw follows body yaw for natural look
-                head_yaw = -self._smooth_x * self._max_pitch  # gentle head turn toward face
-
-                self.app.head_targets.publish(
-                    HeadTarget(
-                        yaw=head_yaw, pitch=pitch, roll=roll,
-                        body_yaw=body_yaw, confidence=0.9,
-                        source="face", timestamp=now,
                     )
-                )
+                    self._face_lost_published = True
+                    self.current_identity = None
+            return
 
-            # Emotion mapping
-            emotion = primary.get("emotion")
-            emotion_conf = primary.get("emotion_confidence", 0.0)
+        # Update multi-face summary (sorted by bbox area descending)
+        self._last_face_count = len(faces)
+        sorted_faces = sorted(
+            faces,
+            key=self._face_area,
+            reverse=True,
+        )
+        self._last_faces_summary = [
+            {
+                "identity": f.get("identity"),
+                "emotion": _EMOTION_REMAP.get(f.get("emotion", ""), "neutral"),
+            }
+            for f in sorted_faces
+        ]
 
-            # Throttled diagnostic log — every 3s show raw detection
-            if emotion and (now - self._emotion_log_time) >= 3.0:
-                mapped_name = _EMOTION_REMAP.get(emotion, "?")
-                below = emotion_conf < self._emotion_threshold
-                cd = (now - self._last_emotion_time) < self._emotion_cooldown
-                logger.info(
-                    f"Emotion raw: {emotion}→{mapped_name} "
-                    f"conf={emotion_conf:.2f} "
-                    f"{'BELOW_THRESH' if below else 'ok'} "
-                    f"{'COOLDOWN' if cd else 'ok'}"
-                )
-                self._emotion_log_time = now
+        # Select primary face (largest bbox area)
+        primary = sorted_faces[0]
+
+        self._last_face_time = now
+        self._face_lost_published = False
+        self._maybe_trigger_face_interaction(primary, now=now)
+
+        # Head tracking (same horizontal split as FaceTrackerPlugin)
+        center = primary.get("center")
+        if center:
+            face_x, face_y = float(center[0]), float(center[1])
 
             if (
-                emotion
-                and emotion_conf >= self._emotion_threshold
-                and (now - self._last_emotion_time) >= self._emotion_cooldown
+                abs(face_x - self._smooth_x) >= self._deadzone
+                or abs(face_y - self._smooth_y) >= self._deadzone
             ):
-                mapped = _EMOTION_REMAP.get(emotion)
-                if mapped:
-                    changed = mapped != self._last_emotion
-                    # Resend same emotion if: sustained for N seconds,
-                    # or confidence jumped significantly
-                    sustained = (
-                        not changed
-                        and (now - self._last_emotion_time) >= self._emotion_sustain
-                    )
-                    conf_jump = (
-                        not changed
-                        and (emotion_conf - self._last_emotion_conf) >= 0.15
-                    )
-                    if changed or sustained or conf_jump:
-                        self.app.emotions.queue_emotion(mapped)
-                        self._last_emotion = mapped
-                        self._last_emotion_conf = emotion_conf
-                        self._last_emotion_time = now
-                        reason = (
-                            "change" if changed
-                            else "sustain" if sustained
-                            else "conf_jump"
-                        )
-                        logger.debug(
-                            f"Vision emotion: {emotion} → {mapped} "
-                            f"(conf={emotion_conf:.2f}, {reason})"
-                        )
+                self._smooth_x += self._smoothing_alpha * (face_x - self._smooth_x)
+                self._smooth_y += self._smoothing_alpha * (face_y - self._smooth_y)
 
-            # Identity
-            identity = primary.get("identity")
-            if identity != self.current_identity:
-                self.current_identity = identity
-                if identity:
-                    logger.info(f"Face identified: {identity}")
+            # Body rotation: proportional centering. The remote vision stream
+            # is reliable enough for coarse horizontal attention, but its
+            # bbox/landmark coordinates are too noisy for head pitch/roll on
+            # the exhibition camera, so keep the head neutral here.
+            body_yaw = -self._smooth_x * self._max_yaw
+            pitch = 0.0
+            roll = 0.0
+
+            self.app.head_targets.publish(
+                HeadTarget(
+                    yaw=0.0, pitch=pitch, roll=roll,
+                    body_yaw=body_yaw, confidence=0.9,
+                    source="face", timestamp=now,
+                )
+            )
+
+        # Emotion mapping
+        emotion = primary.get("emotion")
+        emotion_conf = primary.get("emotion_confidence", 0.0)
+
+        # Throttled diagnostic log — every 3s show raw detection
+        if emotion and (now - self._emotion_log_time) >= 3.0:
+            mapped_name = _EMOTION_REMAP.get(emotion, "?")
+            below = emotion_conf < self._emotion_threshold
+            cd = (now - self._last_emotion_time) < self._emotion_cooldown
+            logger.info(
+                f"Emotion raw: {emotion}→{mapped_name} "
+                f"conf={emotion_conf:.2f} "
+                f"{'BELOW_THRESH' if below else 'ok'} "
+                f"{'COOLDOWN' if cd else 'ok'}"
+            )
+            self._emotion_log_time = now
+
+        if (
+            emotion
+            and emotion_conf >= self._emotion_threshold
+            and (now - self._last_emotion_time) >= self._emotion_cooldown
+        ):
+            mapped = _EMOTION_REMAP.get(emotion)
+            if mapped:
+                changed = mapped != self._last_emotion
+                # Resend same emotion if: sustained for N seconds,
+                # or confidence jumped significantly
+                sustained = (
+                    not changed
+                    and (now - self._last_emotion_time) >= self._emotion_sustain
+                )
+                conf_jump = (
+                    not changed
+                    and (emotion_conf - self._last_emotion_conf) >= 0.15
+                )
+                if changed or sustained or conf_jump:
+                    self._last_emotion = mapped
+                    self._last_emotion_conf = emotion_conf
+                    self._last_emotion_time = now
+                    reason = (
+                        "change" if changed
+                        else "sustain" if sustained
+                        else "conf_jump"
+                    )
+                    logger.info(
+                        "Vision emotion observed: %s -> %s "
+                        "(conf=%.2f, %s; motion suppressed)",
+                        emotion,
+                        mapped,
+                        emotion_conf,
+                        reason,
+                    )
+
+        # Identity
+        identity = primary.get("identity")
+        if identity != self.current_identity:
+            self.current_identity = identity
+            if identity:
+                logger.info(f"Face identified: {identity}")
+
+    def _maybe_trigger_face_interaction(self, face: dict, *, now: float) -> None:
+        bbox = face.get("bbox")
+        if not bbox or len(bbox) < 4:
+            self._face_trigger_seen_since = 0.0
+            return
+
+        width = max(0.0, float(bbox[2]) - float(bbox[0]))
+        height = max(0.0, float(bbox[3]) - float(bbox[1]))
+        area = width * height
+        if area < self._face_trigger_min_area:
+            self._face_trigger_seen_since = 0.0
+            return
+
+        if self._face_trigger_seen_since <= 0.0:
+            self._face_trigger_seen_since = now
+            return
+        if (now - self._face_trigger_seen_since) < self._face_trigger_stable_s:
+            return
+        if (now - self._last_face_trigger_time) < self._face_trigger_cooldown_s:
+            return
+
+        motion = self.app.get_plugin("motion")
+        if motion and hasattr(motion, "open_interaction_window"):
+            motion.open_interaction_window()
+            self.app.emotions.queue_emotion("attention")
+            self._last_face_trigger_time = now
 
     def _emit_threadsafe(self, event: str, data: dict) -> None:
         """Emit EventBus event from a background thread."""

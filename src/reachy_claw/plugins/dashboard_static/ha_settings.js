@@ -23,7 +23,7 @@ function _renderTestResult(ok, msg) {
   if (ok === null) {
     _setStatus("ha-test-result", msg, "info");
   } else {
-    _setStatus("ha-test-result", msg || (ok ? "Connected" : "Error"), ok ? "ok" : "err");
+    _setStatus("ha-test-result", msg || (ok ? t("ha.connected") : t("ha.error")), ok ? "ok" : "err");
   }
 }
 
@@ -33,7 +33,7 @@ function _updateSelectionCount() {
   const total = _haEntitiesCache
     ? _haEntitiesCache.groups.reduce((n, g) => n + g.count, 0)
     : 0;
-  el.textContent = `${_haSelectedSet.size} selected of ${total}`;
+  el.textContent = t("ha.selectionCount", { n: _haSelectedSet.size, total });
 }
 
 function _renderEntities(groups) {
@@ -41,7 +41,7 @@ function _renderEntities(groups) {
   if (!root) return;
   root.innerHTML = "";
   if (!groups || groups.length === 0) {
-    root.innerHTML = '<div class="face-empty">No entities returned by HA.</div>';
+    root.innerHTML = `<div class="face-empty">${t("ha.noEntities")}</div>`;
     return;
   }
   for (const g of groups) {
@@ -126,9 +126,9 @@ async function bindHASettings() {
     saveTimer = setTimeout(async () => {
       try {
         await _saveCurrentSettings({ [field]: value });
-        _toast(`Saved ${field}`);
+        _toast(t("ha.savedField", { field }));
       } catch (e) {
-        _toast(`Save failed: ${e.message}`, false);
+        _toast(t("ha.saveFailed", { msg: e.message }), false);
       }
     }, 500);
   }
@@ -136,7 +136,7 @@ async function bindHASettings() {
   _byId("ha-token").addEventListener("input", (e) => debouncedSave("token", e.target.value));
 
   _byId("ha-test-btn").addEventListener("click", async () => {
-    _renderTestResult(null, "Testing…");
+    _renderTestResult(null, t("ha.testing"));
     const body = {
       url: _byId("ha-url").value.trim(),
       token: _byId("ha-token").value,
@@ -147,19 +147,19 @@ async function bindHASettings() {
       body: JSON.stringify(body),
     });
     const j = await r.json();
-    _renderTestResult(j.ok, j.message || (j.ok ? "Connected" : `HTTP ${j.status}`));
+    _renderTestResult(j.ok, j.message || (j.ok ? t("ha.connected") : t("ha.http", { status: j.status })));
   });
 
   _byId("ha-refresh-btn").addEventListener("click", refreshHAEntities);
   _byId("ha-save-btn").addEventListener("click", async () => {
-    _setStatus("ha-save-status", "Saving…", "info");
+    _setStatus("ha-save-status", t("ha.saving"), "info");
     try {
       await _saveCurrentSettings({ entities: Array.from(_haSelectedSet).sort() });
-      _setStatus("ha-save-status", `Saved ${_haSelectedSet.size} entities.`, "ok");
-      _toast(`Saved ${_haSelectedSet.size} entities`);
+      _setStatus("ha-save-status", t("ha.savedEntitiesDot", { n: _haSelectedSet.size }), "ok");
+      _toast(t("ha.savedEntities", { n: _haSelectedSet.size }));
     } catch (e) {
-      _setStatus("ha-save-status", `Save failed: ${e.message}`, "err");
-      _toast(`Save failed: ${e.message}`, false);
+      _setStatus("ha-save-status", t("ha.saveFailed", { msg: e.message }), "err");
+      _toast(t("ha.saveFailed", { msg: e.message }), false);
     }
   });
 }
@@ -167,17 +167,17 @@ async function bindHASettings() {
 async function refreshHAEntities() {
   const tree = _byId("ha-entities-tree");
   if (!tree) return;
-  tree.innerHTML = '<div class="face-empty">Loading…</div>';
+  tree.innerHTML = `<div class="face-empty">${t("ha.loading")}</div>`;
   let r;
   try {
     r = await fetch("/api/ha/entities");
   } catch (e) {
-    tree.innerHTML = `<div class="face-empty" style="color:var(--red)">Network error: ${e.message}</div>`;
+    tree.innerHTML = `<div class="face-empty" style="color:var(--red)">${t("ha.networkError", { msg: e.message })}</div>`;
     return;
   }
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));
-    tree.innerHTML = `<div class="face-empty" style="color:var(--red)">${body.error || `HTTP ${r.status}`}</div>`;
+    tree.innerHTML = `<div class="face-empty" style="color:var(--red)">${body.error || t("ha.http", { status: r.status })}</div>`;
     return;
   }
   _haEntitiesCache = await r.json();

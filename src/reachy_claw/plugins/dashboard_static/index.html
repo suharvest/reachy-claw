@@ -4,16 +4,18 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>EMOTION MIRROR</title>
-<link rel="stylesheet" href="/static/style.css?v=18">
-<link rel="stylesheet" href="/static/diary.css?v=3">
+<link rel="stylesheet" href="/static/style.css?v=20">
+<link rel="stylesheet" href="/static/diary.css?v=4">
 <link rel="stylesheet" href="/static/settings.css?v=5">
+<script src="/static/i18n.js?v=4"></script>
 </head>
 <body>
 
 <!-- Page tabs -->
 <nav class="page-tabs">
-    <button class="page-tab active" data-page="live">LIVE</button>
-    <button class="page-tab" data-page="diary">DIARY</button>
+    <button class="page-tab active" data-page="live" data-i18n="nav.live">LIVE</button>
+    <button class="page-tab" data-page="diary" data-i18n="nav.diary">DIARY</button>
+    <button class="lang-toggle" id="lang-toggle" data-i18n="lang.toggle" data-i18n-title="panelLanguage.title" title="Panel language">中文</button>
 </nav>
 
 <!-- Page: Live Dashboard -->
@@ -23,13 +25,13 @@
     <div class="grid-container">
         <!-- Row 1: top sections -->
         <div class="cell-left-top">
-            <div class="section-header"><span class="header-emoji">&#x1F440;</span> What I see</div>
+            <div class="section-header"><span class="header-emoji">&#x1F440;</span> <span data-i18n="see.title">What I see</span></div>
             <div class="video-container">
                 <img id="video-stream" alt="">
                 <canvas id="overlay-canvas"></canvas>
                 <div class="no-video" id="no-video">
                     <div class="nv-icon">&#x1f4f7;</div>
-                    <div>Connecting to vision...</div>
+                    <div data-i18n="video.connecting">Connecting to vision...</div>
                 </div>
             </div>
         </div>
@@ -43,15 +45,15 @@
                 <div class="bracket bl"></div>
                 <div class="bracket br"></div>
             </div>
-            <div class="emotion-pill" id="emotion-pill">Neutral</div>
+            <div class="emotion-pill" id="emotion-pill" data-i18n="emotion.neutral">Neutral</div>
         </div>
 
         <div class="cell-right">
             <div class="section-header mind-header">
                 <img src="/static/brain-bulb.svg" class="mind-logo" alt="logo">
                 <div class="mind-title">
-                    <span>Reachy's</span>
-                    <span id="mind-label">Mind</span>
+                    <span data-i18n="mind.possessive">Reachy's</span>
+                    <span id="mind-label" data-i18n="mind.mind">Mind</span>
                 </div>
             </div>
             <div class="thought-list" id="thought-list"></div>
@@ -61,18 +63,18 @@
         <div class="cell-left-bottom">
             <div class="hear-row">
                 <span class="header-emoji">&#x1F442;</span>
-                <span class="hear-label">What I hear</span>
+                <span class="hear-label" data-i18n="hear.title">What I hear</span>
                 <img src="/static/waveform.svg" class="waveform-img" id="waveform-img" alt="waveform">
             </div>
             <div class="asr-bubble" id="asr-bubble">
-                <span class="asr-text" id="asr-text">Listening...</span>
+                <span class="asr-text" id="asr-text" data-i18n="asr.listening">Listening...</span>
             </div>
         </div>
 
         <div class="cell-center-bottom">
-            <div class="emotion-label" id="emotion-label">Smiling face</div>
+            <div class="emotion-label" id="emotion-label" data-i18n="emotionLabel.smile">Smile Wall</div>
             <div class="capture-counter" id="capture-counter">
-                <span class="heart-icon">&#x2764;&#xFE0F;</span>
+                <span class="heart-icon">&#x1F4F7;</span>
                 <span class="capture-count" id="capture-count">0</span>
             </div>
             <div class="capture-float-area" id="capture-float-area"></div>
@@ -93,12 +95,12 @@
 <div id="page-diary" style="display:none">
     <div class="diary-page">
         <div class="diary-date-nav">
-            <button class="diary-date-btn" id="diary-prev" title="Older">&#x25C0;</button>
-            <span class="diary-date-label" id="diary-date-label">Loading...</span>
-            <button class="diary-date-btn" id="diary-next" title="Newer">&#x25B6;</button>
+            <button class="diary-date-btn" id="diary-prev" data-i18n-title="diary.older" title="Older">&#x25C0;</button>
+            <span class="diary-date-label" id="diary-date-label" data-i18n="diary.loading">Loading...</span>
+            <button class="diary-date-btn" id="diary-next" data-i18n-title="diary.newer" title="Newer">&#x25B6;</button>
             <button class="narrate-btn" id="narrate-btn">
                 <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
-                Narrate
+                <span data-i18n="diary.narrate">Narrate</span>
             </button>
         </div>
         <div id="diary-content"></div>
@@ -114,16 +116,16 @@
 <div class="settings-overlay" id="settings-overlay">
     <div class="settings-panel">
         <div class="settings-header">
-            <h2>Settings</h2>
+            <h2 data-i18n="settings.title">Settings</h2>
             <button class="settings-close" id="settings-close">&times;</button>
         </div>
         <div class="settings-tabs">
-            <button class="settings-tab active" data-tab="mode">General</button>
-            <button class="settings-tab" data-tab="faces">Face Management</button>
-            <button class="settings-tab" data-tab="detail">Details</button>
-            <button class="settings-tab" data-tab="prompt">Prompt</button>
-            <button class="settings-tab" data-tab="diary">Diary</button>
-            <button class="settings-tab" data-tab="ha">HA Sensors</button>
+            <button class="settings-tab active" data-tab="mode" data-i18n="settings.tab.mode">General</button>
+            <button class="settings-tab" data-tab="faces" data-i18n="settings.tab.faces">Face Management</button>
+            <button class="settings-tab" data-tab="detail" data-i18n="settings.tab.detail">Details</button>
+            <button class="settings-tab" data-tab="prompt" data-i18n="settings.tab.prompt">Prompt</button>
+            <button class="settings-tab" data-tab="diary" data-i18n="settings.tab.diary">Diary</button>
+            <button class="settings-tab" data-tab="ha" data-i18n="settings.tab.ha">HA Sensors</button>
         </div>
         <div class="settings-content">
             <div class="tab-pane active" id="tab-mode">
@@ -132,80 +134,112 @@
                         <input type="radio" name="mode" value="conversation" checked>
                         <div class="mode-radio"></div>
                         <div class="mode-info">
-                            <h3>Conversation</h3>
-                            <p>Normal dialogue mode. Robot responds to user speech with emotion tags driving expressions.</p>
+                            <h3 data-i18n="mode.conversation.title">Conversation</h3>
+                            <p data-i18n="mode.conversation.desc">Normal dialogue mode. Robot responds to user speech with emotion tags driving expressions.</p>
                         </div>
                     </label>
                     <label class="mode-option" data-mode="monologue">
                         <input type="radio" name="mode" value="monologue">
                         <div class="mode-radio"></div>
                         <div class="mode-info">
-                            <h3>Monologue</h3>
-                            <p>Inner monologue mode. Robot observes and narrates thoughts.</p>
+                            <h3 data-i18n="mode.monologue.title">Monologue</h3>
+                            <p data-i18n="mode.monologue.desc">Inner monologue mode. Robot observes and narrates thoughts.</p>
                         </div>
                     </label>
                     <label class="mode-option" data-mode="interpreter">
                         <input type="radio" name="mode" value="interpreter">
                         <div class="mode-radio"></div>
                         <div class="mode-info">
-                            <h3>Interpreter</h3>
-                            <p>Simultaneous interpretation. Translates speech in real time.</p>
+                            <h3 data-i18n="mode.interpreter.title">Interpreter</h3>
+                            <p data-i18n="mode.interpreter.desc">Simultaneous interpretation. Translates speech in real time.</p>
                         </div>
                     </label>
                 </div>
                 <div class="mode-status" id="mode-status">Current: conversation</div>
+                <div class="conversation-language-section">
+                    <div class="toggle-row">
+                        <span class="toggle-label" data-i18n="conversationLanguage.title">Exhibition Language</span>
+                        <select id="conversation-language" class="lang-select">
+                            <option value="zh" data-i18n="conversationLanguage.zh">Chinese scene</option>
+                            <option value="en" data-i18n="conversationLanguage.en">English scene</option>
+                        </select>
+                    </div>
+                    <p class="memory-hint" data-i18n="conversationLanguage.hint">ASR and replies use the same language.</p>
+                    <div class="settings-status-line" id="conversation-language-status">ASR: -- / TTS: --</div>
+                </div>
                 <div class="interpreter-settings" id="interpreter-settings" style="display:none">
                     <div class="toggle-row">
-                        <span class="toggle-label">Source Language</span>
+                        <span class="toggle-label" data-i18n="lang.source">Source Language</span>
                         <select id="interpreter-source" class="lang-select">
-                            <option value="Chinese" selected>Chinese</option>
-                            <option value="English">English</option>
-                            <option value="Japanese">Japanese</option>
-                            <option value="Korean">Korean</option>
-                            <option value="French">French</option>
-                            <option value="German">German</option>
-                            <option value="Spanish">Spanish</option>
+                            <option value="Chinese" selected data-i18n="lang.chinese">Chinese</option>
+                            <option value="English" data-i18n="lang.english">English</option>
+                            <option value="Japanese" data-i18n="lang.japanese">Japanese</option>
+                            <option value="Korean" data-i18n="lang.korean">Korean</option>
+                            <option value="French" data-i18n="lang.french">French</option>
+                            <option value="German" data-i18n="lang.german">German</option>
+                            <option value="Spanish" data-i18n="lang.spanish">Spanish</option>
                         </select>
                     </div>
                     <div class="toggle-row">
-                        <span class="toggle-label">Target Language</span>
+                        <span class="toggle-label" data-i18n="lang.target">Target Language</span>
                         <select id="interpreter-target" class="lang-select">
-                            <option value="Chinese">Chinese</option>
-                            <option value="English" selected>English</option>
-                            <option value="Japanese">Japanese</option>
-                            <option value="Korean">Korean</option>
-                            <option value="French">French</option>
-                            <option value="German">German</option>
-                            <option value="Spanish">Spanish</option>
+                            <option value="Chinese" data-i18n="lang.chinese">Chinese</option>
+                            <option value="English" selected data-i18n="lang.english">English</option>
+                            <option value="Japanese" data-i18n="lang.japanese">Japanese</option>
+                            <option value="Korean" data-i18n="lang.korean">Korean</option>
+                            <option value="French" data-i18n="lang.french">French</option>
+                            <option value="German" data-i18n="lang.german">German</option>
+                            <option value="Spanish" data-i18n="lang.spanish">Spanish</option>
                         </select>
                     </div>
                 </div>
                 <div class="mode-toggles" id="mode-toggles">
                     <div class="toggle-row">
-                        <span class="toggle-label">Camera Vision (VLM)</span>
-                        <button class="motor-sleep-toggle" id="vlm-toggle" title="Toggle VLM on/off">
+                        <span class="toggle-label" data-i18n="toggle.vlm">Camera Vision (VLM)</span>
+                        <button class="motor-sleep-toggle" id="vlm-toggle" data-i18n-title="toggle.vlm.title" title="Toggle VLM on/off">
                             <span class="toggle-track"><span class="toggle-thumb"></span></span>
                         </button>
                     </div>
                     <div class="toggle-row">
-                        <span class="toggle-label">Barge-in (Interrupts)</span>
-                        <button class="motor-sleep-toggle active" id="bargein-toggle" title="Toggle barge-in">
+                        <span class="toggle-label" data-i18n="toggle.bargein">Barge-in (Interrupts)</span>
+                        <button class="motor-sleep-toggle active" id="bargein-toggle" data-i18n-title="toggle.bargein.title" title="Toggle barge-in">
                             <span class="toggle-track"><span class="toggle-thumb"></span></span>
                         </button>
                     </div>
                 </div>
+                <div class="settings-diagnostics" id="settings-diagnostics">
+                    <h3 data-i18n="settingsDiag.title">Runtime Status</h3>
+                    <div class="settings-diag-grid">
+                        <div class="settings-diag-row">
+                            <span data-i18n="settingsDiag.motor">Motor</span>
+                            <strong id="diag-motor">--</strong>
+                        </div>
+                        <div class="settings-diag-row">
+                            <span data-i18n="settingsDiag.motion">Motion</span>
+                            <strong id="diag-motion">--</strong>
+                        </div>
+                        <div class="settings-diag-row">
+                            <span data-i18n="settingsDiag.speaking">Speaking</span>
+                            <strong id="diag-speaking">--</strong>
+                        </div>
+                        <div class="settings-diag-row">
+                            <span data-i18n="settingsDiag.mode">Mode</span>
+                            <strong id="diag-mode">--</strong>
+                        </div>
+                    </div>
+                </div>
                 <div class="memory-section">
-                    <h3>Memory</h3>
+                    <h3 data-i18n="memory.title">Memory</h3>
                     <div class="volume-row">
                         <input type="range" class="volume-slider" id="history-slider" min="0" max="20" value="0">
                         <span class="volume-value" id="history-value">0 turns</span>
                     </div>
-                    <p class="memory-hint">How many conversation turns to remember (0 = stateless)</p>
+                    <p class="memory-hint" data-i18n="memory.hint">How many conversation turns to remember (0 = stateless)</p>
                 </div>
                 <div class="volume-section">
-                    <h3>Volume</h3>
+                    <h3 data-i18n="volume.title">Volume</h3>
                     <div class="volume-row">
-                        <button class="volume-mute-btn" id="volume-mute" title="Mute">
+                        <button class="volume-mute-btn" id="volume-mute" data-i18n-title="volume.mute.title" title="Mute">
                             <svg viewBox="0 0 24 24" fill="currentColor" id="volume-icon-on"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
                             <svg viewBox="0 0 24 24" fill="currentColor" id="volume-icon-off" style="display:none"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>
                         </button>
@@ -215,105 +249,105 @@
                 </div>
                 <div class="restart-section">
                     <div class="section-title-row">
-                        <h3>Rest Window</h3>
-                        <span class="rest-state-badge" id="rest-state-badge" title="Current rest state">— —</span>
+                        <h3 data-i18n="rest.title">Rest Window</h3>
+                        <span class="rest-state-badge" id="rest-state-badge" data-i18n-title="rest.state.title" title="Current rest state">— —</span>
                     </div>
                     <div class="toggle-row">
-                        <span class="toggle-label">Enabled</span>
-                        <button class="motor-sleep-toggle" id="rest-enabled-toggle" title="Enable scheduled rest">
+                        <span class="toggle-label" data-i18n="rest.enabled">Enabled</span>
+                        <button class="motor-sleep-toggle" id="rest-enabled-toggle" data-i18n-title="rest.enabled.title" title="Enable scheduled rest">
                             <span class="toggle-track"><span class="toggle-thumb"></span></span>
                         </button>
                     </div>
                     <div class="toggle-row rest-row">
-                        <span class="toggle-label" style="min-width: 50px;">Window</span>
+                        <span class="toggle-label" style="min-width: 50px;" data-i18n="rest.window">Window</span>
                         <input type="text" class="voice-input rest-time" id="rest-window-start" value="23:00" pattern="^([01]\d|2[0-3]):[0-5]\d$" placeholder="HH:MM" maxlength="5" inputmode="numeric">
                         <span class="rest-sep">→</span>
                         <input type="text" class="voice-input rest-time" id="rest-window-end" value="23:59" pattern="^(([01]\d|2[0-3]):[0-5]\d|24:00)$" placeholder="HH:MM" maxlength="5" inputmode="numeric">
                         <span style="font-size: 11px; color: var(--text-dim); margin-left: auto;">24h</span>
                     </div>
                     <div class="toggle-row rest-row">
-                        <span class="toggle-label" style="min-width: 50px;">Timezone</span>
+                        <span class="toggle-label" style="min-width: 50px;" data-i18n="rest.timezone">Timezone</span>
                         <input type="text" class="url-input rest-tz" id="rest-timezone" value="Asia/Shanghai" style="flex: 1;">
-                        <button class="enroll-btn" id="rest-save">Save</button>
+                        <button class="enroll-btn" id="rest-save" data-i18n="rest.save">Save</button>
                     </div>
                     <div class="rest-actions">
-                        <button class="action-btn" id="rest-force-enter" title="Force enter rest now">Force Sleep</button>
-                        <button class="action-btn" id="rest-force-exit" title="Force exit rest now">Force Wake</button>
-                        <button class="action-btn" id="rest-force-clear" title="Drop manual override; follow schedule">Follow Schedule</button>
+                        <button class="action-btn" id="rest-force-enter" data-i18n-title="rest.forceSleep.title" title="Force enter rest now" data-i18n="rest.forceSleep">Force Sleep</button>
+                        <button class="action-btn" id="rest-force-exit" data-i18n-title="rest.forceWake.title" title="Force exit rest now" data-i18n="rest.forceWake">Force Wake</button>
+                        <button class="action-btn" id="rest-force-clear" data-i18n-title="rest.followSchedule.title" title="Drop manual override; follow schedule" data-i18n="rest.followSchedule">Follow Schedule</button>
                     </div>
                     <div class="restart-status" id="rest-status"></div>
                 </div>
                 <div class="restart-section">
-                    <h3>Services</h3>
-                    <button class="restart-btn" id="restart-btn">Restart All Services</button>
+                    <h3 data-i18n="services.title">Services</h3>
+                    <button class="restart-btn" id="restart-btn" data-i18n="services.restartAll">Restart All Services</button>
                     <div class="restart-status" id="restart-status"></div>
                 </div>
             </div>
             <div class="tab-pane" id="tab-faces">
                 <div class="face-section">
-                    <h3>Registered Faces</h3>
-                    <div class="face-list" id="face-list"><div class="face-empty">Loading...</div></div>
+                    <h3 data-i18n="faces.registered">Registered Faces</h3>
+                    <div class="face-list" id="face-list"><div class="face-empty" data-i18n="faces.loading">Loading...</div></div>
                 </div>
                 <div class="face-section">
-                    <h3>Live Camera Enroll</h3>
+                    <h3 data-i18n="faces.liveEnroll">Live Camera Enroll</h3>
                     <div class="enroll-row">
-                        <input class="enroll-input" id="enroll-name" placeholder="Name" maxlength="32">
-                        <button class="enroll-btn" id="enroll-live-btn">Enroll</button>
+                        <input class="enroll-input" id="enroll-name" placeholder="Name" data-i18n-placeholder="faces.name" maxlength="32">
+                        <button class="enroll-btn" id="enroll-live-btn" data-i18n="faces.enroll">Enroll</button>
                     </div>
                 </div>
                 <div class="face-section">
-                    <h3>Upload Image</h3>
+                    <h3 data-i18n="faces.uploadImage">Upload Image</h3>
                     <div class="enroll-row">
-                        <input class="enroll-input" id="upload-name" placeholder="Name" maxlength="32">
+                        <input class="enroll-input" id="upload-name" placeholder="Name" data-i18n-placeholder="faces.name" maxlength="32">
                     </div>
                     <div class="upload-area" id="upload-area">
-                        <p>Drop images here or click to select</p>
-                        <div class="upload-hint">JPG / PNG</div>
+                        <p data-i18n="faces.dropHint">Drop images here or click to select</p>
+                        <div class="upload-hint" data-i18n="faces.fileTypes">JPG / PNG</div>
                         <input type="file" id="upload-input" multiple accept="image/*" style="display:none">
                     </div>
                     <div class="upload-preview" id="upload-preview"></div>
-                    <button class="enroll-btn" id="upload-btn" disabled>Upload &amp; Enroll</button>
+                    <button class="enroll-btn" id="upload-btn" disabled data-i18n="faces.uploadEnroll">Upload &amp; Enroll</button>
                 </div>
                 <div class="face-section">
-                    <h3>Backup</h3>
+                    <h3 data-i18n="faces.backup">Backup</h3>
                     <div class="export-import-row">
-                        <button class="action-btn" id="export-btn">Export ZIP</button>
-                        <button class="action-btn" id="import-btn">Import ZIP</button>
+                        <button class="action-btn" id="export-btn" data-i18n="faces.exportZip">Export ZIP</button>
+                        <button class="action-btn" id="import-btn" data-i18n="faces.importZip">Import ZIP</button>
                         <input type="file" id="import-input" accept=".zip" style="display:none">
                     </div>
                 </div>
                 <div class="face-section capture-data-section">
-                    <h3>Smile Captures</h3>
+                    <h3 data-i18n="faces.smileCaptures">Smile Captures</h3>
                     <div class="capture-info-row">
-                        <span class="capture-info-label">Storage</span>
+                        <span class="capture-info-label" data-i18n="faces.storage">Storage</span>
                         <span class="capture-info-value" id="capture-storage-path">--</span>
                     </div>
                     <div class="capture-info-row">
-                        <span class="capture-info-label">Count</span>
+                        <span class="capture-info-label" data-i18n="faces.count">Count</span>
                         <span class="capture-info-value" id="capture-data-count">--</span>
                     </div>
                     <div class="capture-actions">
-                        <button class="action-btn" id="capture-export-btn">Download ZIP</button>
-                        <button class="action-btn danger-btn" id="capture-clear-btn">Clear All</button>
+                        <button class="action-btn" id="capture-export-btn" data-i18n="faces.downloadZip">Download ZIP</button>
+                        <button class="action-btn danger-btn" id="capture-clear-btn" data-i18n="faces.clearAll">Clear All</button>
                     </div>
                 </div>
             </div>
             <div class="tab-pane" id="tab-detail">
                 <div class="detail-section">
-                    <h3>LLM</h3>
+                    <h3 data-i18n="llm.title">LLM</h3>
                     <div class="toggle-row">
-                        <span class="toggle-label">Backend</span>
+                        <span class="toggle-label" data-i18n="llm.backend">Backend</span>
                         <select id="llm-backend" class="lang-select">
                             <option value="ollama">Ollama</option>
                             <option value="gateway">OpenClaw</option>
                         </select>
                     </div>
                     <div class="toggle-row" id="ollama-url-row">
-                        <span class="toggle-label">Ollama URL</span>
+                        <span class="toggle-label" data-i18n="llm.ollamaUrl">Ollama URL</span>
                         <input type="text" class="url-input" id="ollama-url" value="http://localhost:11434" placeholder="http://IP:11434">
                     </div>
                     <div class="toggle-row" id="ollama-model-row">
-                        <span class="toggle-label">Model</span>
+                        <span class="toggle-label" data-i18n="llm.model">Model</span>
                         <select id="ollama-model" class="lang-select">
                             <option value="qwen3.5:0.8b">qwen3.5:0.8b</option>
                             <option value="qwen3.5:2b-q4_K_M">qwen3.5:2b-q4_K_M</option>
@@ -321,61 +355,61 @@
                         </select>
                     </div>
                     <div class="toggle-row" id="gateway-host-row" style="display:none">
-                        <span class="toggle-label">Gateway Host</span>
+                        <span class="toggle-label" data-i18n="llm.gatewayHost">Gateway Host</span>
                         <input type="text" class="url-input" id="gateway-host" value="127.0.0.1" placeholder="IP address">
                     </div>
                     <div class="toggle-row" id="gateway-port-row" style="display:none">
-                        <span class="toggle-label">Gateway Port</span>
+                        <span class="toggle-label" data-i18n="llm.gatewayPort">Gateway Port</span>
                         <input type="number" class="port-input" id="gateway-port" value="18790" min="1" max="65535">
                     </div>
-                    <button class="apply-btn" id="apply-llm-btn">Apply Changes</button>
+                    <button class="apply-btn" id="apply-llm-btn" data-i18n="llm.apply">Apply Changes</button>
                 </div>
                 <div class="detail-section">
-                    <h3>Voice</h3>
+                    <h3 data-i18n="voice.title">Voice</h3>
                     <!-- Voice Clone Mode (shown when supported) -->
                     <div class="volume-row" id="voice-clone-row" style="display:none">
-                        <span class="voice-label">Cloned Voice</span>
+                        <span class="voice-label" data-i18n="voice.cloned">Cloned Voice</span>
                         <select class="lang-select" id="voice-select">
-                            <option value="">-- Select Voice --</option>
+                            <option value="" data-i18n="voice.select">-- Select Voice --</option>
                         </select>
-                        <button class="clone-voice-btn" id="clone-voice-btn" title="Clone new voice">
+                        <button class="clone-voice-btn" id="clone-voice-btn" data-i18n-title="voice.clone.title" title="Clone new voice">
                             <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1 1.93c-3.94-.49-7-3.85-7-7.93h2c0 3.31 2.69 6 6 6s6-2.69 6-6h2c0 4.08-3.06 7.44-7 7.93V19h4v2H8v-2h4v-3.07z"/></svg>
                         </button>
                     </div>
                     <!-- Speaker ID Mode (shown when clone not supported) -->
                     <div class="volume-row" id="speaker-id-row">
-                        <span class="voice-label">Speaker ID</span>
+                        <span class="voice-label" data-i18n="voice.speakerId">Speaker ID</span>
                         <input type="number" class="voice-input" id="voice-sid" min="0" max="99" value="3">
                     </div>
                     <div class="volume-row">
-                        <span class="voice-label">Pitch</span>
+                        <span class="voice-label" data-i18n="voice.pitch">Pitch</span>
                         <input type="range" class="volume-slider" id="voice-pitch" min="-6" max="6" step="0.5" value="1.5">
                         <span class="volume-value" id="voice-pitch-value">+1.5</span>
                     </div>
                     <div class="volume-row">
-                        <span class="voice-label">Speed</span>
+                        <span class="voice-label" data-i18n="voice.speed">Speed</span>
                         <input type="range" class="volume-slider" id="voice-speed" min="0.3" max="2.0" step="0.1" value="0.8">
                         <span class="volume-value" id="voice-speed-value">0.8x</span>
                     </div>
                 </div>
                 <div class="detail-section">
-                    <h3>Audio Detection</h3>
+                    <h3 data-i18n="audio.title">Audio Detection</h3>
                     <div class="volume-row">
-                        <span class="voice-label">VAD Threshold</span>
+                        <span class="voice-label" data-i18n="audio.vadThreshold">VAD Threshold</span>
                         <input type="range" class="volume-slider" id="vad-threshold" min="0.1" max="0.9" step="0.05" value="0.3">
                         <span class="volume-value" id="vad-threshold-value">0.30</span>
                     </div>
                     <div class="volume-row">
-                        <span class="voice-label">Energy Threshold</span>
+                        <span class="voice-label" data-i18n="audio.energyThreshold">Energy Threshold</span>
                         <input type="range" class="volume-slider" id="energy-threshold" min="0.005" max="0.1" step="0.005" value="0.02">
                         <span class="volume-value" id="energy-threshold-value">0.020</span>
                     </div>
-                    <p class="memory-hint">Higher = less sensitive to background noise</p>
+                    <p class="memory-hint" data-i18n="audio.hint">Higher = less sensitive to background noise</p>
                 </div>
                 <div class="detail-section">
                     <div class="section-title-row">
-                        <h3>Motor</h3>
-                        <button class="motor-sleep-toggle active" id="motor-toggle" title="Toggle motor on/off">
+                        <h3 data-i18n="motor.title">Motor</h3>
+                        <button class="motor-sleep-toggle active" id="motor-toggle" data-i18n-title="motor.title.toggle" title="Toggle motor on/off">
                             <span class="toggle-track"><span class="toggle-thumb"></span></span>
                         </button>
                     </div>
@@ -384,24 +418,24 @@
                             <input type="radio" name="motor-preset" value="sensitive">
                             <div class="mode-radio"></div>
                             <div class="mode-info">
-                                <h3>Sensitive</h3>
-                                <p>Fast, responsive tracking. Best for demos and close interaction.</p>
+                                <h3 data-i18n="motor.sensitive.title">Sensitive</h3>
+                                <p data-i18n="motor.sensitive.desc">Fast, responsive tracking. Best for demos and close interaction.</p>
                             </div>
                         </label>
                         <label class="mode-option selected" data-motor="moderate">
                             <input type="radio" name="motor-preset" value="moderate" checked>
                             <div class="mode-radio"></div>
                             <div class="mode-info">
-                                <h3>Moderate</h3>
-                                <p>Balanced speed and smoothness. Default for most scenarios.</p>
+                                <h3 data-i18n="motor.moderate.title">Moderate</h3>
+                                <p data-i18n="motor.moderate.desc">Balanced speed and smoothness. Default for most scenarios.</p>
                             </div>
                         </label>
                         <label class="mode-option" data-motor="smart">
                             <input type="radio" name="motor-preset" value="smart">
                             <div class="mode-radio"></div>
                             <div class="mode-info">
-                                <h3>Smart</h3>
-                                <p>Adaptive tracking that learns movement patterns. Smoother, more natural.</p>
+                                <h3 data-i18n="motor.smart.title">Smart</h3>
+                                <p data-i18n="motor.smart.desc">Adaptive tracking that learns movement patterns. Smoother, more natural.</p>
                             </div>
                         </label>
                     </div>
@@ -409,89 +443,89 @@
             </div>
             <div class="tab-pane" id="tab-prompt">
                 <div class="detail-section">
-                    <h3>Conversation Prompt</h3>
+                    <h3 data-i18n="prompt.conversation">Conversation Prompt</h3>
                     <textarea id="prompt-conversation" rows="8" class="prompt-textarea"></textarea>
                     <div class="prompt-actions">
-                        <button class="action-btn" id="prompt-conv-reset">Reset Default</button>
-                        <button class="enroll-btn" id="prompt-conv-save">Save</button>
+                        <button class="action-btn" id="prompt-conv-reset" data-i18n="prompt.resetDefault">Reset Default</button>
+                        <button class="enroll-btn" id="prompt-conv-save" data-i18n="prompt.save">Save</button>
                     </div>
                 </div>
                 <div class="detail-section">
-                    <h3>Monologue Prompt</h3>
+                    <h3 data-i18n="prompt.monologue">Monologue Prompt</h3>
                     <textarea id="prompt-monologue" rows="8" class="prompt-textarea"></textarea>
                     <div class="prompt-actions">
-                        <button class="action-btn" id="prompt-mono-reset">Reset Default</button>
-                        <button class="enroll-btn" id="prompt-mono-save">Save</button>
+                        <button class="action-btn" id="prompt-mono-reset" data-i18n="prompt.resetDefault">Reset Default</button>
+                        <button class="enroll-btn" id="prompt-mono-save" data-i18n="prompt.save">Save</button>
                     </div>
                 </div>
                 <div class="detail-section">
-                    <h3>Interpreter Prompt</h3>
+                    <h3 data-i18n="prompt.interpreter">Interpreter Prompt</h3>
                     <textarea id="prompt-interpreter" rows="4" class="prompt-textarea"></textarea>
                     <div class="prompt-actions">
-                        <button class="action-btn" id="prompt-interp-reset">Reset Default</button>
-                        <button class="enroll-btn" id="prompt-interp-save">Save</button>
+                        <button class="action-btn" id="prompt-interp-reset" data-i18n="prompt.resetDefault">Reset Default</button>
+                        <button class="enroll-btn" id="prompt-interp-save" data-i18n="prompt.save">Save</button>
                     </div>
                 </div>
                 <div class="detail-section">
-                    <h3>Diary Prompt</h3>
-                    <textarea id="prompt-diary" rows="6" class="prompt-textarea" placeholder="System prompt for daily diary generation. Reference sensor keys, set tone, customize sections."></textarea>
+                    <h3 data-i18n="prompt.diary">Diary Prompt</h3>
+                    <textarea id="prompt-diary" rows="6" class="prompt-textarea" data-i18n-placeholder="prompt.diary.placeholder" placeholder="System prompt for daily diary generation. Reference sensor keys, set tone, customize sections."></textarea>
                     <div class="prompt-actions">
-                        <button class="action-btn" id="prompt-diary-reset">Reset Default</button>
-                        <button class="enroll-btn" id="prompt-diary-save">Save</button>
+                        <button class="action-btn" id="prompt-diary-reset" data-i18n="prompt.resetDefault">Reset Default</button>
+                        <button class="enroll-btn" id="prompt-diary-save" data-i18n="prompt.save">Save</button>
                     </div>
                 </div>
             </div>
             <div class="tab-pane" id="tab-diary">
                 <div class="detail-section">
-                    <h3>Auto Publish</h3>
+                    <h3 data-i18n="diarySet.autoPublish">Auto Publish</h3>
                     <div class="toggle-grid">
                         <div class="toggle-row">
-                            <span class="toggle-label">Auto publish daily</span>
-                            <button class="motor-sleep-toggle" id="diary-auto-publish-toggle" title="Toggle auto publish">
+                            <span class="toggle-label" data-i18n="diarySet.autoPublishDaily">Auto publish daily</span>
+                            <button class="motor-sleep-toggle" id="diary-auto-publish-toggle" data-i18n-title="diarySet.autoPublish.title" title="Toggle auto publish">
                                 <span class="toggle-track"><span class="toggle-thumb"></span></span>
                             </button>
                         </div>
                         <div class="toggle-row">
-                            <span class="toggle-label">Privacy linter</span>
-                            <button class="motor-sleep-toggle" id="diary-privacy-linter-toggle" title="Toggle privacy linter">
+                            <span class="toggle-label" data-i18n="diarySet.privacyLinter">Privacy linter</span>
+                            <button class="motor-sleep-toggle" id="diary-privacy-linter-toggle" data-i18n-title="diarySet.privacyLinter.title" title="Toggle privacy linter">
                                 <span class="toggle-track"><span class="toggle-thumb"></span></span>
                             </button>
                         </div>
                     </div>
                 </div>
                 <div class="detail-section">
-                    <h3>Site Repository</h3>
+                    <h3 data-i18n="diarySet.siteRepo">Site Repository</h3>
                     <div class="toggle-grid">
                         <div class="toggle-row">
-                            <span class="toggle-label">Repo URL</span>
+                            <span class="toggle-label" data-i18n="diarySet.repoUrl">Repo URL</span>
                             <input type="text" class="url-input" id="diary-site-repo-url" placeholder="git@github.com:org/site.git">
                         </div>
                         <div class="toggle-row">
-                            <span class="toggle-label">Diary Path</span>
+                            <span class="toggle-label" data-i18n="diarySet.diaryPath">Diary Path</span>
                             <input type="text" class="url-input" id="diary-site-diary-path" value="src/content/docs">
                         </div>
                         <div class="toggle-row">
-                            <span class="toggle-label">Branch</span>
+                            <span class="toggle-label" data-i18n="diarySet.branch">Branch</span>
                             <input type="text" class="url-input" id="diary-site-branch" value="main">
                         </div>
                     </div>
-                    <button class="restart-btn" id="diary-save" style="margin-top: 12px; background: rgba(118, 185, 0, 0.15); border-color: rgba(118, 185, 0, 0.4); color: var(--green);">Save Diary Settings</button>
+                    <button class="restart-btn" id="diary-save" style="margin-top: 12px; background: rgba(118, 185, 0, 0.15); border-color: rgba(118, 185, 0, 0.4); color: var(--green);" data-i18n="diarySet.save">Save Diary Settings</button>
                     <div class="restart-status" id="diary-status"></div>
                 </div>
                 <div class="detail-section">
-                    <h3>History (last 14 days)</h3>
-                    <div class="face-list" id="diary-history"><div class="face-empty">Loading...</div></div>
+                    <h3 data-i18n="diarySet.history">History (last 14 days)</h3>
+                    <div class="face-list" id="diary-history"><div class="face-empty" data-i18n="faces.loading">Loading...</div></div>
                 </div>
                 <div class="detail-section" id="ha-chips-section" hidden>
-                    <h3>HA Sensors in scope</h3>
-                    <div class="ha-chips-hint">These sensor entities will be available to the diary prompt. Configure them in the HA Sensors tab.</div>
+                    <h3 data-i18n="diarySet.haScope">HA Sensors in scope</h3>
+                    <div class="ha-chips-hint" data-i18n="diarySet.haScopeHint">These sensor entities will be available to the diary prompt. Configure them in the HA Sensors tab.</div>
                     <div id="ha-entities-chips" class="ha-chips"></div>
                 </div>
             </div>
             <div class="tab-pane" id="tab-ha">
                 <div class="detail-section">
-                    <h3>How it works</h3>
-                    <div class="ha-help">
+                    <h3 data-i18n="ha.howItWorks">How it works</h3>
+                    <div class="ha-help" data-i18n-html="ha.help.html">
                         Reachy pulls sensor history from Home Assistant once per day,
                         when the diary is generated. Selected entities (weather, room
                         temperature, motion sensors, etc.) become context for the LLM
@@ -507,28 +541,28 @@
                     </div>
                 </div>
                 <div class="detail-section">
-                    <h3>Connection</h3>
+                    <h3 data-i18n="ha.connection">Connection</h3>
                     <div class="toggle-grid">
                         <div class="toggle-row">
-                            <span class="toggle-label">HA URL</span>
+                            <span class="toggle-label" data-i18n="ha.url">HA URL</span>
                             <input type="text" class="url-input" id="ha-url" placeholder="http://homeassistant.local:8123">
                         </div>
                         <div class="toggle-row">
-                            <span class="toggle-label">Access Token</span>
+                            <span class="toggle-label" data-i18n="ha.token">Access Token</span>
                             <span class="ha-token-wrap">
-                                <input type="password" class="url-input" id="ha-token" autocomplete="off" placeholder="paste long-lived token">
-                                <button type="button" class="ha-token-toggle" id="ha-token-toggle" title="Show/Hide token">👁</button>
+                                <input type="password" class="url-input" id="ha-token" autocomplete="off" placeholder="paste long-lived token" data-i18n-placeholder="ha.token.placeholder">
+                                <button type="button" class="ha-token-toggle" id="ha-token-toggle" data-i18n-title="ha.token.toggle" title="Show/Hide token">👁</button>
                             </span>
                         </div>
                     </div>
-                    <button class="restart-btn" id="ha-test-btn" style="margin-top: 12px;">Test Connection</button>
+                    <button class="restart-btn" id="ha-test-btn" style="margin-top: 12px;" data-i18n="ha.test">Test Connection</button>
                     <div class="restart-status" id="ha-test-result"></div>
                 </div>
                 <div class="detail-section">
-                    <h3>Entities <span class="ha-count" id="ha-selection-count">0 selected of 0</span></h3>
-                    <button class="restart-btn" id="ha-refresh-btn">Refresh List</button>
-                    <div id="ha-entities-tree" class="ha-tree"><div class="face-empty">Click "Refresh List" after configuring connection.</div></div>
-                    <button class="restart-btn" id="ha-save-btn" style="margin-top: 12px; background: rgba(118, 185, 0, 0.15); border-color: rgba(118, 185, 0, 0.4); color: var(--green);">Save Selection</button>
+                    <h3><span data-i18n="ha.entities">Entities</span> <span class="ha-count" id="ha-selection-count">0 selected of 0</span></h3>
+                    <button class="restart-btn" id="ha-refresh-btn" data-i18n="ha.refresh">Refresh List</button>
+                    <div id="ha-entities-tree" class="ha-tree"><div class="face-empty" data-i18n="ha.entitiesHint">Click "Refresh List" after configuring connection.</div></div>
+                    <button class="restart-btn" id="ha-save-btn" style="margin-top: 12px; background: rgba(118, 185, 0, 0.15); border-color: rgba(118, 185, 0, 0.4); color: var(--green);" data-i18n="ha.save">Save Selection</button>
                     <div class="restart-status" id="ha-save-status"></div>
                 </div>
             </div>
@@ -542,45 +576,45 @@
 <div class="clone-overlay" id="clone-overlay" style="display:none">
     <div class="clone-modal">
         <div class="clone-header">
-            <h3>Clone Voice</h3>
+            <h3 data-i18n="clone.title">Clone Voice</h3>
             <button class="settings-close" id="clone-close">&times;</button>
         </div>
         <div class="clone-content">
             <div class="clone-name-row">
-                <span class="voice-label">Voice Name</span>
+                <span class="voice-label" data-i18n="clone.voiceName">Voice Name</span>
                 <input type="text" class="enroll-input" id="clone-name" placeholder="my_voice" maxlength="32">
             </div>
             <div class="clone-method">
                 <button class="clone-method-btn active" id="clone-record-btn">
                     <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1 1.93c-3.94-.49-7-3.85-7-7.93h2c0 3.31 2.69 6 6 6s6-2.69 6-6h2c0 4.08-3.06 7.44-7 7.93V19h4v2H8v-2h4v-3.07z"/></svg>
-                    Record
+                    <span data-i18n="clone.record">Record</span>
                 </button>
                 <button class="clone-method-btn" id="clone-upload-btn">
                     <svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/></svg>
-                    Upload
+                    <span data-i18n="clone.upload">Upload</span>
                 </button>
             </div>
             <div class="clone-record-area" id="clone-record-area">
                 <button class="record-btn" id="record-start-btn">
                     <div class="record-icon"></div>
-                    <span>Start Recording</span>
+                    <span data-i18n="clone.startRecording">Start Recording</span>
                 </button>
                 <div class="record-status" id="record-status"></div>
                 <div class="record-timer" id="record-timer">0:00</div>
             </div>
             <div class="clone-upload-area" id="clone-upload-area" style="display:none">
                 <input type="file" id="clone-audio-input" accept=".wav,.mp3,.m4a,.webm" style="display:none">
-                <button class="action-btn" id="clone-select-btn">Select Audio File</button>
+                <button class="action-btn" id="clone-select-btn" data-i18n="clone.selectAudio">Select Audio File</button>
                 <span class="upload-filename" id="upload-filename"></span>
             </div>
-            <button class="enroll-btn" id="clone-submit-btn" disabled>Clone Voice</button>
+            <button class="enroll-btn" id="clone-submit-btn" disabled data-i18n="clone.submit">Clone Voice</button>
         </div>
     </div>
 </div>
 
-<script src="/static/app.js?v=11"></script>
-<script src="/static/diary.js?v=3"></script>
-<script src="/static/settings.js?v=4"></script>
-<script src="/static/ha_settings.js?v=2"></script>
+<script src="/static/app.js?v=14"></script>
+<script src="/static/diary.js?v=4"></script>
+<script src="/static/settings.js?v=5"></script>
+<script src="/static/ha_settings.js?v=3"></script>
 </body>
 </html>

@@ -160,7 +160,7 @@ The `[LLM]` block in the pipeline is a pluggable interface: `OllamaClient` calls
 | **[OpenClaw](https://github.com/ArturSkowronski/openclaw)** | AI gateway — LLM, tools, multi-turn conversation (optional, for OpenClaw mode) | `:18789` (gateway) | HTTP |
 | ↳ desktop-robot extension | WebSocket bridge for voice assistants | `:18790` | `ws://.../desktop-robot` |
 | **[Jetson Voice](https://github.com/suharvest/jetson-local-voice)** | Edge speech — Paraformer ASR + Matcha TTS (sherpa-onnx, CUDA) | `:8621` | HTTP REST |
-| **reachy-mini daemon** | Robot hardware — SDK access, motor control | `:8000` (dev) / `:38001` (Jetson) | Zenoh `:7447` |
+| **reachy-mini daemon** | Robot hardware — SDK access, motor control | `:8000` (dev) / `:38001` (Jetson) | WebSocket (FastAPI) |
 
 ### Plugins
 
@@ -230,7 +230,7 @@ docker compose --profile openclaw --profile vision up -d
 
 | Container | Profile | Ports | Purpose |
 |-----------|---------|-------|---------|
-| `reachy-daemon` | always | `:38001` (FastAPI), `:7447` (Zenoh) | Robot hardware control |
+| `reachy-daemon` | always | `:38001` (FastAPI / WebSocket) | Robot hardware control |
 | `reachy-claw` | always | `:8640` (dashboard), `:8641` (API) | Conversation + dashboard |
 | `speech` (external) | always | `:8621` | STT/TTS (sherpa-onnx) |
 | `openclaw-gateway` | `openclaw` | `:18789`, `:18790` | AI gateway (LLM + tools) |

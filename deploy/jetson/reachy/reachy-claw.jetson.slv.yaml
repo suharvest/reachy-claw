@@ -30,7 +30,8 @@ llm:
   # prompt (it appends "/no_think" automatically for qwen3, but we include it
   # here too so an operator reading the prompt sees the full intent).
   system_prompt: |
-    You are Reachy, a cute robot at an exhibition. Always reply in English. No emoji.
+    You are Reachy, a cute robot at an exhibition. No emoji.
+    Use the configured exhibition language.
     Reply in ONE short sentence (max 12 words). Be warm but brief — no filler, no lists, no follow-up questions unless asked.
     Names in [Faces: ...] are people you see, not your name.
     Never repeat or mention the [Faces: ...] tag in your reply.
@@ -39,7 +40,7 @@ llm:
     /no_think
   # Monologue (idle self-talk) prompt → ollama_monologue_prompt.
   monologue_prompt: |
-    Your name is Reachy. You are a cheerful cute robot at an exhibition, mumbling happily to yourself. Always reply in English.
+    Your name is Reachy. You are a cheerful cute robot at an exhibition, mumbling happily to yourself. Use the configured exhibition language.
     Reply with ONE short sentence (max 15 words), then exactly ONE emotion tag. Nothing else.
     You love people and get excited when someone shows up. Stay upbeat and warm — find the bright side of everything.
     Names in [Faces: ...] are people you see. Use their name or "you" when talking about someone.
@@ -51,33 +52,41 @@ llm:
 # The SLV plugin reads v2v_url + v2v_vad + v2v_vad_silence_ms.
 v2v:
   url: ws://localhost:8621/v2v/stream
-  asr_language: auto
+  asr_language: zh
   tts_language: zh
-  # Server VAD OFF — the CLIENT drives turn detection. The SLV plugin runs a
-  # local VAD (silero, energy fallback) over the mic uplink and:
-  #   * forwards a ~preroll_ms ring captured BEFORE speech onset (so the
-  #     first word is not swallowed),
-  #   * sends asr_eos after client_vad_silence_ms of trailing silence so the
-  #     engine finalizes the clean utterance,
-  #   * fires barge-in on local speech onset during TTS (no dependence on the
-  #     engine emitting ASR partials while speaking).
+  # Server VAD OFF — reachy-claw runs client VAD with pre-roll. This avoids
+  # losing the first syllables in wake-word-free exhibition speech.
   vad: none
-  vad_silence_ms: 600        # inert when vad: none (server VAD disabled)
-  client_vad_preroll_ms: 300 # audio retained ahead of speech onset
-  client_vad_silence_ms: 400 # trailing silence → client asr_eos
-  # client_vad_threshold: 0.5 # silero score; omit to use backend default
+  vad_silence_ms: 600        # ignored when vad=none; kept for rollback clarity
+  client_vad_preroll_ms: 700 # audio retained ahead of speech onset
+  client_vad_silence_ms: 550 # trailing silence → client asr_eos
+  client_vad_threshold: 0.3 # silero score; lower than default for Reachy Mini mic
   multi_utterance: true
   # voice_id: ""        # leave empty → SLV server default voice
+
+# ── TTS capability API (same SLV service, HTTP on host port 8621) ─────
+tts:
+  speech_service_url: http://localhost:8621
 
 # ── Audio ─────────────────────────────────────────────────────────────
 audio:
   device: "Reachy Mini Audio"
+  input_channel: 0
   volume: 3.5
   sample_rate: 16000
 
 # ── Barge-in (SLV plugin uses ASRPartial-during-SPEAKING mechanism) ──
 barge_in:
   enabled: true
+
+# ── Voice attention gate ──────────────────────────────────────────────
+# No wake-word is exposed. Stable visual attention opens a short internal
+# window where short ASR snippets may trigger; otherwise snippets must be
+# longer to avoid room noise / echo driving the conversation.
+voice:
+  attention_window_s: 12
+  unattended_min_cjk_chars: 6
+  unattended_min_alpha_chars: 5
 
 # ── Reachy daemon (separate container) ───────────────────────────────
 reachy:
@@ -97,10 +106,30 @@ vision:
   emotion_threshold: 0.6
   emotion_cooldown: 5.0
 
+# ── Motion (head compositor) ─────────────────────────────────────────
+# Head = gaze anchor (base yaw follow) + emotion accents + speech wobble.
+# Emotion tags ride on top of gaze as a brief accent, then decay back.
+motion:
+  emotion_accent_gain: 0.6   # 0 = head stays neutral on emotions; raise for bigger gestures
+  head_idle_micro: false     # true = subtle idle head drift so it's not frozen
+  # head_yaw_limit: 25.0     # safe envelope (deg) for composed head output
+  # head_pitch_limit: 18.0
+  # head_roll_limit: 18.0
+
 # ── Dashboard (exhibition UI) ────────────────────────────────────────
 dashboard:
   enabled: true
   port: 8640
+  # Containers to restart from the Settings restart button.
+  # Order matters: vision-trt first (camera lock), dependency services
+  # before reachy-claw, and reachy-claw last so the dashboard comes back
+  # after the stack is ready.
+  restart_containers:
+    - "vision-trt:true"
+    - "edge-llm-chat-service:true"
+    - "deploy-speech-1:false"
+    - "reachy-daemon:false"
+    - "reachy-claw:false"
 
 # ── Autonomous plugins ───────────────────────────────────────────────
 plugins:
