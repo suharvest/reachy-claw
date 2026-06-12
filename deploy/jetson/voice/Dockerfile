@@ -8,7 +8,7 @@
 # replace this later; the app itself doesn't care.
 #
 # Build (on the Jetson, repo root as context):
-#   docker build -f deploy/jetson/voice/Dockerfile -t reachy-voice:v0.2 .
+#   docker build -f deploy/jetson/voice/Dockerfile -t reachy-voice:v0.2.0 .
 
 FROM sensecraft-missionpack.seeed.cn/solution/reachy-claw:slv-v7
 
