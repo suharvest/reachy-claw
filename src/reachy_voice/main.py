@@ -23,6 +23,7 @@ from fastapi import Body, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from reachy_mini import ReachyMini, ReachyMiniApp
 
+from reachy_voice import tier_a
 from reachy_voice.config import load_config
 from reachy_voice.conversation import ConversationEngine
 from reachy_voice.dashboard import DashboardHub
@@ -177,6 +178,20 @@ class ReachyVoiceApp(ReachyMiniApp):
                             None, set_volume, int(data.get("volume", 0))
                         )
                         self._hub.publish({"type": "volume", "volume": v})  # echo to all
+                    # ── Tier-A: docker restart + vision-trt captures ──
+                    elif kind == "restart_services":
+                        # Long-running (polls health); fire-and-forget so the
+                        # recv loop keeps servicing the socket. Progress streams
+                        # out as restart_status broadcasts.
+                        asyncio.create_task(self._restart_services())
+                    elif kind == "get_capture_info":
+                        self._hub.publish(
+                            await tier_a.capture_info(self._config.vision_mjpeg)
+                        )
+                    elif kind == "clear_captures":
+                        self._hub.publish(
+                            await tier_a.clear_captures(self._config.vision_mjpeg)
+                        )
 
             send_task = asyncio.create_task(_send())
             recv_task = asyncio.create_task(_recv())
@@ -214,6 +229,11 @@ class ReachyVoiceApp(ReachyMiniApp):
             return StreamingResponse(
                 gen(), media_type="multipart/x-mixed-replace; boundary=frame"
             )
+
+        # ── Tier-A HTTP proxies (ollama models + vision-trt captures) ──
+        # Registered via a shared helper so the route bodies live in one place
+        # (also unit-testable without the SDK — see tests/voice/test_tier_a_routes).
+        tier_a.register_http_routes(self.settings_app, lambda: self._config)
 
         # ── debug API: drive motion / TTS programmatically (no voice needed) ──
         def _motion():  # noqa: ANN202
@@ -331,6 +351,17 @@ class ReachyVoiceApp(ReachyMiniApp):
                 "min_area_gate": min_area,
                 "gaze_target": motion._gaze_target if motion is not None else None,
             }
+
+    async def _restart_services(self) -> None:
+        """Restart the docker containers (vision-trt → reachy-daemon →
+        reachy-voice) via the Docker socket, streaming restart_status to all
+        connected dashboards. The hub's publish() is sync + thread-safe, so
+        wrap it as the async broadcast tier_a expects."""
+
+        async def broadcast(msg: dict) -> None:
+            self._hub.publish(msg)
+
+        await tier_a.restart_services(self._config.vision_mjpeg, broadcast)
 
     def _dashboard_snapshot(self) -> list[dict]:
         """Messages sent to a freshly-connected dashboard so its panels and
