@@ -56,7 +56,9 @@ openvoicestream-agent = { path = "deploy/jetson/reachy/vendor/openvoicestream_ag
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+# Active suite = the reachy_voice app. The legacy reachy_claw tests under tests/
+# (root) target the moved-away code in legacy/ and are kept only for reference.
+testpaths = ["tests/voice"]
 
 [tool.ruff.lint]
 ignore = ["E402", "E702", "E741", "E731", "E721"]

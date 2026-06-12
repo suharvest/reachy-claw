@@ -63,4 +63,4 @@ jobs:
       run: uv sync --extra dev
 
     - name: Run tests
-      run: uv run pytest tests/ -v --tb=short
+      run: uv run pytest tests/voice -v --tb=short

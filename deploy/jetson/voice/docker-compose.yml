@@ -14,7 +14,7 @@
 
 services:
   reachy-voice:
-    image: reachy-voice:v0.1
+    image: reachy-voice:0.2.0
     build:
       # Repo root is the build context so the Dockerfile can COPY src/reachy_voice
       # and hf-hub (both repo-root-relative).
@@ -27,6 +27,8 @@ services:
     volumes:
       - /dev/shm:/dev/shm
       - /run/udev:/run/udev:ro
+      # Dashboard "restart services" drives the Docker Engine API over this socket.
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - NO_PROXY=localhost,127.0.0.1
       - REACHY_DAEMON_PORT=38001

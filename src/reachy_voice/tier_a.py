@@ -160,8 +160,7 @@ async def restart_services(
     if sleep is None:
         sleep = asyncio.sleep
     if now is None:
-        loop = asyncio.get_event_loop()
-        now = loop.time
+        now = asyncio.get_running_loop().time
 
     containers = _resolve_containers(vision_mjpeg)
     logger.info("Dashboard restart container list: %s", containers)
@@ -173,6 +172,7 @@ async def restart_services(
         client = httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(uds=DOCKER_SOCK), timeout=30.0
         )
+    restarts_ok = 0
     try:
         for name, wait_healthy in containers:
             await broadcast(
@@ -184,6 +184,7 @@ async def restart_services(
                 )
                 if resp.status_code == 204:
                     logger.info("Restarted container: %s", name)
+                    restarts_ok += 1
                 else:
                     logger.warning(
                         "Restart %s: HTTP %d — %s", name, resp.status_code, resp.text
@@ -205,6 +206,14 @@ async def restart_services(
         if owns:
             await client.aclose()
 
+    # Don't claim success if every restart failed (e.g. docker.sock missing) —
+    # the UI would otherwise show "done" while nothing actually restarted.
+    if containers and restarts_ok == 0:
+        await broadcast(
+            {"type": "restart_status", "status": "error",
+             "error": "no containers were restarted"}
+        )
+        return
     await broadcast({"type": "restart_status", "status": "done"})
 
 

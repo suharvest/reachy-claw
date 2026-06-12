@@ -47,6 +47,10 @@ captures/
 # device-specific, distributed out-of-band
 deploy/jetson/vision-trt/models/
 
+# Pre-staged HF move-library cache for the deploy image (~107MB, staged
+# out-of-band on the build host; never commit it).
+hf-hub/
+
 # OS
 .DS_Store
 Thumbs.db
