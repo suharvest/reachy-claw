@@ -1,0 +1,187 @@
+/* Rest + Diary settings — overrides + small additions over style.css. */
+
+/* Single-row Rest Window layout */
+.toggle-row.rest-row {
+    gap: 10px;
+}
+.toggle-row.rest-row .voice-input.rest-time {
+    width: 64px;
+    text-align: center;
+    font-family: monospace;
+    font-size: 13px;
+    flex-shrink: 0;
+}
+.toggle-row.rest-row .url-input.rest-tz {
+    flex: 1;
+    min-width: 100px;
+}
+.toggle-row.rest-row .rest-sep {
+    color: var(--text-dim);
+    font-size: 12px;
+    flex-shrink: 0;
+}
+.toggle-row.rest-row .enroll-btn {
+    flex-shrink: 0;
+}
+
+/* Rest state badge in section title row */
+.rest-state-badge {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    text-transform: uppercase;
+    background: var(--border);
+    color: var(--text-dim);
+}
+.rest-state-badge.active {
+    background: rgba(118, 185, 0, 0.15);
+    color: var(--green);
+    border: 1px solid rgba(118, 185, 0, 0.3);
+}
+.rest-state-badge.resting {
+    background: rgba(245, 158, 11, 0.15);
+    color: #f59e0b;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+}
+.rest-state-badge.forced {
+    background: rgba(255, 51, 102, 0.12);
+    color: var(--red);
+    border: 1px solid rgba(255, 51, 102, 0.3);
+}
+
+/* Force action buttons */
+.rest-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+}
+.rest-actions .action-btn {
+    flex: 1;
+    padding: 6px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.rest-actions .action-btn:hover {
+    border-color: var(--green);
+    color: var(--green);
+}
+
+/* HA Sensors settings */
+.ha-help {
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--text);
+    background: rgba(163, 230, 53, 0.04);
+    border: 1px solid rgba(163, 230, 53, 0.18);
+    border-radius: 4px;
+    padding: 12px 14px;
+}
+.ha-help ol { margin: 8px 0 2px 0; padding-left: 20px; }
+.ha-help li { margin: 6px 0; color: var(--text); }
+.ha-help b { color: var(--green); font-weight: 600; }
+.ha-help-note { color: var(--text-dim); font-size: 12px; }
+
+.ha-token-wrap {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+.ha-token-wrap .url-input {
+    flex: 1;
+    min-width: 0;
+    font-family: monospace;
+    font-size: 12px;
+}
+.ha-token-toggle {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-dim);
+    padding: 4px 8px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.15s;
+}
+.ha-token-toggle:hover { border-color: var(--green); color: var(--green); }
+
+.ha-count {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-dim);
+    margin-left: 8px;
+    letter-spacing: 0;
+}
+
+.ha-tree {
+    max-height: 320px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px;
+    background: rgba(255, 255, 255, 0.02);
+    margin-top: 10px;
+}
+.ha-tree details { margin: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+.ha-tree details:last-child { border-bottom: none; }
+.ha-tree summary {
+    cursor: pointer;
+    font-weight: 600;
+    padding: 6px 4px;
+    color: var(--green);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    list-style: none;
+}
+.ha-tree summary::before { content: "▸ "; color: var(--text-dim); }
+.ha-tree details[open] summary::before { content: "▾ "; }
+.ha-entity-list { padding: 4px 0 6px 18px; display: flex; flex-direction: column; gap: 3px; }
+.ha-entity-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-family: monospace;
+    font-size: 12px;
+    color: var(--text);
+    padding: 2px 4px;
+    border-radius: 3px;
+}
+.ha-entity-row:hover { background: rgba(163, 230, 53, 0.06); }
+.ha-entity-row input[type=checkbox] { accent-color: var(--green); }
+
+/* Diary tab chips strip */
+.ha-chips-hint {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+}
+.ha-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+.ha-chips .chip {
+    background: rgba(163, 230, 53, 0.08);
+    border: 1px solid rgba(163, 230, 53, 0.2);
+    color: var(--text);
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-family: monospace;
+    font-size: 11px;
+}
+.ha-chips .chip-more {
+    font-size: 11px;
+    color: var(--text-dim);
+    padding: 3px 6px;
+}

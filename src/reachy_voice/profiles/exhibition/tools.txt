@@ -1,0 +1,4 @@
+# Tools the LLM may call this profile. One per line; "all" to allow everything.
+# Wave 1 starts with none (pure conversation); enable as tools are ported.
+play_emotion
+status

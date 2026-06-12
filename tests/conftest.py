@@ -1,4 +1,11 @@
-"""Shared test fixtures: mock Reachy Mini robot and ReachyClawApp."""
+"""Shared test fixtures: mock Reachy Mini robot and ReachyClawApp.
+
+NOTE: after the reachy_voice merge the `reachy_claw` package moved to `legacy/`
+and is no longer installed, so importing it at module import time would break
+collection of UNRELATED test trees (e.g. tests/voice) that share this rootdir.
+The reachy_claw imports are therefore deferred into the fixtures that need them;
+the voice tests under tests/voice don't use these fixtures and collect cleanly.
+"""
 
 from __future__ import annotations
 
@@ -6,9 +13,6 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-
-from reachy_claw.app import ReachyClawApp
-from reachy_claw.config import Config
 
 
 def _make_mock_reachy():
@@ -54,6 +58,8 @@ def mock_reachy():
 @pytest.fixture
 def config():
     """Default test config."""
+    from reachy_claw.config import Config
+
     return Config(
         standalone_mode=True,
         idle_animations=False,
@@ -68,6 +74,8 @@ def config():
 @pytest.fixture
 def app(config, mock_reachy):
     """ReachyClawApp with a mock robot attached."""
+    from reachy_claw.app import ReachyClawApp
+
     a = ReachyClawApp(config)
     a.reachy = mock_reachy
     return a
