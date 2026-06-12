@@ -28,6 +28,19 @@ import pytest
 reachy_mini = pytest.importorskip("reachy_mini")
 
 
+def _skip_without_gstreamer() -> None:
+    """Skip GStreamer-backed import checks when the native ``Gst`` typelib is
+    absent (plain dev box / CI). ``gi`` alone isn't enough — the camera/audio
+    classes do ``gi.require_version('Gst', '1.0')``, which needs the GStreamer
+    introspection typelib only present on the robot / Jetson image."""
+    gi = pytest.importorskip("gi", reason="native gi bindings absent")
+    try:
+        gi.require_version("Gst", "1.0")
+        from gi.repository import Gst  # noqa: F401
+    except (ValueError, ImportError):
+        pytest.skip("GStreamer (Gst) typelib not available")
+
+
 # ── Motion / data-loop methods on the ReachyMini handle ───────────────
 # Every name here is called somewhere in src/reachy_claw on the live robot.
 REACHY_METHODS = [
@@ -130,9 +143,9 @@ class TestImportPaths:
         )
 
     def test_gstreamer_camera_import(self):
-        pytest.importorskip("gi", reason="native GStreamer bindings absent on dev box")
+        _skip_without_gstreamer()
         from reachy_mini.media.camera_gstreamer import GStreamerCamera  # noqa: F401
 
     def test_gstreamer_audio_import(self):
-        pytest.importorskip("gi", reason="native GStreamer bindings absent on dev box")
+        _skip_without_gstreamer()
         from reachy_mini.media.audio_gstreamer import GStreamerAudio  # noqa: F401
