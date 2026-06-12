@@ -1,15 +1,21 @@
 [project]
-name = "reachy-claw"
-version = "0.1.0"
-description = "Low-latency voice assistant for Reachy Mini — powered by sherpa-onnx and OpenClaw"
+name = "reachy-voice"
+version = "0.2.0"
+description = "Local voice assistant app for Reachy Mini (SLV ASR/TTS + edge-LLM), built on the Reachy Mini app framework"
+readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["reachy-mini-app"]
 dependencies = [
-    "reachy-mini>=1.2.0",
-    "websockets>=12.0",
-    "numpy>=1.24",
-    "httpx>=0.27.0",
-    "pyyaml>=6.0",
+    "reachy-mini>=1.8.0",
+    # SLV ASR/TTS + edge-LLM + VAD + tools live here (vendored wheel, not on PyPI;
+    # resolved from the in-repo wheel via [tool.uv.sources] below):
     "openvoicestream-agent",
+    "numpy>=2.2.5",
+    "websockets>=15.0,<16",
+    "httpx>=0.28.0",
+    "sounddevice>=0.4.6",
+    "onnxruntime>=1.17",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -17,49 +23,23 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
-audio = [
-    "sounddevice>=0.4.6",
-]
-sim = [
-    "reachy-mini[mujoco]",
-]
-vision = [
-    "reachy-mini[vision]",
-]
-local-stt = [
-    "openai-whisper>=20231117",
-    "faster-whisper>=1.0.0",
-]
-cloud-stt = [
-    "openai>=1.0",
-]
-piper-tts = [
-    "piper-tts>=1.2.0",
-]
-mediapipe-vision = [
-    "mediapipe>=0.10.14",
-]
-remote-vision = [
-    "pyzmq>=25.0",
-    "msgpack>=1.0",
-]
-dashboard = [
-    "aiohttp>=3.9",
-]
 
+# Console entry point (optional convenience; the daemon uses the app entry point
+# below, not this script). Runs: python -m reachy_voice.main
 [project.scripts]
-reachy-claw = "reachy_claw.main:main"
-reachy-claw-clientloop = "reachy_claw.clientloop.run:main"
+reachy-voice = "reachy_voice.main:main"
 
+# The Reachy Mini daemon discovers and launches apps via this entry-point group.
+# It runs the ReachyVoiceApp subclass (python -m reachy_voice.main).
 [project.entry-points."reachy_mini_apps"]
-reachy_claw = "reachy_claw.reachy_app:ClawdReachyMiniApp"
+reachy_voice = "reachy_voice.main:ReachyVoiceApp"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/reachy_claw"]
+packages = ["src/reachy_voice"]
 
 [tool.uv]
 override-dependencies = [
@@ -76,7 +56,9 @@ openvoicestream-agent = { path = "deploy/jetson/reachy/vendor/openvoicestream_ag
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+# Active suite = the reachy_voice app. The legacy reachy_claw tests under tests/
+# (root) target the moved-away code in legacy/ and are kept only for reference.
+testpaths = ["tests/voice"]
 
 [tool.ruff.lint]
 ignore = ["E402", "E702", "E741", "E731", "E721"]

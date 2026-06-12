@@ -1,74 +1,41 @@
-# Seeed Local Voice — production deployment.
+# Reachy Voice — the ONE deploy file (no parallel trees).
 #
-# Usage:
-#   LANGUAGE_MODE=en docker compose -f deploy/docker-compose.yml up -d
-#   OVS_PROFILE=jetson-multilang-highperf docker compose -f deploy/docker-compose.yml up -d
+# Assumes the supporting services (reachy-daemon :38001, SLV :8621,
+# edge-llm :11435, vision-trt) run from their own composes, all on the host
+# network. This only manages the voice app itself.
 #
-# Models auto-download on first start (~1-2 min) and persist in a Docker volume.
-# Set LANGUAGE_MODE to "zh_en" (default, Chinese+English), "en" (English only),
-# or OVS_PROFILE=jetson-multilang-highperf for Qwen3 ASR/TTS.
+# Usage (on the robot, from the repo root):
+#   docker compose -f deploy/jetson/voice/docker-compose.yml up -d --build
+# Rollback: docker compose -f deploy/jetson/voice/docker-compose.yml down
+#
+# NOTE: this manages the reachy-voice APP only. The SLV speech backend it talks
+# to (image seeed-local-voice, :8621) is a separate artifact — see
+# docker-compose.slv-backend.yml in this same directory.
 
 services:
-  speech:
-    image: seeed-local-voice:jetson-v1.16-race-fixes-slim
+  reachy-voice:
+    image: reachy-voice:v0.2.0
     build:
-      context: ..
-      dockerfile: deploy/docker/Dockerfile.jetson
-      args:
-        LANGUAGE_MODE: ${LANGUAGE_MODE:-zh_en}
-    # NOTE: this file covers the Jetson target. RK and Raspberry Pi run on
-    # different hosts (different runtime, different volumes) and have their
-    # own compose files: deploy/docker-compose.rk.yml, deploy/docker-compose.rpi.yml.
-    runtime: nvidia
-    ipc: host
-    ports:
-      - "8621:8000"
-    environment:
-      - LANGUAGE_MODE=${LANGUAGE_MODE:-zh_en}
-      - OVS_PROFILE=${OVS_PROFILE:-jetson-multilang-highperf-nx}
-      - OVS_PROFILE_JSON=${OVS_PROFILE_JSON:-}
-      # Open-dialogue endpointing defaults. Override in .env for product tuning.
-      - OVS_VAD_BACKEND=${OVS_VAD_BACKEND:-silero}
-      - OVS_ADMIN_KEY=${OVS_ADMIN_KEY:-}
-      - OVS_ADMIN_KEY=${OVS_ADMIN_KEY:-}
-      - OVS_VAD_SILENCE_MS=${OVS_VAD_SILENCE_MS:-400}
-      - QWEN3_EDGELLM_JETSON_ROOT=${QWEN3_EDGELLM_JETSON_ROOT:-/opt/qwen3-edgellm-jetson}
-      - QWEN3_ARTIFACT_MANIFEST=${QWEN3_ARTIFACT_MANIFEST:-}
-      - QWEN3_ARTIFACT_SET=${QWEN3_ARTIFACT_SET:-}
-      - QWEN3_ARTIFACT_ROOT=${QWEN3_ARTIFACT_ROOT:-/opt/models/qwen3-edgellm}
-      - QWEN3_HF_REPO_ID=${QWEN3_HF_REPO_ID:-}
-      - QWEN3_HF_REVISION=${QWEN3_HF_REVISION:-main}
-      - HF_ENDPOINT=${HF_ENDPOINT:-https://huggingface.co}
-      - TTS_PROVIDER=${TTS_PROVIDER:-cuda}
-      - TTS_DEFAULT_SID=${TTS_DEFAULT_SID:-0}
-      - TTS_DEFAULT_SPEED=${TTS_DEFAULT_SPEED:-0.85}
-      - EDGE_LLM_TTS_CJK_SEGMENT_MAX_CHARS=${EDGE_LLM_TTS_CJK_SEGMENT_MAX_CHARS:-16}
-      - EDGE_LLM_TTS_FIRST_CHUNK_FRAMES=${EDGE_LLM_TTS_FIRST_CHUNK_FRAMES:-}
-      - EDGE_LLM_TTS_CHUNK_FRAMES=${EDGE_LLM_TTS_CHUNK_FRAMES:-}
-      - EDGE_LLM_TTS_MAX_CHUNK_FRAMES=${EDGE_LLM_TTS_MAX_CHUNK_FRAMES:-}
-      - EDGE_LLM_TTS_CODE2WAV_CONTEXT_FRAMES=${EDGE_LLM_TTS_CODE2WAV_CONTEXT_FRAMES:-}
-      - EDGE_LLM_TTS_STATEFUL_CODE2WAV=${EDGE_LLM_TTS_STATEFUL_CODE2WAV:-}
-      - PARAFORMER_PREROLL_MS=${PARAFORMER_PREROLL_MS:-100}
-      - TTS_NUM_THREADS=4
-      - STREAMING_ASR_PROVIDER=cuda
-      - STREAMING_ASR_NUM_THREADS=4
-      - CUDA_MODULE_LOADING=LAZY
-      - LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/onnxruntime/capi:/host-cuda:/host-nvidia-libs:/host-libs
-      - PYTHONPATH=/opt/speech:/usr/lib/python3.10/dist-packages
-      - ORT_CUDA_ARENA_EXTEND_STRATEGY=kSameAsRequested
-    volumes:
-      - speech-models:/opt/models
-      - /usr/local/cuda/lib64:/host-cuda:ro
-      - /usr/lib/aarch64-linux-gnu/nvidia:/host-nvidia-libs:ro
-      - /lib/aarch64-linux-gnu:/host-libs:ro
-      - /usr/lib/python3.10/dist-packages/tensorrt:/usr/lib/python3.10/dist-packages/tensorrt:ro
-      - /usr/src/tensorrt:/usr/src/tensorrt:ro
+      # Repo root is the build context so the Dockerfile can COPY src/reachy_voice
+      # and hf-hub (both repo-root-relative).
+      context: ../../..
+      dockerfile: deploy/jetson/voice/Dockerfile
+    container_name: reachy-voice
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: ${OVS_MEMORY_LIMIT:-6G}
-
-volumes:
-  speech-models:
-    name: speech-models
+    network_mode: host
+    privileged: true            # ALSA audio device + udev
+    volumes:
+      - /dev/shm:/dev/shm
+      - /run/udev:/run/udev:ro
+      # Dashboard "restart services" drives the Docker Engine API over this socket.
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - NO_PROXY=localhost,127.0.0.1
+      - REACHY_DAEMON_PORT=38001
+      - REACHY_LOG_LEVEL=INFO
+      # - REACHY_LANGUAGE=zh    # default; switchable at runtime via :8042
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
