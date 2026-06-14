@@ -29,10 +29,16 @@ services:
       - /run/udev:/run/udev:ro
       # Dashboard "restart services" drives the Docker Engine API over this socket.
       - /var/run/docker.sock:/var/run/docker.sock
+      # Runtime overrides (bargein / VAD / memory / language) the operator sets
+      # from the dashboard. Bind-mounted to a stable host path so they survive
+      # `docker restart` AND image rebuilds, and stay hand-inspectable over SSH.
+      # Applying this mount needs one `compose up` (not just a restart).
+      - /home/recomputer/reachy-voice-data:/data
     environment:
       - NO_PROXY=localhost,127.0.0.1
       - REACHY_DAEMON_PORT=38001
       - REACHY_LOG_LEVEL=INFO
+      - REACHY_VOICE_DATA_DIR=/data
       # - REACHY_LANGUAGE=zh    # default; switchable at runtime via :8042
     logging:
       driver: json-file
