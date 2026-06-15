@@ -10,6 +10,9 @@ dependencies = [
     # SLV ASR/TTS + edge-LLM + VAD + tools live here (vendored wheel, not on PyPI;
     # resolved from the in-repo wheel via [tool.uv.sources] below):
     "openvoicestream-agent",
+    # voxedge is a transitive dep of ovs_agent; declared explicitly so the
+    # [tool.uv.sources] vendored-wheel pin below is honored (PyPI release is stale).
+    "voxedge",
     "numpy>=2.2.5",
     "websockets>=15.0,<16",
     "httpx>=0.28.0",
@@ -53,6 +56,9 @@ override-dependencies = [
 # point this back at an editable sibling path, e.g.
 #   { path = "../seeed-local-voice/agent", editable = true }
 openvoicestream-agent = { path = "deploy/jetson/reachy/vendor/openvoicestream_agent-0.1.0-py3-none-any.whl" }
+# voxedge ships the turn_driver engine that ovs_agent's runner imports. The PyPI
+# release is stale, so pin it (transitive via ovs_agent) to the in-repo wheel too.
+voxedge = { path = "deploy/jetson/reachy/vendor/voxedge-0.0.1a0-py3-none-any.whl" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -29,11 +29,16 @@ from reachy_voice.audio import DuplexAudioIO
 from reachy_voice.config import Config
 from reachy_voice.dashboard import DashboardHub, DashboardPlugin
 from reachy_voice.motion import MotionController
+from reachy_voice.plugins import ReachyMotionToolsPlugin
 from reachy_voice.vision import VisionClient
 
 logger = logging.getLogger("reachy_voice.conversation")
 
 _TAG_RE = re.compile(r"\[([a-zA-Z_]+)\]")
+# Vision-context tag the prompt injects (``[Faces: Alice, Bob]``). Smaller edge
+# LLMs sometimes echo it into their reply — strip it from TTS/history so it is
+# never spoken. NOT an emotion tag (it has a space/colon, so _TAG_RE misses it).
+_FACES_RE = re.compile(r"\[Faces:[^\]]*\]", re.IGNORECASE)
 
 
 class _TtsTagFilter:
@@ -67,6 +72,9 @@ class _TtsTagFilter:
                 logger.debug("emotion callback failed", exc_info=True)
             return ""
 
+        # Drop any echoed [Faces: ...] vision-context tag silently (no emotion
+        # callback), THEN strip [emotion] tags (firing _on_emotion per tag).
+        head = _FACES_RE.sub("", head)
         cleaned = _TAG_RE.sub(_strip, head)
         if cleaned:
             await self._send(cleaned)
@@ -157,9 +165,14 @@ def build_ovs_config(cfg: Config) -> OvsConfig:
         # Timeouts
         llm_first_token_timeout_s=cfg.llm_first_token_timeout_s,
         llm_stream_idle_timeout_s=cfg.llm_stream_idle_timeout_s,
-        # Pure conversation for Wave 1 (tools/motion arrive in later waves)
+        # CLIENT-LOOP tool calling: tools_enabled + empty allowlist = ALL
+        # registered tools available; server_loop left false → client-loop is
+        # auto-selected (ovs runner.stream_with_tools). The motion tools are
+        # registered by ReachyMotionToolsPlugin in ConversationEngine.start().
         default_mode="chat",
-        tools_enabled=False,
+        tools_enabled=True,
+        tools_default_allowlist=[],
+        tools_max_iterations=3,
         log_level="INFO",
     )
 
@@ -264,6 +277,10 @@ class ConversationEngine:
         self._app.register(
             DashboardPlugin(self._app, self.hub, on_state=self._motion.set_conv_state)
         )
+        # Client-loop motion tools (move_head/move_antennas/play_emotion/dance):
+        # register BEFORE _app.run() so the tools are on the registry before the
+        # first turn. Bodies dispatch into the single-writer compositor.
+        self._app.register(ReachyMotionToolsPlugin(self._app, motion=self._motion))
         logger.info(
             "Starting conversation: SLV=%s  LLM=%s (%s)",
             ovs_cfg.slv_url, ovs_cfg.llm_base_url, ovs_cfg.llm_model,

@@ -1401,10 +1401,11 @@ dependencies = [
     { name = "openai" },
     { name = "pyyaml" },
     { name = "sounddevice" },
+    { name = "voxedge" },
     { name = "websockets" },
 ]
 wheels = [
-    { filename = "openvoicestream_agent-0.1.0-py3-none-any.whl", hash = "sha256:634ef0f12aef042888a15315752daa7a96f3c404d599d433f0bbcf766e34ddd0" },
+    { filename = "openvoicestream_agent-0.1.0-py3-none-any.whl", hash = "sha256:fa5b90743b75ebbb501444c9282cf9e2cb9f7092d050e7403b51b68365d118d1" },
 ]
 
 [package.metadata]
@@ -1412,23 +1413,32 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
     { name = "aiohttp", marker = "extra == 'e2e'", specifier = ">=3.9" },
     { name = "fastapi", marker = "extra == 'arm'", specifier = ">=0.110" },
+    { name = "fastapi", marker = "extra == 'rebot'", specifier = ">=0.110" },
     { name = "feetech-servo-sdk", marker = "extra == 'arm'", specifier = ">=1.0" },
     { name = "numpy", specifier = ">=1.24" },
+    { name = "onnxruntime", marker = "extra == 'rebot'", specifier = ">=1.17" },
     { name = "openai", specifier = ">=1.40" },
+    { name = "opencv-python-headless", marker = "extra == 'rebot'", specifier = ">=4.8" },
     { name = "openwakeword", marker = "extra == 'arm'", specifier = ">=0.6" },
+    { name = "openwakeword", marker = "extra == 'rebot'", specifier = ">=0.6" },
+    { name = "pin", marker = "extra == 'rebot'", specifier = ">=3.9.0" },
     { name = "pyaudio", marker = "extra == 'arm'", specifier = ">=0.2.13" },
+    { name = "pyaudio", marker = "extra == 'rebot'", specifier = ">=0.2.13" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "pytest-asyncio", marker = "extra == 'e2e'", specifier = ">=0.21" },
     { name = "pytest-playwright", marker = "extra == 'e2e'", specifier = ">=0.4" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "scipy", marker = "extra == 'rebot'", specifier = ">=1.10" },
     { name = "silero-vad", marker = "extra == 'silero'", specifier = ">=5.1" },
     { name = "sounddevice", specifier = ">=0.4" },
     { name = "torch", marker = "extra == 'silero'", specifier = ">=2.0" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'arm'", specifier = ">=0.27" },
+    { name = "uvicorn", extras = ["standard"], marker = "extra == 'rebot'", specifier = ">=0.27" },
+    { name = "voxedge", specifier = ">=0.0.1a0" },
     { name = "websockets", specifier = ">=12" },
 ]
-provides-extras = ["arm", "dev", "e2e", "silero"]
+provides-extras = ["arm", "dev", "e2e", "rebot", "silero"]
 
 [[package]]
 name = "packaging"
@@ -2104,6 +2114,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "reachy-mini" },
     { name = "sounddevice" },
+    { name = "voxedge" },
     { name = "websockets" },
 ]
 
@@ -2130,6 +2141,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "reachy-mini", specifier = ">=1.8.0" },
     { name = "sounddevice", specifier = ">=0.4.6" },
+    { name = "voxedge", path = "deploy/jetson/reachy/vendor/voxedge-0.0.1a0-py3-none-any.whl" },
     { name = "websockets", specifier = ">=15.0,<16" },
 ]
 provides-extras = ["dev"]
@@ -2479,6 +2491,35 @@ wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/97/cc/48d232f33d60e2e2e0b42f4e73455b146b76ebe216487e862700457fbf3c/uvloop-0.22.1-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:daf620c2995d193449393d6c62131b3fbd40a63bf7b307a1527856ace637fe88" },
     { url = "https://mirrors.aliyun.com/pypi/packages/e4/16/c1fd27e9549f3c4baf1dc9c20c456cd2f822dbf8de9f463824b0c0357e06/uvloop-0.22.1-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:6cde23eeda1a25c75b2e07d39970f3374105d5eafbaab2a4482be82f272d5a5e" },
 ]
+
+[[package]]
+name = "voxedge"
+version = "0.0.1a0"
+source = { path = "deploy/jetson/reachy/vendor/voxedge-0.0.1a0-py3-none-any.whl" }
+dependencies = [
+    { name = "numpy" },
+]
+wheels = [
+    { filename = "voxedge-0.0.1a0-py3-none-any.whl", hash = "sha256:4e83b649d2d75fe75c55d19fe7e2659b69c2d030d27bec2758a1666a19bceb18" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ctranslate2", marker = "extra == 'translator'", specifier = ">=4.0" },
+    { name = "huggingface-hub", marker = "extra == 'artifacts'", specifier = ">=0.20" },
+    { name = "numpy", specifier = ">=1.24" },
+    { name = "onnxruntime", marker = "extra == 'jetson'", specifier = ">=1.16" },
+    { name = "piper-phonemize", marker = "platform_machine == 'aarch64' and extra == 'jetson'", specifier = ">=1.1.0" },
+    { name = "rknn-toolkit-lite2", marker = "platform_machine == 'aarch64' and extra == 'rk'", specifier = ">=2.0" },
+    { name = "rkvoice-stream", marker = "platform_machine == 'aarch64' and extra == 'rk'", specifier = ">=0.1" },
+    { name = "sentencepiece", marker = "extra == 'translator'", specifier = ">=0.1.99" },
+    { name = "sherpa-onnx", marker = "extra == 'sherpa'", specifier = ">=1.10" },
+    { name = "soundfile", marker = "extra == 'jetson'", specifier = ">=0.12" },
+    { name = "soundfile", marker = "extra == 'sherpa'", specifier = ">=0.12" },
+    { name = "tokenizers", marker = "extra == 'jetson'", specifier = ">=0.15" },
+    { name = "webrtcvad", marker = "extra == 'jetson'", specifier = ">=2.0.10" },
+]
+provides-extras = ["rk", "sherpa", "jetson", "translator", "text", "artifacts"]
 
 [[package]]
 name = "watchfiles"
