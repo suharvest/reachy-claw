@@ -26,6 +26,9 @@ from ovs_agent.plugin import Plugin
 logger = logging.getLogger("reachy_voice.dashboard")
 
 _TAG_RE = re.compile(r"\[([a-zA-Z_]+)\]")
+# Vision-context tag (``[Faces: Alice]``) sometimes echoed by edge LLMs — drop
+# it from the transcript too (not matched by _TAG_RE: it has a space/colon).
+_FACES_RE = re.compile(r"\[Faces:[^\]]*\]", re.IGNORECASE)
 
 
 class DashboardHub:
@@ -139,4 +142,4 @@ class DashboardPlugin(Plugin):
             head, self._buf = self._buf[:open_idx], self._buf[open_idx:]
         else:
             head, self._buf = self._buf, ""
-        return _TAG_RE.sub("", head)
+        return _TAG_RE.sub("", _FACES_RE.sub("", head))

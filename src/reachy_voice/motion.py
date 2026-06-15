@@ -81,6 +81,14 @@ _PRESENCE_MOVES: tuple[str, ...] = (
     "side_to_side_sway", "side_glance_flick", "chin_lead",
 )
 
+# Move names from the dances library (used to validate the `dance` tool arg).
+# A subset of _PRESENCE_MOVES are dances; this lists the canonical dance names
+# the LLM may request. Validated against the loaded library at call time.
+_DANCE_MOVES: frozenset[str] = frozenset({
+    "simple_nod", "yeah_nod", "uh_huh_tilt", "head_tilt_roll",
+    "side_to_side_sway", "side_glance_flick", "chin_lead",
+})
+
 _COMPOSITOR_HZ = 25.0  # ~old stable app's rate; lighter on the motor bus than 50
 
 # Conversation states during which the robot must hold PERFECTLY STILL so the
@@ -153,6 +161,15 @@ class MotionController:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._pending: str | None = None   # emotion tag awaiting playback
+        # One-shot tool command awaiting playback on the compositor thread.
+        # Tools (move_head/move_antennas/dance) run OFF the compositor (from
+        # asyncio.to_thread in the tools plugin); they MUST NOT touch the SDK
+        # directly — that fights the single-writer compositor. Instead they
+        # enqueue a (kind, args) here and the compositor thread executes it,
+        # preserving the single-writer invariant. Newest wins (a fresh command
+        # supersedes an unconsumed one). Protected by ``_cmd_lock``.
+        self._pending_cmd: tuple[str, tuple] | None = None
+        self._cmd_lock = threading.Lock()
         self._playing = False              # an official move is in flight
         self._last_move_start = -1e9       # monotonic; debounce overlapping moves
         self._libs: list = []              # RecordedMoves datasets, in lookup order
@@ -236,6 +253,68 @@ class MotionController:
         called from the vision thread, consumed by the compositor."""
         self._gaze_target = None if yaw_deg is None else (yaw_deg, pitch_deg or 0.0)
 
+    # ── tool commands (compositor-safe; enqueue only) ─────────────────
+    #
+    # These three are invoked by the client-loop motion TOOLS off the
+    # compositor thread (asyncio.to_thread). They DO NOT call the SDK here —
+    # that would fight the single-writer compositor. They enqueue a one-shot
+    # command which the compositor thread executes in ``_run_command`` between
+    # ambient ticks, exactly like ``play_emotion`` queues ``_pending``.
+
+    def command_head(
+        self, yaw: float, pitch: float, roll: float = 0.0, duration: float = 1.0
+    ) -> dict:
+        """Tool: point the head at yaw/pitch/roll (DEGREES, clamped to the
+        on-device safe envelope). Compositor-safe: enqueues a one-shot goto."""
+        if self.reachy is None:
+            return {"ok": False, "reason": "no_robot",
+                    "requested": {"yaw": yaw, "pitch": pitch, "roll": roll}}
+        yaw = max(-45.0, min(45.0, float(yaw)))
+        pitch = max(-30.0, min(30.0, float(pitch)))
+        roll = max(-30.0, min(30.0, float(roll)))
+        self._enqueue_cmd("head", (yaw, pitch, roll, float(duration)))
+        return {"ok": True, "moved_to": {"yaw": yaw, "pitch": pitch, "roll": roll}}
+
+    def command_antennas(
+        self, left: float, right: float, duration: float = 0.5
+    ) -> dict:
+        """Tool: move the two antennas to target angles (DEGREES, positive =
+        up). SDK antenna order is [right, left] (radians). Compositor-safe."""
+        if self.reachy is None:
+            return {"ok": False, "reason": "no_robot",
+                    "requested": {"left": left, "right": right}}
+        self._enqueue_cmd("antennas", (float(left), float(right), float(duration)))
+        return {"ok": True, "antennas": {"left": left, "right": right}}
+
+    def play_dance(self, name: str) -> dict:
+        """Tool: play a choreographed dance routine from the dances library.
+        Compositor-safe: enqueues the move, which the compositor plays via
+        ``play_move`` (same path as presence). Library load is async, so the
+        valid set is only known once it's ready — an unknown name returns a
+        structured ack listing what's available."""
+        if self.reachy is None:
+            return {"ok": False, "reason": "no_robot", "dance": name}
+        if not name:
+            return {"ok": False, "reason": "missing_dance"}
+        if self._move_names and name not in self._move_names:
+            return {"ok": False, "reason": "unknown_dance", "dance": name,
+                    "available": sorted(self._dance_pool())}
+        self._enqueue_cmd("dance", (name,))
+        return {"ok": True, "dance": name}
+
+    def _dance_pool(self) -> list[str]:
+        """Dance-library move names currently loaded (subset of presence pool
+        that are dances, plus any other loaded move)."""
+        return [m for m in self._move_names if m in _DANCE_MOVES] or list(
+            m for m in _PRESENCE_MOVES if m in self._move_names
+        )
+
+    def _enqueue_cmd(self, kind: str, args: tuple) -> None:
+        now = time.monotonic()
+        self._last_activity = now
+        with self._cmd_lock:
+            self._pending_cmd = (kind, args)
+
     # ── library ──────────────────────────────────────────────────────
     def _load_library(self) -> None:
         try:
@@ -304,6 +383,26 @@ class MotionController:
                 self._run_expression(pending)
                 self._last_activity = time.monotonic()
                 continue
+
+            # 1b) one-shot tool command (move_head / move_antennas / dance).
+            #     Executed on THIS (compositor) thread so the single-writer
+            #     invariant holds. Debounced/gated like an expression — never
+            #     while listening, never overlapping an in-flight move.
+            if not listening and not self._playing:
+                with self._cmd_lock:
+                    cmd = self._pending_cmd
+                    self._pending_cmd = None
+                if cmd is not None and (
+                    time.monotonic() - self._last_move_start
+                ) >= _MIN_MOVE_GAP_S:
+                    self._run_command(cmd)
+                    self._last_activity = time.monotonic()
+                    continue
+                elif cmd is not None:
+                    # too soon after the last move — requeue and let it land next
+                    with self._cmd_lock:
+                        if self._pending_cmd is None:
+                            self._pending_cmd = cmd
 
             # While LISTENING: do NOT freeze (the robot should stay engaged), but
             # only allow the GENTLE, slow gaze track (look at / follow the visitor)
@@ -457,6 +556,48 @@ class MotionController:
         except Exception:  # noqa: BLE001 — link loss; pause (don't flood)
             self._mark_link_down()
 
+
+    def _run_command(self, cmd: tuple[str, tuple]) -> None:
+        """Execute a one-shot tool command on the compositor thread. Mirrors
+        ``_run_expression``: sets _playing, drives the SDK, forces an ambient
+        resync afterward so the deadband re-sends from the new pose."""
+        kind, args = cmd
+        try:
+            from reachy_mini.utils import create_head_pose
+        except Exception:  # noqa: BLE001
+            create_head_pose = None
+        try:
+            self._playing = True
+            self._last_move_start = time.monotonic()
+            if kind == "head" and create_head_pose is not None:
+                yaw, pitch, roll, duration = args
+                logger.info(
+                    "tool move_head -> yaw=%.1f pitch=%.1f roll=%.1f", yaw, pitch, roll
+                )
+                pose = create_head_pose(yaw=yaw, pitch=pitch, roll=roll, degrees=True)
+                self.reachy.goto_target(head=pose, duration=duration)
+            elif kind == "antennas":
+                left, right, duration = args
+                logger.info("tool move_antennas -> left=%.1f right=%.1f", left, right)
+                self.reachy.goto_target(
+                    antennas=[math.radians(right), math.radians(left)],
+                    duration=duration,
+                )
+            elif kind == "dance":
+                (name,) = args
+                move = self._resolve(name)
+                if move is None:
+                    logger.info("tool dance '%s' -> no library move; skipped", name)
+                    return
+                logger.info("tool dance -> official move '%s'", name)
+                self.reachy.play_move(move, initial_goto_duration=0.4, sound=False)
+        except ConnectionError:
+            self._mark_link_down()
+        except Exception:  # noqa: BLE001 — cancelled or playback error
+            logger.debug("tool command %r interrupted/failed", kind, exc_info=True)
+        finally:
+            self._playing = False
+            self._sent_head = self._sent_body = self._sent_ant = None
 
     def _run_expression(self, emotion: str) -> None:
         name = self._pick_move(emotion)
