@@ -155,13 +155,25 @@ def build_ovs_config(cfg: Config) -> OvsConfig:
         # The Reachy USB mic captures quietly; boost it before VAD/ASR (the old
         # reachy-claw used a 3.5x gain for the same reason).
         mic_makeup_gain=cfg.audio_volume,
-        # Server VAD (above) finalizes turns, so the client must NOT drive EOS
-        # (that mode produced empty finals here). Keep a client VAD only for
-        # local state/barge-in, not for end-of-speech.
+        # Drop mic audio while the robot is SPEAKING/THINKING so its own TTS
+        # echo (speaker -> USB mic) can't open a server-VAD segment that never
+        # cleanly ends. The robot hearing itself caused the garbled
+        # 'See'/'Name'/'Your name' ASR finals (reproduced in the e2e echo
+        # variant, 2026-06-16). Already enabled in voice_arm/voice_rebot_arm.
+        mic_drop_while_speaking=True,
+        # Server VAD (vad="silero" above) stays primary, but its Paraformer
+        # endpoint fires NONDETERMINISTICALLY on trailing silence — when it
+        # misses, the turn never gets an asr_final and hangs in THINKING until
+        # the 20s watchdog ("卡死"). So the client VAD ALSO drives EOS as a
+        # fallback: on client speech-end it sends asr_eos to force finalization.
+        # Validated by the e2e harness A/B (2026-06-16): with server VAD still
+        # on, drive_eos eliminated the stall with NO premature-cut downside.
+        # (The old "empty finals" problem was the vad="none" mode, not this
+        # supplement to server VAD.)
         client_vad_backend=cfg.vad_backend,
         client_vad_threshold=cfg.client_vad_threshold,
         client_vad_silence_ms=cfg.client_vad_silence_ms,
-        client_vad_drive_eos=False,
+        client_vad_drive_eos=True,
         # Timeouts
         llm_first_token_timeout_s=cfg.llm_first_token_timeout_s,
         llm_stream_idle_timeout_s=cfg.llm_stream_idle_timeout_s,
