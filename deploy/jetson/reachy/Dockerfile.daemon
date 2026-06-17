@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2-dev libgirepository1.0-dev gobject-introspection \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir --prefix=/install reachy-mini
+RUN pip install --no-cache-dir --prefix=/install reachy-mini==1.8.1
 
 FROM python:3.12-slim
 
