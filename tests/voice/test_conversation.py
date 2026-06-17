@@ -100,10 +100,15 @@ def test_supported_languages():
 
 
 def test_ovs_config_uses_server_vad():
-    # Robot lesson: client-driven EOS returned empty finals; server VAD works.
+    # Robot lesson (2026-06-16): server VAD (silero) stays PRIMARY, but its
+    # Paraformer endpoint fires nondeterministically on trailing silence and
+    # the turn hangs in THINKING until the watchdog (卡死). Client VAD now
+    # drives EOS as a fallback, and the mic is dropped while the robot speaks
+    # so its own TTS echo can't open a never-ending server-VAD segment.
     ovs = build_ovs_config(Config())
     assert ovs.slv_config["vad"] == "silero"
-    assert ovs.client_vad_drive_eos is False
+    assert ovs.client_vad_drive_eos is True
+    assert ovs.mic_drop_while_speaking is True
 
 
 def test_ovs_config_mic_makeup_gain():
