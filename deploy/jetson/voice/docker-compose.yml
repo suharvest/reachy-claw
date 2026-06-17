@@ -14,7 +14,7 @@
 
 services:
   reachy-voice:
-    image: reachy-voice:v0.2.0
+    image: reachy-voice:v0.4.0
     build:
       # Repo root is the build context so the Dockerfile can COPY src/reachy_voice
       # and hf-hub (both repo-root-relative).
