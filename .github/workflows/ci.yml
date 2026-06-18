@@ -3,41 +3,77 @@ name: CI
 on:
   pull_request:
     branches: [ master, main ]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'LICENSE'
+    # NOTE: deliberately NO `paths-ignore`. master's branch protection requires
+    # the `lint` + `test (3.x)` checks; a workflow skipped by path filtering
+    # never reports them, so a docs-only PR stays permanently BLOCKED (it can
+    # never satisfy a required check that never runs). Instead the jobs ALWAYS
+    # run — so the required checks always report — but skip their build/test
+    # steps for docs-only changes (the `changes` job below), keeping docs PRs
+    # cheap while still green.
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # Detect whether this PR touches anything other than docs. Its output gates
+  # the expensive steps in the required jobs without skipping the jobs (a
+  # skipped *workflow* blocks; a job that runs with skipped steps reports green).
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Detect non-docs changes
+      id: filter
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      run: |
+        if git diff --name-only "$BASE_SHA" HEAD \
+             | grep -vE '(\.md$|^docs/|^LICENSE$)' | grep -q .; then
+          echo "code=true" >> "$GITHUB_OUTPUT"
+          echo "Code changes detected — running full CI."
+        else
+          echo "code=false" >> "$GITHUB_OUTPUT"
+          echo "Docs-only change — skipping build/test, reporting green."
+        fi
+
   lint:
+    needs: changes
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+      if: needs.changes.outputs.code == 'true'
 
     - name: Install uv
+      if: needs.changes.outputs.code == 'true'
       uses: astral-sh/setup-uv@v5
 
     - name: Set up Python
+      if: needs.changes.outputs.code == 'true'
       uses: actions/setup-python@v5
       with:
         python-version: "3.11"
 
     - name: Install system dependencies
+      if: needs.changes.outputs.code == 'true'
       run: |
         sudo apt-get update
         sudo apt-get install -y libcairo2-dev libgirepository1.0-dev pkg-config
 
     - name: Install dependencies
+      if: needs.changes.outputs.code == 'true'
       run: uv sync --extra dev
 
     - name: Lint with Ruff
+      if: needs.changes.outputs.code == 'true'
       run: uv tool run ruff check .
 
   test:
+    needs: changes
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -49,22 +85,28 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      if: needs.changes.outputs.code == 'true'
 
     - name: Set up Python ${{ matrix.python-version }}
+      if: needs.changes.outputs.code == 'true'
       uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
 
     - name: Install uv
+      if: needs.changes.outputs.code == 'true'
       uses: astral-sh/setup-uv@v5
 
     - name: Install system dependencies
+      if: needs.changes.outputs.code == 'true'
       run: |
         sudo apt-get update
         sudo apt-get install -y ffmpeg libcairo2-dev libgirepository1.0-dev libportaudio2 pkg-config
 
     - name: Install dependencies
+      if: needs.changes.outputs.code == 'true'
       run: uv sync --extra dev
 
     - name: Run tests
+      if: needs.changes.outputs.code == 'true'
       run: uv run pytest tests/voice -v --tb=short
