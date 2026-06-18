@@ -13,7 +13,7 @@
 FROM sensecraft-missionpack.seeed.cn/solution/reachy-claw:slv-v7
 
 LABEL org.opencontainers.image.title="reachy-voice" \
-      org.opencontainers.image.version="0.2.0"
+      org.opencontainers.image.version="0.4.0"
 
 # Package now lives under src/ after the reachy-claw <- reachy-voice merge; it is
 # still mounted at /opt/reachy-voice/reachy_voice so PYTHONPATH resolution is

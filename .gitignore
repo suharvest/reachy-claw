@@ -54,3 +54,4 @@ hf-hub/
 # OS
 .DS_Store
 Thumbs.db
+.orphan-recovery/
