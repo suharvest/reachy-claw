@@ -36,6 +36,10 @@ class Config:
     sample_rate: int = 16000
     audio_volume: float = 3.5
     input_channel: int = 0
+    # TTS speech rate (keepPitch) forwarded to the SLV in slv_config; MOSS
+    # has no native speed knob, so the SLV time-stretches the streamed PCM.
+    # 1.0 = off. Tunable via the runtime YAML or REACHY_TTS_SPEED.
+    tts_speed: float = 1.2
 
     # ── Client-side VAD (turn boundaries) ────────────────────────────
     vad_backend: str = "silero"
@@ -92,6 +96,7 @@ _ENV = {
     "edge_llm_model": "REACHY_EDGE_LLM_MODEL",
     "audio_device": "REACHY_AUDIO_DEVICE",
     "input_channel": "REACHY_INPUT_CHANNEL",
+    "tts_speed": "REACHY_TTS_SPEED",
     "profile": "REACHY_PROFILE",
     "language": "REACHY_LANGUAGE",
     # attention/gaze tunables — handy to adjust on the robot without a rebuild

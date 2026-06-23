@@ -141,6 +141,10 @@ def build_ovs_config(cfg: Config) -> OvsConfig:
             "vad": "silero",
             "vad_silence_ms": 500,
             "multi_utterance": True,
+            # Native voxedge speed (keepPitch via TTSRateShifter): the v2v server
+            # reads cfg.get("tts_speed") and the TTS backend DSP-stretches the
+            # streamed PCM. 1.0 = no-op pass-through.
+            "tts_speed": cfg.tts_speed,
         },
         # edge-LLM (OpenAI-compatible)
         llm_backend="edge_llm",
