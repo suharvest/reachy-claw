@@ -115,6 +115,10 @@ class ReachyCompanionApp(CompanionRobotApp):
 
     vision: VisionClient | None = None
     base_prompt: str = ""
+    # Reset the session after this many seconds of no user speech (set by the
+    # ConversationEngine from cfg.session_reset_idle_s). 0 disables.
+    session_reset_idle_s: float = 0.0
+    _idle_reset_task: asyncio.Task | None = None
 
     async def on_user_utterance(self, text: str, detected_language: str | None = None) -> None:
         prompt = self.base_prompt or self.config.system_prompt
@@ -123,7 +127,34 @@ class ReachyCompanionApp(CompanionRobotApp):
             if faces:
                 prompt = f"{prompt}\n[Faces: {faces}]"
         self.config.system_prompt = prompt  # resolved fresh each turn by ovs
+        self._arm_session_idle_reset()  # a long silence ⇒ next visitor starts fresh
         await super().on_user_utterance(text, detected_language)
+
+    def _arm_session_idle_reset(self) -> None:
+        """(Re)start the no-speech idle timer; each utterance pushes it out.
+        Keeps the conversation small/warm per visitor without a wake word."""
+        if self.session_reset_idle_s <= 0:
+            return
+        task = self._idle_reset_task
+        if task is not None and not task.done():
+            task.cancel()
+        try:
+            self._idle_reset_task = asyncio.create_task(self._session_idle_reset())
+        except RuntimeError:
+            pass  # no running loop (e.g. unit tests) — idle reset just disabled
+
+    async def _session_idle_reset(self) -> None:
+        try:
+            await asyncio.sleep(self.session_reset_idle_s)
+            self.session.reset()
+            logger.info(
+                "session reset after %.0fs idle — fresh context for the next visitor",
+                self.session_reset_idle_s,
+            )
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("session idle-reset failed", exc_info=True)
 
 
 def build_ovs_config(cfg: Config) -> OvsConfig:
@@ -152,6 +183,10 @@ def build_ovs_config(cfg: Config) -> OvsConfig:
         llm_model=cfg.edge_llm_model,
         system_prompt=build_system_prompt(cfg),
         session_tokenizer_model=cfg.edge_llm_model,
+        # Bound the context so the session doesn't sit at the trim boundary
+        # cold-prefilling the whole history every turn (config-level, reliable —
+        # the runtime "history" override alone doesn't drive the trim budget).
+        session_max_input_tokens=cfg.session_max_input_tokens,
         # Audio (ovs_agent owns the device via sounddevice; outer app sets no_media)
         audio_input_device=cfg.audio_device or None,
         audio_output_device=cfg.audio_device or None,
@@ -237,6 +272,8 @@ class ConversationEngine:
         self._app = ReachyCompanionApp(ovs_cfg)
         # Hand the live robot handle to the app so motion can use it.
         self._app.reachy = self.reachy
+        # Idle session-reset (fresh context per visitor; keeps open-mic UX).
+        self._app.session_reset_idle_s = self.config.session_reset_idle_s
         # The Reachy USB sound card breaks if separate input+output streams are
         # opened (capture degrades after the first TTS playback). Replace the
         # stock AudioIO with a single full-duplex stream.

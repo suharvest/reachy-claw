@@ -30,6 +30,15 @@ class Config:
     edge_llm_url: str = "http://localhost:11435/v1"
     edge_llm_model: str = "Qwen/Qwen3-4B-AWQ"
     edge_llm_max_tokens: int = 256
+    # Session context budget (input tokens). The session trims oldest turns to
+    # stay under this; each trim invalidates the prefix KV cache, so a big budget
+    # keeps the session pinned at the trim boundary and cold-prefills the whole
+    # context EVERY turn (ovs default 7000 → ~5s turns). Smaller = snappier.
+    session_max_input_tokens: int = 2000
+    # Reset the conversation after this many seconds of no user speech, so each
+    # visitor starts with a fresh (small → warm → <1s) context. 0 disables.
+    # Keeps the always-on / open-mic UX (no wake word).
+    session_reset_idle_s: float = 90.0
 
     # ── Audio ────────────────────────────────────────────────────────
     audio_device: str = "Reachy Mini Audio"
@@ -97,6 +106,8 @@ _ENV = {
     "audio_device": "REACHY_AUDIO_DEVICE",
     "input_channel": "REACHY_INPUT_CHANNEL",
     "tts_speed": "REACHY_TTS_SPEED",
+    "session_max_input_tokens": "REACHY_SESSION_MAX_INPUT_TOKENS",
+    "session_reset_idle_s": "REACHY_SESSION_RESET_IDLE_S",
     "profile": "REACHY_PROFILE",
     "language": "REACHY_LANGUAGE",
     # attention/gaze tunables — handy to adjust on the robot without a rebuild
