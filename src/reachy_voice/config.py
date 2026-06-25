@@ -34,7 +34,7 @@ class Config:
     # stay under this; each trim invalidates the prefix KV cache, so a big budget
     # keeps the session pinned at the trim boundary and cold-prefills the whole
     # context EVERY turn (ovs default 7000 → ~5s turns). Smaller = snappier.
-    session_max_input_tokens: int = 2000
+    session_max_input_tokens: int = 3500
     # Reset the conversation after this many seconds of no user speech, so each
     # visitor starts with a fresh (small → warm → <1s) context. 0 disables.
     # Keeps the always-on / open-mic UX (no wake word).
