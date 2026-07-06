@@ -41,7 +41,15 @@ class Config:
     session_reset_idle_s: float = 90.0
 
     # ── Audio ────────────────────────────────────────────────────────
-    audio_device: str = "Reachy Mini Audio"
+    # NB trailing colon: the Reachy camera re-enumerates its own
+    # "Reachy Mini Camera: USB Audio" input node, and sounddevice's device
+    # resolver matches by in-order word-subsequence — so the bare
+    # "Reachy Mini Audio" matched BOTH ("...Camera: USB Audio" ends in "Audio"),
+    # raising "Multiple input devices found" and crash-looping the mic pump
+    # (video kept working, speaker went silent). Only the real card carries an
+    # "Audio:" token (camera is "Camera:"), so the colon resolves it uniquely,
+    # independent of the unstable hw:X index.
+    audio_device: str = "Reachy Mini Audio:"
     sample_rate: int = 16000
     audio_volume: float = 3.5
     input_channel: int = 0
