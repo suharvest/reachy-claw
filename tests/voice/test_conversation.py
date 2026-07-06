@@ -99,21 +99,15 @@ def test_supported_languages():
 # ── ovs config mapping (locks the on-robot-validated audio/VAD settings) ──
 
 
-def test_ovs_config_vad_and_eos_fallback():
-    # e2e harness A/B (2026-06-16): server VAD (silero) stays primary, but its
-    # Paraformer endpoint misses nondeterministically -> turn hangs in THINKING
-    # ("卡死"). client_vad_drive_eos=True sends asr_eos as a fallback; validated
-    # to fix the stall with no premature-cut downside (server VAD still on, so
-    # not the old vad="none" empty-final mode).
+def test_ovs_config_uses_server_vad():
+    # Robot lesson (2026-06-16): server VAD (silero) stays PRIMARY, but its
+    # Paraformer endpoint fires nondeterministically on trailing silence and
+    # the turn hangs in THINKING until the watchdog (卡死). Client VAD now
+    # drives EOS as a fallback, and the mic is dropped while the robot speaks
+    # so its own TTS echo can't open a never-ending server-VAD segment.
     ovs = build_ovs_config(Config())
     assert ovs.slv_config["vad"] == "silero"
     assert ovs.client_vad_drive_eos is True
-
-
-def test_ovs_config_drops_mic_while_speaking():
-    # e2e harness: the robot hearing its own TTS echo over-segmented ASR into
-    # 'See'/'Name'/'Your name'. Drop mic during SPEAKING/THINKING to kill echo.
-    ovs = build_ovs_config(Config())
     assert ovs.mic_drop_while_speaking is True
 
 

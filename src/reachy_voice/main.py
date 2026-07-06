@@ -23,7 +23,7 @@ from fastapi import Body, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from reachy_mini import ReachyMini, ReachyMiniApp
 
-from reachy_voice import tier_a
+from reachy_voice import overrides, tier_a
 from reachy_voice.config import load_config
 from reachy_voice.conversation import ConversationEngine
 from reachy_voice.dashboard import DashboardHub
@@ -106,6 +106,10 @@ class ReachyVoiceApp(ReachyMiniApp):
         self._engine = None
         self._loop = None
         self._hub = DashboardHub()
+        # Operator tweaks (bargein / VAD / memory / language) persisted to a
+        # bind-mounted file so they survive restart + redeploy. A missing file
+        # (fresh robot / dev box) just means "no overrides".
+        self._overrides = overrides.OverridesStore()
         self._engine_state = "starting"
         self._wire_settings()
 
@@ -192,6 +196,48 @@ class ReachyVoiceApp(ReachyMiniApp):
                         self._hub.publish(
                             await tier_a.clear_captures(self._config.vision_mjpeg)
                         )
+                    # ── Tier-B: ovs_agent runtime tuning (persisted overrides) ──
+                    elif kind == "set_bargein":
+                        val = await loop.run_in_executor(
+                            None, self._set_override, "bargein", data.get("enabled", True)
+                        )
+                        self._hub.publish({"type": "bargein_state", "enabled": val})
+                    elif kind == "set_vad_threshold":
+                        val = await loop.run_in_executor(
+                            None, self._set_override, "vad", data.get("value", 0.3)
+                        )
+                        self._hub.publish({"type": "vad_threshold", "value": val})
+                    elif kind == "set_history":
+                        val = await loop.run_in_executor(
+                            None, self._set_override, "history", data.get("turns", 0)
+                        )
+                        self._hub.publish({"type": "history", "turns": val})
+                    elif kind == "get_history":
+                        await ws.send_json(
+                            {"type": "history", "turns": overrides.read_history(self._engine)}
+                        )
+                    elif kind == "get_conversation_language":
+                        await ws.send_json(self._language_msg())
+                    elif kind == "set_conversation_language":
+                        lang = str(data.get("language", "")).strip().lower()
+                        if lang:
+                            await loop.run_in_executor(
+                                None, self._overrides.set, "language", lang
+                            )
+                            if self._engine is not None and self._loop is not None:
+                                # async (reconnects SLV) — hop to the engine loop
+                                asyncio.run_coroutine_threadsafe(
+                                    self._engine.set_language(lang), self._loop
+                                )
+                            self._hub.publish(self._language_msg(lang))
+                    elif kind == "send_message":
+                        # External text (e.g. SenseCraft): inject as a USER turn so
+                        # the LLM replies — NOT direct TTS (that's /debug/say).
+                        text = str(data.get("text", "")).strip()
+                        if text and self._engine is not None and self._loop is not None:
+                            asyncio.run_coroutine_threadsafe(
+                                self._inject_user_text(self._engine, text), self._loop
+                            )
 
             send_task = asyncio.create_task(_send())
             recv_task = asyncio.create_task(_recv())
@@ -363,30 +409,56 @@ class ReachyVoiceApp(ReachyMiniApp):
 
         await tier_a.restart_services(self._config.vision_mjpeg, broadcast)
 
+    # ── runtime overrides (bargein / VAD / memory) ──
+    def _set_override(self, key: str, raw_value: object) -> object:
+        """Coerce → persist → apply a live override; returns the coerced value
+        so the WS handler can echo it to all dashboards. Runs in an executor
+        (it does a small blocking file write). Safe before the engine is ready:
+        the value still persists and is replayed at startup."""
+        setting = overrides.LIVE_SETTINGS[key]
+        value = setting.coerce(raw_value)
+        self._overrides.set(key, value)
+        setting.apply(self._engine, value)
+        return value
+
+    def _language_msg(self, lang: str | None = None) -> dict:
+        lang = lang or getattr(self._config, "language", "zh")
+        return {
+            "type": "conversation_language",
+            "language": lang,
+            "asr_language": lang,
+            "tts_language": lang,
+        }
+
+    @staticmethod
+    async def _inject_user_text(engine: object, text: str) -> None:
+        """Feed text in as if the user said it (ASR → LLM → TTS path)."""
+        app = getattr(engine, "_app", None)
+        if app is not None:
+            await app.on_user_utterance(text)
+
     def _dashboard_snapshot(self) -> list[dict]:
         """Messages sent to a freshly-connected dashboard so its panels and
         status dots reflect current config immediately (the original UI guards
-        every field, so a partial snapshot is fine)."""
+        every field, so a partial snapshot is fine). Live values come from the
+        running engine via the same readers the WS setters use, so the snapshot
+        can't drift from what's actually in effect."""
         cfg = self._config
-        lang = getattr(cfg, "language", "zh")
+        eng = self._engine
         return [
-            {
-                "type": "conversation_language",
-                "language": lang,
-                "asr_language": lang,
-                "tts_language": lang,
-            },
+            self._language_msg(),
             {
                 "type": "robot_state",
                 "mode": "chat",
                 "llm_backend": "edge_llm",
                 "ollama_model": getattr(cfg, "edge_llm_model", ""),
                 "ollama_url": getattr(cfg, "edge_llm_url", ""),
-                "silero_threshold": getattr(cfg, "client_vad_threshold", 0.3),
+                "silero_threshold": overrides.read_vad(eng),
                 "vlm_enabled": False,
-                "barge_in_enabled": False,
+                "barge_in_enabled": overrides.read_bargein(eng),
                 "capture_count": 0,
             },
+            {"type": "history", "turns": overrides.read_history(eng)},
             {"type": "volume", "volume": get_volume()},  # real speaker volume
         ]
 
@@ -398,9 +470,17 @@ class ReachyVoiceApp(ReachyMiniApp):
         stop_event: threading.Event,
     ) -> None:
         self._loop = asyncio.get_running_loop()
+        # Replay a persisted language override BEFORE connecting, so SLV boots
+        # in the right language with no extra reconnect.
+        saved_lang = self._overrides.get("language")
+        if saved_lang:
+            config.language = str(saved_lang).strip().lower()
         engine = ConversationEngine(reachy_mini, config, hub=self._hub)
         self._engine = engine
         await engine.start()
+        # Replay the live tuning overrides (bargein / VAD / memory) onto the
+        # now-running engine.
+        overrides.apply_saved(engine, self._overrides)
         self._engine_state = "running"
         logger.info(
             "Reachy Voice running (lang=%s, settings at %s)",

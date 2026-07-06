@@ -20,6 +20,14 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Bound the camera-acquisition retry loop. On the boot race where this container
+# starts before /dev/video0 exists, retrying forever leaves vision-trt wedged
+# (the operator's manual fix was `docker restart vision-trt`). Instead, give up
+# after N attempts and exit — Docker's `restart: unless-stopped` recreates the
+# container, which re-binds the now-present device. At the capped 30s backoff,
+# 20 attempts ≈ 7 min before a self-heal restart.
+MAX_CAMERA_ATTEMPTS = int(os.environ.get("VISION_MAX_CAMERA_ATTEMPTS", "20"))
+
 
 def find_camera_device(name_pattern: str = "Reachy Mini") -> str | None:
     """Auto-detect video device by scanning /sys/class/video4linux/*/name.
@@ -183,6 +191,16 @@ class GstCameraCapture:
 
             wait = min(attempt * 3, 30)  # 3,6,9,...,30,30,30,...
             logger.warning(f"Camera start failed (attempt {attempt}), retrying in {wait}s")
+            if attempt >= MAX_CAMERA_ATTEMPTS:
+                # Self-heal: stop retrying and exit so Docker restarts us with a
+                # fresh process that can re-bind /dev/video0 (restart policy is
+                # `unless-stopped`). os._exit avoids hanging on GStreamer cleanup.
+                logger.critical(
+                    "Camera not acquired after %d attempts — exiting for a clean "
+                    "container restart",
+                    attempt,
+                )
+                os._exit(1)
             time.sleep(wait)
             self._set_camera_format()  # re-set format before retry
 
