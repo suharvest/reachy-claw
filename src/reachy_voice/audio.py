@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import time
 from typing import AsyncIterator
 
 import numpy as np
@@ -28,6 +30,29 @@ logger = logging.getLogger("reachy_voice.audio")
 
 
 class DuplexAudioIO(AudioIO):
+    # ── self-heal watchdog tuning ────────────────────────────────────
+    # The Reachy Mini's internal USB hub re-enumerates under load / cable
+    # jitter (documented hardware instability). When it does, the duplex
+    # either stalls (device vanished mid-stream) or reopens degraded to a
+    # single MONO input channel — which is NOT the XMOS AEC-cleaned channel,
+    # so ASR receives garbage and returns empty finals every turn ("robot
+    # stops responding"). ovs_agent's own device-watch can't fix this: its
+    # _reopen_streams() targets the base class's separate input/output
+    # streams, which this duplex transport doesn't use. So we watch the two
+    # concrete symptoms and recover in-process; if that can't restore a
+    # healthy 2-channel stream, we exit for a clean container restart (the
+    # empirically proven recovery).
+    _HEALTH_POLL_S = 1.0        # watchdog cadence
+    _STALL_S = 3.0             # no capture data for this long ⇒ USB drop
+    _REOPEN_INTERVAL_S = 6.0    # min spacing between reopen attempts
+    _MAX_INPROC_REOPENS = 4     # in-process tries before exiting for restart
+    # When the device vanishes entirely, the re-enumerated /dev/snd node is
+    # invisible to this already-running container, so every open fails and
+    # ovs_agent's mic pump just crash-loops calling start_capture (the live
+    # watchdog is never even created). Count those consecutive failures and
+    # exit for a container restart — the only thing that re-syncs /dev.
+    _MAX_OPEN_FAILURES = 8      # ~16s of mic-pump retries before restart
+
     def __init__(
         self,
         device: str | int | None = None,
@@ -47,6 +72,11 @@ class DuplexAudioIO(AudioIO):
         self._duplex_stream: "sd.RawStream | None" = None
         self._in_ch = 1
         self._out_ch = 1
+        # Self-heal state (see class-level tuning constants).
+        self._last_capture_ts = 0.0     # monotonic time of last captured block
+        self._reopening = False         # guards reentrant reopen
+        self._health_task: "asyncio.Task | None" = None
+        self._open_failures = 0         # consecutive initial-open failures
         # The Reachy mic (XMOS XVF3800) exposes 2 capture channels — typically one
         # is the echo-cancelled / processed output and the other is a raw/reference
         # channel. We capture BOTH and keep only this one (NOT an average, which
@@ -70,12 +100,34 @@ class DuplexAudioIO(AudioIO):
         self._loop = asyncio.get_running_loop()
         self._in_queue = asyncio.Queue(maxsize=64)
         self._ensure_playback_buffer()
-        self._open_duplex()
+        # A vanished device fails the OPEN (not the running stream), so the
+        # live watchdog below is never created — ovs_agent's mic pump just
+        # re-calls start_capture forever. Count consecutive open failures
+        # across those retries and exit for a container restart (re-syncs
+        # /dev), which is the only recovery when the node isn't in /dev.
+        try:
+            self._open_duplex()
+        except Exception:
+            self._open_failures += 1
+            if self._open_failures >= self._MAX_OPEN_FAILURES:
+                logger.error(
+                    "audio health: duplex open failed %dx (device absent from "
+                    "container /dev after USB re-enum) — exiting for a clean "
+                    "container restart",
+                    self._open_failures,
+                )
+                os._exit(1)
+            raise
+        self._open_failures = 0
+        self._health_task = asyncio.create_task(self._audio_health_watchdog())
         try:
             while True:
                 chunk = await self._in_queue.get()
                 yield chunk
         finally:
+            if self._health_task is not None:
+                self._health_task.cancel()
+                self._health_task = None
             self._close_duplex()
 
     def _duplex_cb(self, indata, outdata, frames, time_info, status) -> None:  # noqa: ANN001
@@ -94,6 +146,8 @@ class DuplexAudioIO(AudioIO):
                 ch = self._input_channel if self._input_channel < self._in_ch else 0
                 x = m[:, ch].copy()
             buf = x.tobytes()
+            # Liveness stamp for the health watchdog (atomic float write).
+            self._last_capture_ts = time.monotonic()
             if self._loop is not None and self._in_queue is not None:
                 self._loop.call_soon_threadsafe(self._safe_put, buf)
         except Exception as e:  # pragma: no cover
@@ -174,6 +228,95 @@ class DuplexAudioIO(AudioIO):
             except Exception:  # pragma: no cover
                 pass
             self._duplex_stream = None
+
+    # ── self-heal (USB re-enumeration recovery) ──────────────────────
+    async def _audio_health_watchdog(self) -> None:
+        """Recover the mic after a USB re-enumeration.
+
+        Two failure modes are detected from concrete symptoms (not from
+        PortAudio's device signature, which goes stale on a long-running
+        process and misses hot-plugs):
+
+          * capture stall — no callback data for ``_STALL_S`` (device
+            vanished mid-stream), and
+          * mono fallback — the stream reopened with ``in_ch < 2``; that
+            lone channel is not the AEC-cleaned one, so ASR returns empty
+            finals and the robot stops responding.
+
+        Recovery is an in-process reopen with a PortAudio refresh. If a
+        healthy 2-channel stream can't be restored within
+        ``_MAX_INPROC_REOPENS`` attempts, exit so the container's
+        ``restart: unless-stopped`` brings us back with fresh PortAudio —
+        the empirically proven recovery for this hardware.
+        """
+        reopens = 0
+        last_reopen = 0.0
+        while True:
+            try:
+                await asyncio.sleep(self._HEALTH_POLL_S)
+            except asyncio.CancelledError:
+                return
+            if self._reopening:
+                continue
+            now = time.monotonic()
+            no_stream = self._duplex_stream is None
+            stalled = (
+                not no_stream
+                and self._last_capture_ts > 0.0
+                and (now - self._last_capture_ts) > self._STALL_S
+            )
+            degraded = not no_stream and self._in_ch < 2
+            if not (no_stream or stalled or degraded):
+                reopens = 0          # healthy → clear the recovery counter
+                continue
+            if now - last_reopen < self._REOPEN_INTERVAL_S:
+                continue             # rate-limit reopen attempts
+            reason = (
+                "capture stall" if stalled
+                else "mono fallback" if degraded
+                else "stream gone"
+            )
+            if reopens >= self._MAX_INPROC_REOPENS:
+                logger.error(
+                    "audio health: %s persists after %d in-process reopens — "
+                    "exiting for a clean container restart",
+                    reason, reopens,
+                )
+                os._exit(1)
+            reopens += 1
+            last_reopen = now
+            logger.warning(
+                "audio health: %s (in_ch=%d) — reopening duplex (attempt %d/%d)",
+                reason, self._in_ch, reopens, self._MAX_INPROC_REOPENS,
+            )
+            self._reopen_duplex()
+
+    def _reopen_duplex(self) -> None:
+        """Close + reopen the duplex, refreshing PortAudio first.
+
+        ``sd.RawStream.stop()`` blocks until the callback returns, so the
+        close is race-safe; the ``_terminate``/``_initialize`` pair sheds
+        the device cache from before the USB re-enumeration so the by-name
+        resolve picks up the device's real (2-channel) capability again.
+        Runs on the event-loop thread; ``_reopening`` guards reentrancy.
+        """
+        if self._reopening:
+            return
+        self._reopening = True
+        try:
+            self._close_duplex()
+            try:
+                sd._terminate()
+                sd._initialize()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("audio health: portaudio refresh failed: %s", e)
+            try:
+                self._open_duplex()
+                self._last_capture_ts = time.monotonic()  # give the new stream grace
+            except Exception as e:  # noqa: BLE001
+                logger.error("audio health: duplex reopen failed: %s", e)
+        finally:
+            self._reopening = False
 
     # ── playback overrides: output IS the duplex stream ─────────────
     def _ensure_output(self) -> None:
