@@ -1,4 +1,4 @@
-"""Unit tests for ReachyMotionToolsPlugin — the client-loop motion tools.
+"""Unit tests for provider-neutral ReachyMotionToolsPlugin motion tools.
 
 Verifies the plugin registers the 4 tools onto a tool registry and that each
 dispatches into the MotionController via the compositor-safe enqueue methods
@@ -122,6 +122,21 @@ def test_dispatch_play_emotion_sets_app_slot():
     assert res == {"ok": True, "emotion": "happy"}
     assert motion.emotion_calls == ["happy"]
     assert app.current_emotion == "happy"
+
+
+def test_dispatch_play_emotion_uses_structured_callback():
+    app = _FakeApp()
+    motion = _FakeMotion()
+    emotions: list[str] = []
+    plugin = ReachyMotionToolsPlugin(
+        app, motion=motion, on_emotion=emotions.append
+    )
+    plugin.setup()
+    asyncio.run(
+        app.tool_registry.dispatch("play_emotion", {"emotion": "curious"}, ctx=None)
+    )
+    assert emotions == ["curious"]
+    assert motion.emotion_calls == []
 
 
 def test_dispatch_dance():

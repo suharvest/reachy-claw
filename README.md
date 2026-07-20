@@ -17,6 +17,16 @@
 
 Powered by local voice infrastructure and compatible with both [Ollama](https://ollama.com/) and OpenClaw, it brings AI interaction out of the screen and into a physical robot experience.
 
+> **Active exhibition app:** the packaged runtime is now `src/reachy_voice/`.
+> It speaks canonical Seeed Realtime V2 to the V2V gateway in manual
+> server-loop mode. Local cascade, OpenAI Realtime, and Qwen Realtime are
+> selected in the gateway; the Reachy application does not contain
+> provider-specific branches. The older `legacy/reachy_claw/` runtime and the
+> configuration examples below are retained only for legacy deployments.
+
+See [Realtime V2 migration](docs/realtime-v2-migration.md) for the current
+wire lifecycle, provider-switch boundary, and rollback controls.
+
 ## Quickstart
 
 ```bash

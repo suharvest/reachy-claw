@@ -88,7 +88,7 @@
 
       // ── General tab ──
       "mode.conversation.title": "Conversation",
-      "mode.conversation.desc": "Normal dialogue mode. Robot responds to user speech with emotion tags driving expressions.",
+      "mode.conversation.desc": "Normal dialogue mode. Robot responds to user speech with structured emotion tools driving expressions.",
       "mode.monologue.title": "Monologue",
       "mode.monologue.desc": "Inner monologue mode. Robot observes and narrates thoughts.",
       "mode.interpreter.title": "Interpreter",

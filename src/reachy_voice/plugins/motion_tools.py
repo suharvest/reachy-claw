@@ -1,10 +1,9 @@
-"""ReachyMotionToolsPlugin — registers the 4 REAL Reachy motion tools into the
-ovs_agent client-loop tool registry.
+"""Register the four real Reachy motion tools in the ovs_agent registry.
 
-This is the THIN, app-specific slice of the reachy_voice client-loop migration:
-ovs_agent owns the conversation loop, the ``tool_registry``, ``dispatch`` and the
-client-loop ``runner.stream_with_tools``. All we add here are the 4 motion tool
-BODIES, which dispatch into the single-writer ``MotionController`` compositor.
+The shared framework advertises this registry to a Realtime V2 server-loop or
+dispatches it in the explicit client-loop fallback. This module only supplies
+the app-specific tool bodies, all routed through the single-writer
+``MotionController`` compositor.
 
 Pattern mirrors:
   * ``ovs_agent/apps/companion_robot/demo_tools.py`` — the canonical companion
@@ -42,10 +41,17 @@ logger = logging.getLogger("reachy_voice.plugins.motion_tools")
 class ReachyMotionToolsPlugin(Plugin):
     name = "reachy_motion_tools"
 
-    def __init__(self, app, motion=None, config: dict | None = None) -> None:  # noqa: ANN001
+    def __init__(
+        self,
+        app,
+        motion=None,
+        config: dict | None = None,
+        on_emotion=None,
+    ) -> None:  # noqa: ANN001
         super().__init__(app)
         self.cfg = dict(config or {})
         self._motion = motion
+        self._on_emotion = on_emotion
         self._registered_tool_names: list[str] = []
 
     # ── lifecycle ──────────────────────────────────────────────────
@@ -105,14 +111,18 @@ class ReachyMotionToolsPlugin(Plugin):
                 "a slug: 'happy', 'sad', 'curious', 'excited', 'thinking', "
                 "'confused', 'surprised', 'angry', 'neutral', 'welcoming'. Call "
                 "this when the user asks the robot to express a feeling, e.g. "
-                "'开心一点' (be happy), 'look sad'."
+                "'开心一点' (be happy), 'look sad'. Also call it exactly once "
+                "before every normal spoken reply so Reachy's expression "
+                "matches the response."
             ),
-            preamble_text="好的。",
         )
         async def play_emotion(emotion: str) -> dict[str, Any]:
             # play_emotion enqueues onto the compositor's debounced emotion
             # slot and returns None; surface an ack the LLM can read.
-            motion.play_emotion(emotion)
+            if self._on_emotion is not None:
+                self._on_emotion(emotion)
+            else:
+                motion.play_emotion(emotion)
             # Reflect on the shared CompanionRobotApp slot for any observer.
             try:
                 self.app.current_emotion = emotion
