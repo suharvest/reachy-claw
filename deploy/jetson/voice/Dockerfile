@@ -3,17 +3,25 @@
 # Pragmatic base: the existing reachy-claw:slv-v7 image already carries every
 # runtime dependency this app needs on Jetson arm64 (reachy-mini 1.8.0,
 # ovs_agent, sounddevice/portaudio, onnxruntime, alsa-utils). We bake the
-# reachy-voice source on top — a seconds-long build on the robot, zero
+# reachy-voice source and the pinned Realtime V2 agent on top — a seconds-long
+# build on the robot, zero
 # dependency risk. A fully standalone image (python-slim + pip install .) can
 # replace this later; the app itself doesn't care.
 #
 # Build (on the Jetson, repo root as context):
-#   docker build -f deploy/jetson/voice/Dockerfile -t reachy-voice:v0.2.0 .
+#   docker build -f deploy/jetson/voice/Dockerfile -t reachy-voice:v0.5.0 .
 
 FROM sensecraft-missionpack.seeed.cn/solution/reachy-claw:slv-v7
 
 LABEL org.opencontainers.image.title="reachy-voice" \
-      org.opencontainers.image.version="0.4.0"
+      org.opencontainers.image.version="0.5.0"
+
+# Do not inherit the opaque ovs_agent bundled in slv-v7.  The application and
+# lock file pin the canonical Realtime V2 client explicitly.
+COPY deploy/jetson/reachy/vendor/openvoicestream_agent-0.2.0-py3-none-any.whl /tmp/vendor/
+RUN pip install --no-cache-dir --no-deps --upgrade \
+    /tmp/vendor/openvoicestream_agent-0.2.0-py3-none-any.whl \
+    && rm -rf /tmp/vendor
 
 # Package now lives under src/ after the reachy-claw <- reachy-voice merge; it is
 # still mounted at /opt/reachy-voice/reachy_voice so PYTHONPATH resolution is
