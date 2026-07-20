@@ -34,12 +34,12 @@ through the daemon and the service containers:
 |---|---|---|
 | **reachy-daemon** | `:38001` | Official `reachy_mini` daemon — drives motors, exposes the SDK websocket (`/ws/sdk`, `/api/state/full`). **Not our code; don't modify.** |
 | **vision-trt** | `:8630` HTTP, `:8631` ZMQ | Camera → TensorRT face/emotion → publishes faces over ZMQ (msgpack, topic `vision`). The app consumes `:8631`. |
-| **deploy-speech (SLV)** | `:8621` | ASR + TTS over one WebSocket (V2V). |
-| **edge-llm-chat-service** | `:11435` | Local LLM, OpenAI-compatible. |
+| **deploy-speech (SLV)** | `:8621` | Realtime V2 gateway: local cascade or cloud Realtime provider. |
+| **edge-llm-chat-service** | `:11435` | Local LLM used only by the gateway's local provider. |
 | **reachy-voice** | `:8042` | **This app** (dashboard + orchestration). |
 
 Data flow:
-- **listen→think→speak:** mic → SLV(ASR) → edge-LLM → SLV(TTS) → speaker
+- **listen→think→speak:** mic → Realtime V2 gateway (local/OpenAI/Qwen) → speaker
 - **see→track:** camera → vision-trt → ZMQ → `attention`/`gaze` → SDK → motors
 - **emote:** LLM reply `[emotion]` tags → `motion` plays the official move libraries
 
