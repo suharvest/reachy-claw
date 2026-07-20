@@ -20,6 +20,11 @@ import yaml
 class Config:
     # ── SLV V2V engine (streaming ASR + TTS over WebSocket) ──────────
     v2v_url: str = "ws://localhost:8621/v2v/stream"
+    # Canonical Realtime V2 server-loop.  The gateway owns the local/cloud
+    # provider and the LLM/tool loop; Reachy remains a provider-neutral device
+    # client.  Disable only as a temporary fallback to the legacy client-loop.
+    server_loop: bool = True
+    realtime_protocol_version: int = 2
     # Locked exhibition language: "zh" or "en". Drives ASR + TTS + a hard
     # "reply only in <language>" prompt instruction. Switchable at runtime via
     # the settings UI / POST /language. Deliberately NOT "auto": a curated
@@ -109,6 +114,8 @@ class Config:
 # Map config field -> environment variable (mirrors CLAWD_* convention loosely).
 _ENV = {
     "v2v_url": "REACHY_V2V_URL",
+    "server_loop": "REACHY_SERVER_LOOP",
+    "realtime_protocol_version": "REACHY_REALTIME_PROTOCOL_VERSION",
     "edge_llm_url": "REACHY_EDGE_LLM_URL",
     "edge_llm_model": "REACHY_EDGE_LLM_MODEL",
     "audio_device": "REACHY_AUDIO_DEVICE",

@@ -4,12 +4,14 @@ the real robot during bring-up."""
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from reachy_voice.config import Config, load_config
 from reachy_voice.conversation import (
     SUPPORTED_LANGUAGES,
+    ReachyCompanionApp,
     _TtsTagFilter,
     build_ovs_config,
     build_system_prompt,
@@ -109,6 +111,7 @@ def test_ovs_config_uses_server_vad():
     assert ovs.slv_config["vad"] == "silero"
     assert ovs.client_vad_drive_eos is True
     assert ovs.mic_drop_while_speaking is True
+    assert ovs.playback_drain_enabled is True
 
 
 def test_ovs_config_mic_makeup_gain():
@@ -124,6 +127,44 @@ def test_ovs_config_language_drives_slv():
     assert ovs.slv_config["tts_language"] == "en"
 
 
+@pytest.mark.asyncio
+async def test_server_loop_updates_visual_context_before_response_create():
+    calls: list[tuple[str, object]] = []
+
+    class _SLV:
+        async def update_session(self, session):
+            calls.append(("session.update", session))
+
+        async def create_response(self):
+            calls.append(("response.create", None))
+
+    app = object.__new__(ReachyCompanionApp)
+    app.config = SimpleNamespace(
+        system_prompt="base",
+        server_loop_enabled=lambda: True,
+    )
+    app.base_prompt = "Reachy prompt"
+    app.vision = SimpleNamespace(faces_context=lambda: "Alice (happy)")
+    app.session_reset_idle_s = 0
+    app._idle_reset_task = None
+    app.slv = _SLV()
+
+    await app.on_user_utterance("你好", "zh")
+
+    assert calls == [
+        (
+            "session.update",
+            {"instructions": "Reachy prompt\n[Faces: Alice (happy)]"},
+        ),
+        ("response.create", None),
+    ]
+
+
 def test_env_override_language(monkeypatch):
     monkeypatch.setenv("REACHY_LANGUAGE", "en")
     assert load_config().language == "en"
+
+
+def test_env_can_roll_back_server_loop(monkeypatch):
+    monkeypatch.setenv("REACHY_SERVER_LOOP", "0")
+    assert load_config().server_loop is False

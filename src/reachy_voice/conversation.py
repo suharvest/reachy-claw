@@ -9,8 +9,8 @@ provided by the `openvoicestream-agent` (ovs_agent) framework's `CompanionRobotA
   2. instantiate the companion app and hand it the live `reachy_mini` handle,
   3. run its event loop as a task until the outer ReachyMiniApp stops us.
 
-Wave 2 registers a `ReachyMotionPlugin` on the app to turn emotion tags into
-head/antenna motion. Wave 1 is pure conversation.
+Reachy registers structured motion tools on the app so local and cloud
+Realtime providers drive head/antenna motion without spoken control tags.
 """
 
 from __future__ import annotations
@@ -88,12 +88,12 @@ _LANGUAGE_LOCK = {
     "zh": (
         "Reply ONLY in Chinese (简体中文). Never switch languages, even if the "
         "visitor speaks another language.\n"
-        'Example: "欢迎，很高兴见到你。[happy]"'
+        'Example spoken reply: "欢迎，很高兴见到你。"'
     ),
     "en": (
         "Reply ONLY in English. Never switch languages, even if the visitor "
         "speaks another language.\n"
-        'Example: "Welcome! Glad you stopped by. [happy]"'
+        'Example spoken reply: "Welcome! Glad you stopped by."'
     ),
 }
 
@@ -128,6 +128,15 @@ class ReachyCompanionApp(CompanionRobotApp):
                 prompt = f"{prompt}\n[Faces: {faces}]"
         self.config.system_prompt = prompt  # resolved fresh each turn by ovs
         self._arm_session_idle_reset()  # a long silence ⇒ next visitor starts fresh
+        if self.config.server_loop_enabled():
+            # Reachy needs the current camera/visitor context to be committed
+            # before the provider starts this turn.  The session therefore has
+            # create_response=false; update the canonical prompt first, then
+            # explicitly create the response.  This is provider-neutral and
+            # works for local cascade, OpenAI Realtime, and Qwen adapters.
+            await self.slv.update_session({"instructions": prompt})
+            await self.slv.create_response()
+            return
         await super().on_user_utterance(text, detected_language)
 
     def _arm_session_idle_reset(self) -> None:
@@ -146,7 +155,7 @@ class ReachyCompanionApp(CompanionRobotApp):
     async def _session_idle_reset(self) -> None:
         try:
             await asyncio.sleep(self.session_reset_idle_s)
-            self.session.reset()
+            await self.reset_conversation()
             logger.info(
                 "session reset after %.0fs idle — fresh context for the next visitor",
                 self.session_reset_idle_s,
@@ -172,6 +181,10 @@ def build_ovs_config(cfg: Config) -> OvsConfig:
             "vad": "silero",
             "vad_silence_ms": 500,
             "multi_utterance": True,
+            # Manual response creation is intentional: Reachy injects the
+            # latest visual context after transcription completes and only
+            # then starts the provider response.
+            "create_response": False,
             # Native voxedge speed (keepPitch via TTSRateShifter): the v2v server
             # reads cfg.get("tts_speed") and the TTS backend DSP-stretches the
             # streamed PCM. 1.0 = no-op pass-through.
@@ -213,14 +226,18 @@ def build_ovs_config(cfg: Config) -> OvsConfig:
         client_vad_threshold=cfg.client_vad_threshold,
         client_vad_silence_ms=cfg.client_vad_silence_ms,
         client_vad_drive_eos=True,
+        # response.done is remote generation completion; application turn
+        # completion waits until the duplex speaker queue has actually drained.
+        playback_drain_enabled=True,
         # Timeouts
         llm_first_token_timeout_s=cfg.llm_first_token_timeout_s,
         llm_stream_idle_timeout_s=cfg.llm_stream_idle_timeout_s,
-        # CLIENT-LOOP tool calling: tools_enabled + empty allowlist = ALL
-        # registered tools available; server_loop left false → client-loop is
-        # auto-selected (ovs runner.stream_with_tools). The motion tools are
-        # registered by ReachyMotionToolsPlugin in ConversationEngine.start().
+        # Empty allowlist exposes every registered local motion tool. In the
+        # default server-loop they are advertised through session.update; the
+        # explicit client-loop fallback uses the same registry locally.
         default_mode="chat",
+        server_loop=cfg.server_loop,
+        realtime_protocol_version=cfg.realtime_protocol_version,
         tools_enabled=True,
         tools_default_allowlist=[],
         tools_max_iterations=3,
@@ -296,11 +313,13 @@ class ConversationEngine:
             self._motion.start()
         else:
             logger.warning("MOTION DISABLED (kill-switch) — voice-only diagnostic mode")
-        # Intercept TTS text: strip [emotion] tags so they aren't spoken, and
-        # route each emotion to motion + dashboard.
-        self._app.slv.send_text = _TtsTagFilter(
-            self._app.slv.send_text, self._on_emotion
-        )
+        # Legacy client-loop fallback may still emit old [emotion] tags.  A
+        # native speech-to-speech response cannot be filtered after synthesis,
+        # so Realtime V2 server-loop uses the structured play_emotion tool.
+        if not self._app.config.server_loop_enabled():
+            self._app.slv.send_text = _TtsTagFilter(
+                self._app.slv.send_text, self._on_emotion
+            )
         # Vision: faces → per-turn [Faces:] prompt context, dashboard boxes, and
         # attention/gaze (follow + greet a close, lingering visitor).
         self._app.base_prompt = build_system_prompt(self.config)
@@ -330,10 +349,16 @@ class ConversationEngine:
         self._app.register(
             DashboardPlugin(self._app, self.hub, on_state=self._motion.set_conv_state)
         )
-        # Client-loop motion tools (move_head/move_antennas/play_emotion/dance):
+        # Local motion tools (move_head/move_antennas/play_emotion/dance):
         # register BEFORE _app.run() so the tools are on the registry before the
         # first turn. Bodies dispatch into the single-writer compositor.
-        self._app.register(ReachyMotionToolsPlugin(self._app, motion=self._motion))
+        self._app.register(
+            ReachyMotionToolsPlugin(
+                self._app,
+                motion=self._motion,
+                on_emotion=self._on_emotion,
+            )
+        )
         logger.info(
             "Starting conversation: SLV=%s  LLM=%s (%s)",
             ovs_cfg.slv_url, ovs_cfg.llm_base_url, ovs_cfg.llm_model,
@@ -357,10 +382,12 @@ class ConversationEngine:
         app.slv.config["tts_language"] = lang
         # drop history + stale prefix cache so the new prompt/language take hold
         try:
-            app.session.reset()
+            await app.reset_conversation()
         except Exception:  # noqa: BLE001
             logger.debug("session.reset() failed during language switch", exc_info=True)
         await app.slv.reconnect()
+        if app.config.server_loop_enabled():
+            await app._readvertise_after_reconnect()
         self.hub.publish(
             {
                 "type": "conversation_language",
