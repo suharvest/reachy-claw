@@ -1,6 +1,6 @@
 services:
   edge-llm:
-    image: ${EDGE_LLM_IMAGE:-edge-llm-chat-service:latest}
+    image: ${EDGE_LLM_IMAGE:-sensecraft-missionpack.seeed.cn/solution/edge-llm-chat-service:v0.8.0-gdn-mtp-fixdl}
     container_name: edge-llm-chat-service
     runtime: nvidia
     privileged: true
@@ -9,16 +9,34 @@ services:
     # intermediate buffers under concurrent requests.
     shm_size: "512m"
     environment:
-      EDGELLM_ENGINE_DIR: /workspace/Qwen3-4B-AWQ/engines-3072
-      EDGELLM_EXPECTED_TENSORRT: ${EDGELLM_EXPECTED_TENSORRT:-10.3.0.30}
-      EDGELLM_EXPECTED_ENGINE_COMMIT: ${EDGELLM_EXPECTED_ENGINE_COMMIT:-7d6579c8293c5cc62986238aa200ea9c7b57d50a}
-      EDGELLM_ENGINE_REPO: ${EDGELLM_ENGINE_REPO:-harvestsu/Qwen3-4B-AWQ-TensorRT-EdgeLLM-engine}
+      # Qwen3.5-4B-AWQ with GDN + MTP speculative decoding. The engine
+      # auto-downloads from HF into /workspace on first boot.
+      EDGELLM_ENGINE_DIR: /workspace/qwen35-4b-awq-gdn-mtp
+      EDGELLM_ENGINE_REPO: ${EDGELLM_ENGINE_REPO:-harvestsu/Qwen3.5-4B-AWQ-GDN-MTP-TensorRT-EdgeLLM-engine}
       EDGELLM_ENGINE_REVISION: ${EDGELLM_ENGINE_REVISION:-main}
+      # This engine repo ships no build_provenance.txt (unlike the older
+      # Qwen3-4B-AWQ one), so the provenance gate must be skipped or startup
+      # aborts before warmup.
+      EDGELLM_SKIP_ENGINE_PROVENANCE_CHECK: "1"
+      # MTP speculative decoding is NOT optional: this bundle's config.json sets
+      # isSpecDecodeBase, so the plain decode path dies at prefill with
+      # "intermediate_recurrent_state_* not in tensorMap".
+      EDGELLM_MTP_ENABLED: "1"
+      EDGELLM_SPEC_DECODE_ENGINE_DIR: /workspace/qwen35-4b-awq-gdn-mtp
+      # DRAFT_STEP x DRAFT_TOP_K <= maxDraftTreeSize (baked at 4). Within that
+      # ceiling throughput is monotonically better as the draft shrinks: on an
+      # Orin NX at 300 tokens step=1 gives 45.2 tok/s vs 34.8 for plain decode.
+      EDGELLM_DRAFT_TOP_K: "1"
+      EDGELLM_DRAFT_STEP: "1"
+      EDGELLM_VERIFY_TREE_SIZE: "2"
       HF_ENDPOINT: ${HF_ENDPOINT:-}
+      # Served OpenAI-API model id — kept as Qwen3-4B-AWQ because that is the
+      # name the engine repo's config declares, NOT the weight generation. The
+      # reachy-voice client's edge_llm_model must match this exactly.
       EDGELLM_MODEL_NAME: Qwen/Qwen3-4B-AWQ
       PORT: "8000"
-      WARMUP_TIMEOUT: ${WARMUP_TIMEOUT:-90}
-      WARMUP_INFERENCE_TIMEOUT: ${WARMUP_INFERENCE_TIMEOUT:-180}
+      WARMUP_TIMEOUT: ${WARMUP_TIMEOUT:-180}
+      WARMUP_INFERENCE_TIMEOUT: ${WARMUP_INFERENCE_TIMEOUT:-300}
       PYTHONUNBUFFERED: "1"
     volumes:
       - ${EDGELLM_WORKSPACE:-/home/harvest/edgellm-workspace}:/workspace

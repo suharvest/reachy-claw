@@ -2141,7 +2141,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "reachy-mini", specifier = ">=1.8.0" },
     { name = "sounddevice", specifier = ">=0.4.6" },
-    { name = "voxedge", path = "deploy/jetson/reachy/vendor/voxedge-0.0.1a0-py3-none-any.whl" },
+    { name = "voxedge", path = "deploy/jetson/reachy/vendor/voxedge-0.0.5a0-py3-none-any.whl" },
     { name = "websockets", specifier = ">=15.0,<16" },
 ]
 provides-extras = ["dev"]
@@ -2494,24 +2494,25 @@ wheels = [
 
 [[package]]
 name = "voxedge"
-version = "0.0.1a0"
-source = { path = "deploy/jetson/reachy/vendor/voxedge-0.0.1a0-py3-none-any.whl" }
+version = "0.0.5a0"
+source = { path = "deploy/jetson/reachy/vendor/voxedge-0.0.5a0-py3-none-any.whl" }
 dependencies = [
     { name = "numpy" },
 ]
 wheels = [
-    { filename = "voxedge-0.0.1a0-py3-none-any.whl", hash = "sha256:4e83b649d2d75fe75c55d19fe7e2659b69c2d030d27bec2758a1666a19bceb18" },
+    { filename = "voxedge-0.0.5a0-py3-none-any.whl", hash = "sha256:1f1beb07bf820a6a997962448a78e7bbea03885e94b5982c5a406a60cbd1673d" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "ctranslate2", marker = "extra == 'translator'", specifier = ">=4.0" },
+    { name = "httpx", marker = "extra == 'llm'", specifier = ">=0.24" },
     { name = "huggingface-hub", marker = "extra == 'artifacts'", specifier = ">=0.20" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "onnxruntime", marker = "extra == 'jetson'", specifier = ">=1.16" },
     { name = "piper-phonemize", marker = "platform_machine == 'aarch64' and extra == 'jetson'", specifier = ">=1.1.0" },
     { name = "rknn-toolkit-lite2", marker = "platform_machine == 'aarch64' and extra == 'rk'", specifier = ">=2.0" },
-    { name = "rkvoice-stream", marker = "platform_machine == 'aarch64' and extra == 'rk'", specifier = ">=0.1" },
+    { name = "rkvoice-stream", marker = "platform_machine == 'aarch64' and extra == 'rk'", specifier = ">=0.1.1" },
     { name = "sentencepiece", marker = "extra == 'translator'", specifier = ">=0.1.99" },
     { name = "sherpa-onnx", marker = "extra == 'sherpa'", specifier = ">=1.10" },
     { name = "soundfile", marker = "extra == 'jetson'", specifier = ">=0.12" },
@@ -2519,7 +2520,7 @@ requires-dist = [
     { name = "tokenizers", marker = "extra == 'jetson'", specifier = ">=0.15" },
     { name = "webrtcvad", marker = "extra == 'jetson'", specifier = ">=2.0.10" },
 ]
-provides-extras = ["rk", "sherpa", "jetson", "translator", "text", "artifacts"]
+provides-extras = ["rk", "sherpa", "jetson", "translator", "text", "artifacts", "llm"]
 
 [[package]]
 name = "watchfiles"

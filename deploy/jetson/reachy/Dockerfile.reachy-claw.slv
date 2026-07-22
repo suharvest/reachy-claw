@@ -36,18 +36,51 @@ RUN mkdir -p src/reachy_claw && echo '__version__ = "0.0.0"' > src/reachy_claw/_
 # 1b) Vendor the ovs_agent wheel. pyproject lists `openvoicestream-agent`
 #     as a dep (path/editable in dev). It is not on PyPI, so it must be
 #     resolvable from the local wheel via --find-links below.
-COPY deploy/jetson/reachy/vendor/openvoicestream_agent-*.whl /tmp/vendor/
-RUN pip install --no-cache-dir --prefix=/install /tmp/vendor/openvoicestream_agent-*.whl
+# Vendor BOTH in-house wheels: ovs_agent is not on PyPI; voxedge is (0.0.5a0)
+# but is vendored too so the build resolves deterministically off a possibly
+# stale/cross-wall mirror. --find-links /tmp/vendor (below) resolves voxedge
+# from here; constraints.txt pins it to 0.0.5a0.
+COPY deploy/jetson/reachy/vendor/openvoicestream_agent-*.whl deploy/jetson/reachy/vendor/voxedge-*.whl /tmp/vendor/
+# --no-deps: install ONLY the wheel here. Its deps (voxedge, aiohttp, …) are
+# resolved later by the constrained + --find-links .[extras] step; without
+# --no-deps pip would fetch them from the (unpinned) mirror at this point,
+# before constraints.txt exists — the exact non-determinism this build avoids.
+RUN pip install --no-cache-dir --prefix=/install --no-deps /tmp/vendor/openvoicestream_agent-*.whl
+
+# 1c) Pinned constraints exported from uv.lock (uv export --all-extras).
+#     Without exact pins, pip's resolver backtracks for hours through the
+#     unpinned mediapipe/opencv/numpy candidate space, PEP517-building an
+#     sdist's metadata on every round-trip (fatal over a slow mirror). With
+#     -c the version is fixed and --prefer-binary takes the wheel, so there is
+#     nothing to backtrack. Regenerate on dependency changes (voxedge is a
+#     vendored path dep so uv export emits it as a path, not ==; append its pin
+#     so pip can't pick a newer index version over the vendored wheel):
+#       uv export --all-extras --no-hashes --no-emit-project --format \
+#         requirements-txt | grep -E '^[A-Za-z0-9._-]+==' > \
+#         deploy/jetson/reachy/constraints.txt
+#       echo "voxedge==0.0.5a0" >> deploy/jetson/reachy/constraints.txt
+#       echo "silero-vad==6.2.1" >> deploy/jetson/reachy/constraints.txt
+# (voxedge is vendored; silero-vad is installed --no-deps below and is not a
+#  project dep, so neither appears in the uv export — append both explicitly.)
+COPY deploy/jetson/reachy/constraints.txt /tmp/constraints.txt
 
 # 2) Install all dependencies (cached unless pyproject.toml changes).
-#    --find-links /tmp/vendor lets pip resolve openvoicestream-agent (the
-#    non-PyPI path dep) from the vendored wheel.
-RUN pip install --no-cache-dir --prefix=/install onnxruntime
-RUN pip install --no-cache-dir --prefix=/install --find-links /tmp/vendor \
-    ".[audio,mediapipe-vision,remote-vision,dashboard]"
+RUN pip install --no-cache-dir --prefix=/install --prefer-binary -c /tmp/constraints.txt onnxruntime
 
-# Install silero-vad WITHOUT torch — only need the Python wrapper + ONNX model
-RUN pip install --no-cache-dir --prefix=/install silero-vad --no-deps
+# silero-vad WITHOUT torch — only the Python wrapper + ONNX model. This MUST run
+# before the .[extras] step below: reachy-mini>=1.8 declares pip>=26.1 as a
+# runtime dep, so .[extras] (with --prefix) uninstalls the base image's
+# /usr/local pip and drops the new one under /install/bin (off PATH). The
+# .[extras] step must therefore be the LAST bare-`pip` RUN in the builder; the
+# runtime stage recovers the relocated pip via COPY --from=builder /install
+# /usr/local, so its `pip install -e .` still resolves.
+RUN pip install --no-cache-dir --prefix=/install --prefer-binary -c /tmp/constraints.txt silero-vad --no-deps
+
+#    --find-links /tmp/vendor lets pip resolve openvoicestream-agent + voxedge
+#    (non-PyPI / pinned) from the vendored wheels.
+RUN pip install --no-cache-dir --prefix=/install --find-links /tmp/vendor \
+    --prefer-binary -c /tmp/constraints.txt \
+    ".[audio,mediapipe-vision,remote-vision,dashboard]"
 
 # Purge heavy transitive deps not needed at runtime:
 # - torch/torchaudio (silero-vad dep, replaced by pure onnxruntime)

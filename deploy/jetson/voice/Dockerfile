@@ -9,18 +9,27 @@
 # replace this later; the app itself doesn't care.
 #
 # Build (on the Jetson, repo root as context):
-#   docker build -f deploy/jetson/voice/Dockerfile -t reachy-voice:v0.5.0 .
+#   docker build -f deploy/jetson/voice/Dockerfile -t reachy-voice:v0.6.0 .
+#
+# v0.6.0 is the first canonical Realtime V2 SERVER-LOOP image. It is a distinct
+# lineage from the already-published v0.5.0 (client-loop): keep the version
+# bumped so the two never collide in the registry.
 
 FROM sensecraft-missionpack.seeed.cn/solution/reachy-claw:slv-v7
 
 LABEL org.opencontainers.image.title="reachy-voice" \
-      org.opencontainers.image.version="0.5.0"
+      org.opencontainers.image.version="0.6.0"
 
-# Do not inherit the opaque ovs_agent bundled in slv-v7.  The application and
-# lock file pin the canonical Realtime V2 client explicitly.
-COPY deploy/jetson/reachy/vendor/openvoicestream_agent-0.2.0-py3-none-any.whl /tmp/vendor/
+# Pin the canonical Realtime V2 client + its turn_driver engine explicitly, so
+# this image's ovs_agent/voxedge pairing does not silently depend on whatever
+# the (mutable) slv-v7 base tag happens to carry. --no-deps: install exactly
+# these two wheels, nothing from the index. Must stay in lockstep — the current
+# pairing is openvoicestream-agent 0.2.0 + voxedge 0.0.5a0.
+COPY deploy/jetson/reachy/vendor/openvoicestream_agent-0.2.0-py3-none-any.whl \
+     deploy/jetson/reachy/vendor/voxedge-0.0.5a0-py3-none-any.whl /tmp/vendor/
 RUN pip install --no-cache-dir --no-deps --upgrade \
     /tmp/vendor/openvoicestream_agent-0.2.0-py3-none-any.whl \
+    /tmp/vendor/voxedge-0.0.5a0-py3-none-any.whl \
     && rm -rf /tmp/vendor
 
 # Package now lives under src/ after the reachy-claw <- reachy-voice merge; it is
