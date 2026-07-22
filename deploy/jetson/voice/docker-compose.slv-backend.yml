@@ -1,55 +1,58 @@
-# Seeed Local Voice — production deployment.
+# Seeed Local Voice — SLV V2V backend for reachy-voice (Jetson Orin NX).
 #
-# Usage:
-#   LANGUAGE_MODE=en docker compose -f deploy/docker-compose.yml up -d
-#   OVS_PROFILE=jetson-multilang-highperf docker compose -f deploy/docker-compose.yml up -d
+# The v0.9.0 voice stack: Qwen3-ASR 0.6B int4 (edgellm v090) + MOSS-TTS-Nano
+# TTS, driving the LLM/tool loop SERVER-SIDE so reachy-voice stays a
+# provider-neutral Realtime V2 device client (REACHY_SERVER_LOOP=1 on the app).
 #
-# Models auto-download on first start (~1-2 min) and persist in a Docker volume.
-# Set LANGUAGE_MODE to "zh_en" (default, Chinese+English), "en" (English only),
-# or OVS_PROFILE=jetson-multilang-highperf for Qwen3 ASR/TTS.
+# Usage (standalone speech service; edge-llm + reachy-voice run separately):
+#   docker compose -f deploy/jetson/voice/docker-compose.slv-backend.yml up -d
+#
+# Engines are NOT baked: the ASR pair + worker + plugin (~1.3 GB) land in the
+# edgellm-v090 volume and the MOSS engines (~1.9 GB) in speech-models, both
+# fetched on first boot and md5-verified against the baked manifest. First
+# start therefore takes several minutes; subsequent boots re-verify only.
+# China networks: set HF_ENDPOINT=https://hf-mirror.com.
+#
+# NOTE: Jetson target only. RK and Raspberry Pi have their own compose files.
 
 services:
   speech:
-    image: seeed-local-voice:jetson-v1.16-race-fixes-slim
-    build:
-      context: ..
-      dockerfile: deploy/docker/Dockerfile.jetson
-      args:
-        LANGUAGE_MODE: ${LANGUAGE_MODE:-zh_en}
-    # NOTE: this file covers the Jetson target. RK and Raspberry Pi run on
-    # different hosts (different runtime, different volumes) and have their
-    # own compose files: deploy/docker-compose.rk.yml, deploy/docker-compose.rpi.yml.
+    image: sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:v0.9.0-ondemand-20260721c
     runtime: nvidia
     ipc: host
     ports:
       - "8621:8000"
     environment:
-      - LANGUAGE_MODE=${LANGUAGE_MODE:-zh_en}
-      - OVS_PROFILE=${OVS_PROFILE:-jetson-multilang-highperf-nx}
+      - OVS_PROFILE=${OVS_PROFILE:-jetson-edgellm-v090-moss}
       - OVS_PROFILE_JSON=${OVS_PROFILE_JSON:-}
-      # Open-dialogue endpointing defaults. Override in .env for product tuning.
+      - LANGUAGE_MODE=${LANGUAGE_MODE:-multilanguage}
+      # ── Server-loop: the gateway owns the LLM + tool loop ──────────────
+      # Both keys are required — one without the other does NOT close the v2v
+      # spoken-reply loop (see seeed-local-voice docs/CONFIGURATION.md). The
+      # reachy-voice client mirrors this with REACHY_SERVER_LOOP=1. EDGE_LLM_*
+      # point the gateway at the edge-llm container; override for your topology
+      # (bridge → http://172.17.0.1:11435/v1, host-net → http://localhost:11435/v1).
+      - OVS_V2V_ENGINE=${OVS_V2V_ENGINE:-voxedge}
+      - OVS_V2V_SERVER_LOOP=${OVS_V2V_SERVER_LOOP:-1}
+      - EDGE_LLM_BASE_URL=${EDGE_LLM_BASE_URL:-http://172.17.0.1:11435/v1}
+      - EDGE_LLM_MODEL=${EDGE_LLM_MODEL:-Qwen/Qwen3-4B-AWQ}
+      # SLV runs bridge-net here, so host calls are not loopback → admin key
+      # is required for the gateway's own control calls.
+      - OVS_ADMIN_KEY=${OVS_ADMIN_KEY:-}
+      # MOSS artifacts (~1.9 GB) are provisioned into speech-models on first
+      # boot; md5s are verified against the baked manifest.
+      - MOSS_ARTIFACT_AUTO_DOWNLOAD=${MOSS_ARTIFACT_AUTO_DOWNLOAD:-1}
+      # Open-dialogue endpointing. Override in .env for product tuning.
       - OVS_VAD_BACKEND=${OVS_VAD_BACKEND:-silero}
-      - OVS_ADMIN_KEY=${OVS_ADMIN_KEY:-}
-      - OVS_ADMIN_KEY=${OVS_ADMIN_KEY:-}
       - OVS_VAD_SILENCE_MS=${OVS_VAD_SILENCE_MS:-400}
-      - QWEN3_EDGELLM_JETSON_ROOT=${QWEN3_EDGELLM_JETSON_ROOT:-/opt/qwen3-edgellm-jetson}
-      - QWEN3_ARTIFACT_MANIFEST=${QWEN3_ARTIFACT_MANIFEST:-}
-      - QWEN3_ARTIFACT_SET=${QWEN3_ARTIFACT_SET:-}
-      - QWEN3_ARTIFACT_ROOT=${QWEN3_ARTIFACT_ROOT:-/opt/models/qwen3-edgellm}
-      - QWEN3_HF_REPO_ID=${QWEN3_HF_REPO_ID:-}
-      - QWEN3_HF_REVISION=${QWEN3_HF_REVISION:-main}
       - HF_ENDPOINT=${HF_ENDPOINT:-https://huggingface.co}
+      # MOSS has no native speed knob; 1.0 = transparent. The reachy-voice
+      # client applies pitch-preserving speed via voxedge's TTSRateShifter,
+      # driven by REACHY_TTS_SPEED — so leave the server pass-through at 1.0.
       - TTS_PROVIDER=${TTS_PROVIDER:-cuda}
-      - TTS_DEFAULT_SID=${TTS_DEFAULT_SID:-0}
-      - TTS_DEFAULT_SPEED=${TTS_DEFAULT_SPEED:-0.85}
-      - EDGE_LLM_TTS_CJK_SEGMENT_MAX_CHARS=${EDGE_LLM_TTS_CJK_SEGMENT_MAX_CHARS:-16}
-      - EDGE_LLM_TTS_FIRST_CHUNK_FRAMES=${EDGE_LLM_TTS_FIRST_CHUNK_FRAMES:-}
-      - EDGE_LLM_TTS_CHUNK_FRAMES=${EDGE_LLM_TTS_CHUNK_FRAMES:-}
-      - EDGE_LLM_TTS_MAX_CHUNK_FRAMES=${EDGE_LLM_TTS_MAX_CHUNK_FRAMES:-}
-      - EDGE_LLM_TTS_CODE2WAV_CONTEXT_FRAMES=${EDGE_LLM_TTS_CODE2WAV_CONTEXT_FRAMES:-}
-      - EDGE_LLM_TTS_STATEFUL_CODE2WAV=${EDGE_LLM_TTS_STATEFUL_CODE2WAV:-}
-      - PARAFORMER_PREROLL_MS=${PARAFORMER_PREROLL_MS:-100}
+      - TTS_DEFAULT_SPEED=${TTS_DEFAULT_SPEED:-1.0}
       - TTS_NUM_THREADS=4
+      - PARAFORMER_PREROLL_MS=${PARAFORMER_PREROLL_MS:-100}
       - STREAMING_ASR_PROVIDER=cuda
       - STREAMING_ASR_NUM_THREADS=4
       - CUDA_MODULE_LOADING=LAZY
@@ -58,6 +61,9 @@ services:
       - ORT_CUDA_ARENA_EXTEND_STRATEGY=kSameAsRequested
     volumes:
       - speech-models:/opt/models
+      # v090 ASR engines (thinker + audio encoder + plugin) land here on first
+      # boot. Without a persistent volume every recreate re-downloads ~1.3 GB.
+      - edgellm-v090:/opt/edgellm-v090
       - /usr/local/cuda/lib64:/host-cuda:ro
       - /usr/lib/aarch64-linux-gnu/nvidia:/host-nvidia-libs:ro
       - /lib/aarch64-linux-gnu:/host-libs:ro
@@ -72,3 +78,4 @@ services:
 volumes:
   speech-models:
     name: speech-models
+  edgellm-v090:
