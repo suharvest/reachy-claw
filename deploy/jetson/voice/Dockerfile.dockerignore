@@ -1,0 +1,30 @@
+# Dockerfile-specific ignore for the reachy-voice image (BuildKit honors
+# <dockerfile-path>.dockerignore). The root .dockerignore excludes the whole
+# deploy tree; without this file the voice build falls back to it and loses the
+# two deploy/ files this image COPYs (the ovs_agent wheel + entrypoint.sh).
+# Mirrors deploy/jetson/reachy/Dockerfile.reachy-claw.slv.dockerignore.
+.git
+.github
+.claude
+.venv
+__pycache__
+*.pyc
+tests
+test-results
+docs
+*.md
+!README.md
+.pre-commit-config.yaml
+.gitignore
+uv.lock
+
+# Exclude the deploy tree EXCEPT the files the voice image COPYs:
+#   deploy/jetson/reachy/vendor/openvoicestream_agent-*.whl  (re-installed --no-deps)
+#   deploy/jetson/voice/entrypoint.sh
+deploy
+!deploy/jetson
+!deploy/jetson/reachy
+!deploy/jetson/reachy/vendor
+!deploy/jetson/reachy/vendor/*.whl
+!deploy/jetson/voice
+!deploy/jetson/voice/entrypoint.sh
