@@ -41,7 +41,11 @@ RUN mkdir -p src/reachy_claw && echo '__version__ = "0.0.0"' > src/reachy_claw/_
 # stale/cross-wall mirror. --find-links /tmp/vendor (below) resolves voxedge
 # from here; constraints.txt pins it to 0.0.5a0.
 COPY deploy/jetson/reachy/vendor/openvoicestream_agent-*.whl deploy/jetson/reachy/vendor/voxedge-*.whl /tmp/vendor/
-RUN pip install --no-cache-dir --prefix=/install /tmp/vendor/openvoicestream_agent-*.whl
+# --no-deps: install ONLY the wheel here. Its deps (voxedge, aiohttp, …) are
+# resolved later by the constrained + --find-links .[extras] step; without
+# --no-deps pip would fetch them from the (unpinned) mirror at this point,
+# before constraints.txt exists — the exact non-determinism this build avoids.
+RUN pip install --no-cache-dir --prefix=/install --no-deps /tmp/vendor/openvoicestream_agent-*.whl
 
 # 1c) Pinned constraints exported from uv.lock (uv export --all-extras).
 #     Without exact pins, pip's resolver backtracks for hours through the
@@ -55,6 +59,9 @@ RUN pip install --no-cache-dir --prefix=/install /tmp/vendor/openvoicestream_age
 #         requirements-txt | grep -E '^[A-Za-z0-9._-]+==' > \
 #         deploy/jetson/reachy/constraints.txt
 #       echo "voxedge==0.0.5a0" >> deploy/jetson/reachy/constraints.txt
+#       echo "silero-vad==6.2.1" >> deploy/jetson/reachy/constraints.txt
+# (voxedge is vendored; silero-vad is installed --no-deps below and is not a
+#  project dep, so neither appears in the uv export — append both explicitly.)
 COPY deploy/jetson/reachy/constraints.txt /tmp/constraints.txt
 
 # 2) Install all dependencies (cached unless pyproject.toml changes).

@@ -102,3 +102,4 @@ websockets==15.0.1
 yarl==1.23.0
 zeroconf==0.149.16
 voxedge==0.0.5a0
+silero-vad==6.2.1
