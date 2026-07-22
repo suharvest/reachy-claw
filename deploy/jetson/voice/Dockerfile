@@ -9,12 +9,16 @@
 # replace this later; the app itself doesn't care.
 #
 # Build (on the Jetson, repo root as context):
-#   docker build -f deploy/jetson/voice/Dockerfile -t reachy-voice:v0.5.0 .
+#   docker build -f deploy/jetson/voice/Dockerfile -t reachy-voice:v0.6.0 .
+#
+# v0.6.0 is the first canonical Realtime V2 SERVER-LOOP image. It is a distinct
+# lineage from the already-published v0.5.0 (client-loop): keep the version
+# bumped so the two never collide in the registry.
 
 FROM sensecraft-missionpack.seeed.cn/solution/reachy-claw:slv-v7
 
 LABEL org.opencontainers.image.title="reachy-voice" \
-      org.opencontainers.image.version="0.5.0"
+      org.opencontainers.image.version="0.6.0"
 
 # Do not inherit the opaque ovs_agent bundled in slv-v7.  The application and
 # lock file pin the canonical Realtime V2 client explicitly.
