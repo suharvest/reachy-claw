@@ -36,7 +36,11 @@ RUN mkdir -p src/reachy_claw && echo '__version__ = "0.0.0"' > src/reachy_claw/_
 # 1b) Vendor the ovs_agent wheel. pyproject lists `openvoicestream-agent`
 #     as a dep (path/editable in dev). It is not on PyPI, so it must be
 #     resolvable from the local wheel via --find-links below.
-COPY deploy/jetson/reachy/vendor/openvoicestream_agent-*.whl /tmp/vendor/
+# Vendor BOTH in-house wheels: ovs_agent is not on PyPI; voxedge is (0.0.5a0)
+# but is vendored too so the build resolves deterministically off a possibly
+# stale/cross-wall mirror. --find-links /tmp/vendor (below) resolves voxedge
+# from here; constraints.txt pins it to 0.0.5a0.
+COPY deploy/jetson/reachy/vendor/openvoicestream_agent-*.whl deploy/jetson/reachy/vendor/voxedge-*.whl /tmp/vendor/
 RUN pip install --no-cache-dir --prefix=/install /tmp/vendor/openvoicestream_agent-*.whl
 
 # 1c) Pinned constraints exported from uv.lock (uv export --all-extras).
@@ -44,10 +48,13 @@ RUN pip install --no-cache-dir --prefix=/install /tmp/vendor/openvoicestream_age
 #     unpinned mediapipe/opencv/numpy candidate space, PEP517-building an
 #     sdist's metadata on every round-trip (fatal over a slow mirror). With
 #     -c the version is fixed and --prefer-binary takes the wheel, so there is
-#     nothing to backtrack. Regenerate on dependency changes:
+#     nothing to backtrack. Regenerate on dependency changes (voxedge is a
+#     vendored path dep so uv export emits it as a path, not ==; append its pin
+#     so pip can't pick a newer index version over the vendored wheel):
 #       uv export --all-extras --no-hashes --no-emit-project --format \
 #         requirements-txt | grep -E '^[A-Za-z0-9._-]+==' > \
 #         deploy/jetson/reachy/constraints.txt
+#       echo "voxedge==0.0.5a0" >> deploy/jetson/reachy/constraints.txt
 COPY deploy/jetson/reachy/constraints.txt /tmp/constraints.txt
 
 # 2) Install all dependencies (cached unless pyproject.toml changes).

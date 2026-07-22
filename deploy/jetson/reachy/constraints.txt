@@ -101,3 +101,4 @@ wcwidth==0.6.0
 websockets==15.0.1
 yarl==1.23.0
 zeroconf==0.149.16
+voxedge==0.0.5a0

@@ -56,9 +56,12 @@ override-dependencies = [
 # point this back at an editable sibling path, e.g.
 #   { path = "../seeed-local-voice/agent", editable = true }
 openvoicestream-agent = { path = "deploy/jetson/reachy/vendor/openvoicestream_agent-0.2.0-py3-none-any.whl" }
-# voxedge ships the turn_driver engine that ovs_agent's runner imports. The PyPI
-# release is stale, so pin it (transitive via ovs_agent) to the in-repo wheel too.
-voxedge = { path = "deploy/jetson/reachy/vendor/voxedge-0.0.1a0-py3-none-any.whl" }
+# voxedge ships the turn_driver engine that ovs_agent's runner imports. It is on
+# PyPI now (0.0.5a0), but pin the in-repo wheel so edge/CI/image builds resolve
+# deterministically without depending on a (cross-wall) index mirror. Keep this
+# in lockstep with the openvoicestream-agent version above — the current pairing
+# is ovs 0.2.0 + voxedge 0.0.5a0.
+voxedge = { path = "deploy/jetson/reachy/vendor/voxedge-0.0.5a0-py3-none-any.whl" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
