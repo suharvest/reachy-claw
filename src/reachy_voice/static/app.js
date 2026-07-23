@@ -4,6 +4,16 @@
 const VISION_HOST = location.hostname + ':8630';
 const VISION_API = `http://${VISION_HOST}`;
 const DASHBOARD_WS = `ws://${location.host}/ws`;
+const CAPABILITY_LABELS = {
+    dashboard: 'Dashboard',
+    robot_daemon: 'Robot',
+    voice_gateway: 'Voice',
+    vision: 'Video',
+    vision_zmq: 'Faces',
+    face_tracker: 'Face Tracker',
+    edge_llm: 'Edge LLM',
+    openclaw: 'OpenClaw',
+};
 
 const EMOTION_COLORS = {
     angry: '#e94560', happy: '#2ecc71', neutral: '#3498db',
@@ -48,6 +58,10 @@ const ASR_IDLE_REVERT_MS = 5000;
 let captureCount = 0;
 let asrActive = false;
 let asrActiveTimer = null;
+let capabilityState = null;
+let providerMode = 'local';
+let providerConfig = null;
+let faceTrackingStatus = null;
 
 // Thought bubble history (max 3)
 const MAX_THOUGHTS = 5;
@@ -242,6 +256,10 @@ function handleDashboardMsg(msg) {
             }
             break;
 
+        case 'runtime_log':
+            updateRuntimeLog(msg.text || '');
+            break;
+
         case 'observation':
             // Observation context in monologue mode (vision description)
             break;
@@ -424,6 +442,252 @@ function handleDashboardMsg(msg) {
                 handleNarrationMessage(msg);
             }
             break;
+    }
+}
+
+function updateRuntimeLog(text) {
+    const el = document.getElementById('runtime-log-panel');
+    if (!el) return;
+    if (text) {
+        el.textContent = text;
+        requestAnimationFrame(() => {
+            el.scrollTop = el.scrollHeight;
+        });
+    }
+}
+
+async function loadProviderConfig() {
+    try {
+        const res = await fetch('/api/model-config', { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        providerConfig = await res.json();
+        syncProviderUI(providerConfig);
+    } catch (err) {
+        const status = document.getElementById('provider-status');
+        if (status) status.textContent = `Provider config unavailable: ${err.message || err}`;
+    }
+}
+
+function syncProviderUI(cfg) {
+    providerMode = cfg.mode || 'local';
+    const online = cfg.online || {};
+    document.getElementById('provider-local-btn')?.classList.toggle('active', providerMode === 'local');
+    document.getElementById('provider-online-btn')?.classList.toggle('active', providerMode === 'online');
+    const badge = document.getElementById('provider-state-badge');
+    if (badge) {
+        badge.textContent = providerMode;
+        badge.classList.toggle('online', providerMode === 'online');
+    }
+    const fields = document.getElementById('provider-online-fields');
+    if (fields) fields.hidden = providerMode !== 'online';
+    setInputValue('provider-name', online.provider || 'qwen');
+    setInputValue('provider-endpoint', online.endpoint || 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime');
+    setInputValue('provider-model', online.model || 'qwen3.5-omni-flash-realtime');
+    setInputValue('provider-compat-endpoint', online.compat_endpoint || 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions');
+    setInputValue('provider-vision-model', online.vision_model || 'qwen3.5-omni-flash');
+    setInputValue('provider-voice', online.voice || 'Serena');
+    const keyStatus = document.getElementById('provider-key-status');
+    if (keyStatus) keyStatus.textContent = `API key: ${online.api_key || 'not set'}`;
+}
+
+function setInputValue(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.value = value;
+}
+
+function readProviderPayload(mode = providerMode) {
+    const apiKeyEl = document.getElementById('provider-api-key');
+    const payload = {
+        mode,
+        online: {
+            provider: document.getElementById('provider-name')?.value || 'qwen',
+            endpoint: document.getElementById('provider-endpoint')?.value || '',
+            model: document.getElementById('provider-model')?.value || '',
+            compat_endpoint: document.getElementById('provider-compat-endpoint')?.value || '',
+            vision_model: document.getElementById('provider-vision-model')?.value || '',
+            voice: document.getElementById('provider-voice')?.value || 'Serena',
+        },
+    };
+    if (apiKeyEl?.value) payload.api_key = apiKeyEl.value;
+    return payload;
+}
+
+async function saveProviderConfig({ restart = false } = {}) {
+    const status = document.getElementById('provider-status');
+    const apiKeyEl = document.getElementById('provider-api-key');
+    if (status) status.textContent = restart ? 'Saving and restarting voice service...' : 'Saving provider config...';
+    try {
+        const payload = readProviderPayload(providerMode);
+        const url = restart ? '/api/model-switch' : '/api/model-config';
+        if (restart) payload.restart = true;
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok || data.ok === false) throw new Error(data.error || data.restart?.stderr || `HTTP ${res.status}`);
+        providerConfig = data.config || data;
+        if (apiKeyEl) apiKeyEl.value = '';
+        syncProviderUI(providerConfig);
+        if (status) {
+            const restartMsg = data.restart?.ok === false ? ` Saved, restart failed: ${data.restart.stderr || data.restart.returncode}` : '';
+            status.textContent = restart ? `Provider switched.${restartMsg}` : 'Provider config saved.';
+        }
+    } catch (err) {
+        if (status) status.textContent = `Provider save failed: ${err.message || err}`;
+    }
+}
+
+function initProviderSettings() {
+    document.querySelectorAll('[data-provider-mode]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            providerMode = btn.dataset.providerMode || 'local';
+            syncProviderUI({ ...(providerConfig || {}), mode: providerMode, online: providerConfig?.online || {} });
+        });
+    });
+    document.getElementById('provider-save-btn')?.addEventListener('click', () => saveProviderConfig({ restart: false }));
+    document.getElementById('provider-apply-btn')?.addEventListener('click', () => saveProviderConfig({ restart: true }));
+    loadProviderConfig();
+}
+
+async function loadFaceTrackingStatus() {
+    try {
+        const res = await fetch('/api/face-tracking', { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        faceTrackingStatus = await res.json();
+        syncFaceTrackingUI(faceTrackingStatus);
+    } catch (err) {
+        syncFaceTrackingUI({ available: false, enabled: false, error: err.message || String(err) });
+    }
+}
+
+function syncFaceTrackingUI(status) {
+    const panel = document.getElementById('face-tracking-panel');
+    if (!panel) return;
+    const available = status.available !== false;
+    panel.classList.toggle('unavailable', !available);
+    const enabled = status.enabled !== false && status.motion?.enabled !== false;
+    const faces = Number(status.face_count || 0);
+    const target = status.motion?.target || status.target;
+    const locked = !!target;
+    const state = document.getElementById('face-tracking-state');
+    if (state) {
+        state.textContent = !available ? 'unavailable' : (!enabled ? 'disabled' : (locked ? 'locked' : 'searching'));
+        state.classList.toggle('locked', available && enabled && locked);
+        state.classList.toggle('disabled', !enabled || !available);
+    }
+    const meta = document.getElementById('face-tracking-meta');
+    if (meta) {
+        const yaw = target ? Number(target.yaw).toFixed(1) : '0.0';
+        const pitch = target ? Number(target.pitch).toFixed(1) : '0.0';
+        const age = status.last_face_age_s ?? status.motion?.last_drive_age_s;
+        const suffix = status.error || status.motion?.last_error || '';
+        meta.textContent = available
+            ? `faces ${faces} / yaw ${yaw} / pitch ${pitch}${age != null ? ` / age ${age}s` : ''}${suffix ? ` / ${suffix}` : ''}`
+            : `tracker unavailable${status.error ? ` / ${status.error}` : ''}`;
+    }
+    const btn = document.getElementById('face-tracking-toggle');
+    if (btn) {
+        btn.disabled = !available;
+        btn.textContent = enabled ? 'Disable' : 'Enable';
+        btn.dataset.enabled = enabled ? '1' : '0';
+    }
+}
+
+async function setFaceTrackingEnabled(enabled) {
+    const btn = document.getElementById('face-tracking-toggle');
+    if (btn) btn.disabled = true;
+    try {
+        const res = await fetch('/api/face-tracking', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
+        syncFaceTrackingUI(data.status || data);
+    } catch (err) {
+        syncFaceTrackingUI({ ...(faceTrackingStatus || {}), error: err.message || String(err) });
+    } finally {
+        loadFaceTrackingStatus();
+    }
+}
+
+function initFaceTracking() {
+    document.getElementById('face-tracking-toggle')?.addEventListener('click', () => {
+        const enabled = document.getElementById('face-tracking-toggle')?.dataset.enabled === '1';
+        setFaceTrackingEnabled(!enabled);
+    });
+    loadFaceTrackingStatus();
+    setInterval(loadFaceTrackingStatus, 1500);
+}
+
+async function loadCapabilities() {
+    try {
+        const res = await fetch('/api/capabilities', { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        capabilityState = await res.json();
+        applyCapabilities(capabilityState);
+    } catch (err) {
+        capabilityState = {
+            device_profile: 'unknown',
+            services: {},
+            features: { video: true, voice_transcript: false, conversation: false },
+        };
+        applyCapabilities(capabilityState);
+    }
+}
+
+function applyCapabilities(caps) {
+    document.body.dataset.deviceProfile = caps.device_profile || 'unknown';
+    const profileEl = document.getElementById('capability-profile');
+    if (profileEl) profileEl.textContent = `${caps.device_profile || 'unknown'} / ${caps.app_state || 'unknown'}`;
+
+    const grid = document.getElementById('capability-grid');
+    if (grid) {
+        const services = caps.services || {};
+        grid.innerHTML = Object.entries(services).map(([key, svc]) => {
+            const label = CAPABILITY_LABELS[key] || svc.label || key;
+            const state = svc.available ? 'live' : 'off';
+            const text = svc.available ? 'online' : 'unavailable';
+            return `<span class="capability-chip ${state}"><span></span>${label}: ${text}</span>`;
+        }).join('');
+    }
+
+    const features = caps.features || {};
+    toggleFeature('video', features.video !== false);
+    toggleFeature('voice', features.voice_transcript !== false);
+    toggleFeature('conversation', features.conversation !== false);
+    toggleFeature('motion', features.robot_motion !== false);
+    toggleFeature('diary', features.diary !== false);
+    toggleFeature('faces', features.faces !== false);
+    toggleFeature('restart', features.service_restart !== false);
+}
+
+function toggleFeature(feature, enabled) {
+    document.body.classList.toggle(`feature-${feature}-off`, !enabled);
+    if (feature === 'conversation') {
+        const el = document.getElementById('conversation-unavailable');
+        if (el) el.hidden = enabled;
+    }
+    if (feature === 'voice') {
+        const log = document.getElementById('runtime-log-panel');
+        if (log) log.hidden = enabled && capabilityState?.device_profile !== 'pi-light';
+    }
+    const selectorMap = {
+        motion: ['#motor-toggle', '#motor-presets button', '#debug-motion-btn'],
+        diary: ['[data-page="diary"]', '#narrate-btn'],
+        faces: ['[data-tab="faces"]', '#enroll-btn', '#upload-btn'],
+        restart: ['#restart-btn'],
+    };
+    for (const selector of selectorMap[feature] || []) {
+        document.querySelectorAll(selector).forEach((el) => {
+            el.disabled = !enabled;
+            el.classList.toggle('capability-disabled', !enabled);
+            if (!enabled) el.setAttribute('aria-disabled', 'true');
+            else el.removeAttribute('aria-disabled');
+        });
     }
 }
 
@@ -2364,10 +2628,14 @@ async function renderDiaryHAChips() {
 function init() {
     initI18n();
     initPageTabs();
+    loadCapabilities();
+    setInterval(loadCapabilities, 5000);
     setupVideo();
     connectVision();
     connectDashboard();
     initSettings();
+    initProviderSettings();
+    initFaceTracking();
     initSmileGallery();
     requestAnimationFrame(drawOverlay);
     requestAnimationFrame(drawFaceCrop);

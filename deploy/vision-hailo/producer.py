@@ -21,7 +21,7 @@ import msgpack
 import numpy as np
 import zmq
 from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from hailo_pipeline import init_pipeline, HailoPipeline
 from face_db import FaceDatabase
@@ -39,6 +39,9 @@ HTTP_PORT = int(os.environ.get("HTTP_PORT", 8630))
 CAMERA_DEVICE = os.environ.get("CAMERA_DEVICE", "/dev/video0")
 CAMERA_W = int(os.environ.get("CAMERA_W", 640))
 CAMERA_H = int(os.environ.get("CAMERA_H", 480))
+CAMERA_FOURCC = os.environ.get("CAMERA_FOURCC", "MJPG").upper()
+CAMERA_FPS = float(os.environ.get("CAMERA_FPS", os.environ.get("TARGET_FPS", 15)))
+PREVIEW_W = int(os.environ.get("PREVIEW_W", 960))
 CAPTURE_DIR = Path(os.environ.get("CAPTURE_DIR", "/var/lib/vision-hailo/captures"))
 FACE_DB_DIR = Path(os.environ.get("FACE_DB_DIR", "/var/lib/vision-hailo/faces"))
 TARGET_FPS = float(os.environ.get("TARGET_FPS", 15))
@@ -69,8 +72,11 @@ _capture_lock = threading.Lock()
 def _open_camera() -> cv2.VideoCapture:
     """Open camera device with libcamera compatibility."""
     cap = cv2.VideoCapture(CAMERA_DEVICE)
+    if CAMERA_FOURCC:
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*CAMERA_FOURCC[:4]))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_H)
+    cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     # Try libcamera backend if default fails
@@ -78,15 +84,32 @@ def _open_camera() -> cv2.VideoCapture:
         logger.warning(f"Failed to open {CAMERA_DEVICE}, trying libcamera...")
         # Pi camera is often on video19 for libcamera
         for dev in ["/dev/video19", "/dev/video0"]:
-            cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
+            cap = cv2.VideoCapture(dev)
+            if CAMERA_FOURCC:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*CAMERA_FOURCC[:4]))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_W)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_H)
+            cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
             if cap.isOpened():
-                logger.info(f"Opened camera on {dev}")
+                logger.info(
+                    "Opened camera on %s %.0fx%.0f fourcc=%s fps=%.1f",
+                    dev,
+                    cap.get(cv2.CAP_PROP_FRAME_WIDTH),
+                    cap.get(cv2.CAP_PROP_FRAME_HEIGHT),
+                    CAMERA_FOURCC,
+                    cap.get(cv2.CAP_PROP_FPS),
+                )
                 return cap
         raise RuntimeError("Cannot open any camera device")
 
-    logger.info(f"Camera {CAMERA_DEVICE} open at {CAMERA_W}x{CAMERA_H}")
+    logger.info(
+        "Camera %s open %.0fx%.0f fourcc=%s fps=%.1f",
+        CAMERA_DEVICE,
+        cap.get(cv2.CAP_PROP_FRAME_WIDTH),
+        cap.get(cv2.CAP_PROP_FRAME_HEIGHT),
+        CAMERA_FOURCC,
+        cap.get(cv2.CAP_PROP_FPS),
+    )
     return cap
 
 
@@ -274,8 +297,17 @@ def _capture_loop() -> None:
 
             pub.send_multipart([b"vision", msgpack.packb(zmq_msg, use_bin_type=True)])
 
-            # Update preview JPEG
-            ok2, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            # Update preview JPEG. Keep inference on the full camera frame, but
+            # downscale the dashboard preview to reduce encode and network lag.
+            preview = frame
+            if PREVIEW_W > 0 and frame.shape[1] > PREVIEW_W:
+                ratio = PREVIEW_W / frame.shape[1]
+                preview = cv2.resize(
+                    frame,
+                    (PREVIEW_W, max(1, int(frame.shape[0] * ratio))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            ok2, jpg = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 65])
             if ok2:
                 state.last_jpeg = jpg.tobytes()
             state.last_frame = frame
@@ -358,6 +390,15 @@ async def mjpeg_stream():
             await asyncio.sleep(1.0 / max(TARGET_FPS, 5))
 
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.get("/snapshot")
+async def snapshot():
+    """Return the latest preview JPEG without opening the camera again."""
+    jpg = state.last_jpeg
+    if not jpg:
+        raise HTTPException(status_code=503, detail="no camera frame available")
+    return Response(content=jpg, media_type="image/jpeg")
 
 
 # Face DB endpoints
