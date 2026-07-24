@@ -24,11 +24,9 @@ from fastapi.responses import StreamingResponse
 from reachy_mini import ReachyMini, ReachyMiniApp
 
 from reachy_voice import overrides, tier_a
-from reachy_voice.capabilities import probe_capabilities
 from reachy_voice.config import load_config
 from reachy_voice.conversation import ConversationEngine
 from reachy_voice.dashboard import DashboardHub
-from reachy_voice import model_config
 
 logger = logging.getLogger("reachy_voice")
 
@@ -141,79 +139,6 @@ class ReachyVoiceApp(ReachyMiniApp):
                 "app": "reachy-voice",
                 "state": getattr(self, "_engine_state", "?"),
                 "language": getattr(self._config, "language", "?"),
-            }
-
-        @self.settings_app.get("/api/capabilities")
-        def capabilities() -> dict:
-            return probe_capabilities(
-                device_profile=os.environ.get("REACHY_DEVICE_PROFILE", "jetson-full"),
-                daemon_port=DAEMON_PORT,
-                vision_http=self._config.vision_mjpeg.rsplit("/", 1)[0] + "/",
-                app_state=getattr(self, "_engine_state", "unknown"),
-            )
-
-        @self.settings_app.get("/api/face-tracking")
-        def face_tracking_status() -> dict:
-            eng = self._engine
-            if eng is None:
-                return {"available": False, "enabled": False, "error": "engine not ready"}
-            vision = getattr(eng, "_vision", None)
-            motion = getattr(eng, "_motion", None)
-            cfg = getattr(eng, "config", None)
-            min_area = getattr(cfg, "attention_min_area", 0.018)
-            faces = []
-            for face in (vision.snapshot() if vision is not None else []):
-                bbox = face.get("bbox")
-                if bbox and len(bbox) == 4:
-                    area = max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
-                    faces.append({
-                        "area": round(area, 4),
-                        "close_enough": area >= min_area,
-                        "center": [round((bbox[0] + bbox[2]) / 2, 3), round((bbox[1] + bbox[3]) / 2, 3)],
-                        "identity": face.get("identity"),
-                        "emotion": face.get("emotion"),
-                    })
-            gaze_target = getattr(motion, "_gaze_target", None) if motion is not None else None
-            return {
-                "available": True,
-                "enabled": bool(getattr(cfg, "attention_enabled", True)),
-                "vision_fresh": bool(vision.faces_fresh()) if vision is not None else False,
-                "face_count": len(faces),
-                "faces": faces,
-                "min_area_gate": min_area,
-                "target": None if gaze_target is None else {"yaw": round(gaze_target[0], 2), "pitch": round(gaze_target[1], 2)},
-            }
-
-        @self.settings_app.post("/api/face-tracking")
-        def set_face_tracking(payload: dict = Body(...)) -> dict:
-            # Full app tracks via config/env at startup; keep the endpoint
-            # shape-compatible with the Pi adapter without hot-mutating config.
-            enabled = bool(payload.get("enabled", True))
-            return {
-                "ok": False,
-                "enabled": enabled,
-                "error": "runtime face-tracking toggle is only available on the Pi adapter",
-            }
-
-        @self.settings_app.get("/api/model-config")
-        def get_model_config() -> dict:
-            return model_config.redacted_config()
-
-        @self.settings_app.post("/api/model-config")
-        def set_model_config(payload: dict = Body(...)) -> dict:
-            return {"ok": True, "config": model_config.save_config(payload)}
-
-        @self.settings_app.post("/api/model-switch")
-        def switch_model_mode(payload: dict = Body(...)) -> dict:
-            mode = str(payload.get("mode", "")).strip()
-            try:
-                cfg = model_config.set_mode(mode)
-            except ValueError as exc:
-                return {"ok": False, "error": str(exc)}
-            return {
-                "ok": True,
-                "config": cfg,
-                "note": "mode saved; provider runtime applies it on the next session/restart",
             }
 
         @self.settings_app.post("/language")
