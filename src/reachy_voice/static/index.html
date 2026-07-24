@@ -7,7 +7,7 @@
 <link rel="stylesheet" href="/static/style.css?v=20">
 <link rel="stylesheet" href="/static/diary.css?v=4">
 <link rel="stylesheet" href="/static/settings.css?v=5">
-<script src="/static/i18n.js?v=4"></script>
+<script src="/static/i18n.js?v=5"></script>
 </head>
 <body>
 
@@ -334,6 +334,44 @@
             </div>
             <div class="tab-pane" id="tab-detail">
                 <div class="detail-section">
+                    <h3 data-i18n="speechProvider.title">Speech Model Mode</h3>
+                    <div class="toggle-row">
+                        <span class="toggle-label" data-i18n="speechProvider.mode">Mode</span>
+                        <select id="speech-mode" class="lang-select">
+                            <option value="local" data-i18n="speechProvider.local">Local</option>
+                            <option value="online" data-i18n="speechProvider.online">Online Qwen</option>
+                        </select>
+                    </div>
+                    <div id="speech-online-fields">
+                        <div class="toggle-row">
+                            <span class="toggle-label" data-i18n="speechProvider.apiKey">DashScope API Key</span>
+                            <input type="password" class="url-input" id="speech-api-key" autocomplete="off" placeholder="sk-...">
+                        </div>
+                        <div class="toggle-row">
+                            <span class="toggle-label" data-i18n="speechProvider.url">Qwen Realtime URL</span>
+                            <input type="text" class="url-input" id="speech-qwen-url" value="wss://dashscope.aliyuncs.com/api-ws/v1/realtime">
+                        </div>
+                        <div class="toggle-row">
+                            <span class="toggle-label" data-i18n="speechProvider.model">Realtime Model</span>
+                            <input type="text" class="url-input" id="speech-qwen-model" value="qwen-audio-3.0-realtime-flash">
+                        </div>
+                        <div class="toggle-row">
+                            <span class="toggle-label" data-i18n="speechProvider.voice">Voice</span>
+                            <input type="text" class="url-input" id="speech-qwen-voice" value="Serena">
+                        </div>
+                        <div class="toggle-row">
+                            <span class="toggle-label" data-i18n="speechProvider.compatUrl">Vision API URL</span>
+                            <input type="text" class="url-input" id="speech-qwen-compat-url" value="https://dashscope.aliyuncs.com/compatible-mode/v1">
+                        </div>
+                        <div class="toggle-row">
+                            <span class="toggle-label" data-i18n="speechProvider.visionModel">Vision Model</span>
+                            <input type="text" class="url-input" id="speech-qwen-vision-model" value="qwen3.5-omni-flash">
+                        </div>
+                    </div>
+                    <div class="settings-status-line" id="speech-provider-status">--</div>
+                    <button class="apply-btn" id="apply-speech-provider-btn" data-i18n="speechProvider.apply">Save Speech Mode</button>
+                </div>
+                <div class="detail-section">
                     <h3 data-i18n="llm.title">LLM</h3>
                     <div class="toggle-row">
                         <span class="toggle-label" data-i18n="llm.backend">Backend</span>
@@ -612,7 +650,7 @@
     </div>
 </div>
 
-<script src="/static/app.js?v=14"></script>
+<script src="/static/app.js?v=15"></script>
 <script src="/static/diary.js?v=4"></script>
 <script src="/static/settings.js?v=5"></script>
 <script src="/static/ha_settings.js?v=3"></script>

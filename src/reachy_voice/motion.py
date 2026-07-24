@@ -1,32 +1,8 @@
-"""Motion for Reachy Mini: official-move expressions + periodic "presence",
-over a minimal always-alive baseline.
+"""Jetson-safe motion for Reachy Mini.
 
-The SDK ships **no** idle behaviour — if you stop sending targets the robot
-freezes. So we run one motion thread (single writer, nothing fights for the
-head) that layers, in priority order:
-
-  1. **Expression bursts** — the LLM ends each reply with a tag like ``[happy]``;
-     we map it to one of Pollen's **official recorded moves**
-     (``reachy-mini-emotions-library``, ~80 designed animations driving head +
-     antennas + body together) and play it.
-
-  2. **Periodic presence** — when nobody is interacting, every ~10-18s the robot
-     spontaneously plays a *gentle* official move (a look-around / curious /
-     nod / sway, drawn from the emotions **and** dances libraries) so it keeps
-     "showing presence" instead of sitting still. This is the SDK's own move
-     library doing the work, not hand-authored animation.
-
-  3. **Speech wobble** — while TTS plays, the head bobs in time with the live
-     speaker loudness (read off the duplex stream). Our audio bypasses the SDK
-     media backend (``no_media``), so the SDK's built-in ``enable_wobbling`` can't
-     see it — hence we drive a small wobble ourselves from the playback RMS.
-
-  4. **Breathing** — a tiny continuous drift so the robot is never frozen
-     between moves (the only thing the SDK gives nothing for).
-
-Wave B will add a gaze layer via the SDK's ``look_at_image`` (face tracking).
-If the official libraries can't load (offline + uncached), expressions fall back
-to a simple antenna wag and presence is disabled, so motion never hard-fails.
+Vision is intentionally display/snapshot-only: it never drives body, head, or
+antenna motors. This controller is the single writer for all remaining motion,
+and it only sends slow speech/tool gestures through ``goto_target``.
 """
 
 from __future__ import annotations
@@ -89,7 +65,7 @@ _DANCE_MOVES: frozenset[str] = frozenset({
     "side_to_side_sway", "side_glance_flick", "chin_lead",
 })
 
-_COMPOSITOR_HZ = 25.0  # ~old stable app's rate; lighter on the motor bus than 50
+_COMPOSITOR_HZ = 25.0
 
 # Conversation states during which the robot must hold PERFECTLY STILL so the
 # (AEC-less to mechanical noise) mic hears the visitor cleanly — servo motion
@@ -120,15 +96,20 @@ _SEND_DEADBAND_ANT_RAD = math.radians(1.5)
 # official recorded moves animate the antennas when something actually happens.
 _REST_ANTENNAS = [math.radians(8.0), math.radians(8.0)]
 
-# HARD SAFETY: cap how far any joint target may move per compositor tick. At
-# 50 Hz, 1.2°/tick = 60°/s — fast enough to look responsive, slow enough that a
-# big gaze swing can't slam the motors and brown out the bus (which wedged the
-# motor comms once). Every commanded value is slew-limited through these.
+# HARD SAFETY: retained for one-shot commands that need slew-style helpers.
 _MAX_HEAD_STEP_DEG = 2.0  # per tick @25Hz ≈ 50°/s
 _MAX_BODY_STEP_DEG = 1.6  # per tick @25Hz ≈ 40°/s
-# Of the horizontal gaze aim, the head turns up to this many degrees (leading the
-# look); the body carries whatever is beyond it. Makes the head visibly "look".
-_HEAD_YAW_SHARE_DEG = 14.0
+
+# Jetson-safe motor partition:
+# - vision writes no motors
+# - speech writes head + antennas only, at slow goto cadence
+# - no ambient head wobble at compositor rate
+_SPEECH_STEP_MIN_S = 0.80
+_SPEECH_STEP_MAX_S = 1.20
+_SPEECH_HEAD_YAW_DEG = 4.0
+_SPEECH_HEAD_PITCH_DEG = 3.0
+_SPEECH_HEAD_ROLL_DEG = 4.0
+_SPEECH_ANTENNA_RAD = 0.23
 
 # Fallback antenna wag (center°, amp°, freq Hz, phase, dur s) when no official
 # move is available for a tag.
@@ -178,17 +159,13 @@ class MotionController:
         self._last_activity = 0.0          # monotonic; speech/emotion reset it
         self._next_gap = _PRESENCE_GAP_MIN
         self._conv_state = "idle"          # listen→freeze, speak→move (set by engine)
-        # gaze anchor (yaw, pitch in degrees) — set by the attention tracker.
-        # _target is the desired aim (None = look ahead); _cur eases toward it
-        # at compositor rate for smooth tracking. Horizontal aim drives body_yaw
-        # (a natural "turn to face you"); vertical drives head pitch.
-        self._gaze_target: tuple[float, float] | None = None
-        self._gaze_cur = [0.0, 0.0]
         # last commanded targets (deg) — slew-limited each tick for motor safety
         self._cmd_yaw = 0.0
         self._cmd_pitch = 0.0
         self._cmd_roll = 0.0
         self._cmd_body = 0.0
+        self._last_speech_step = 0.0
+        self._next_speech_step = 0.0
         # When the daemon link drops (e.g. a motor-bus fault), motion PAUSES and
         # probes for recovery once a second — it must never hammer the SDK at
         # tick rate and flood tracebacks, which would starve the conversation.
@@ -197,18 +174,12 @@ class MotionController:
         self._sent_head: tuple[float, float, float] | None = None
         self._sent_body: float | None = None
         self._sent_ant: list[float] | None = None
+        self._motors_enabled = False
 
     # ── lifecycle ────────────────────────────────────────────────────
     def start(self) -> None:
         if self.reachy is None:
             return
-        # In SDK 1.8.0, set_target_* only drives the robot with torque ON. Enable
-        # motors once here (the old 1.5 app did the same on connect). Harmless if
-        # already enabled.
-        try:
-            self.reachy.enable_motors()
-        except Exception:  # noqa: BLE001
-            logger.debug("enable_motors() failed", exc_info=True)
         self._stop.clear()
         self._t0 = self._last_activity = time.monotonic()
         self._next_gap = random.uniform(_PRESENCE_GAP_MIN, _PRESENCE_GAP_MAX)
@@ -247,11 +218,6 @@ class MotionController:
         """Conversation state from the engine. While listening/thinking the robot
         freezes (clean mic); it only moves while speaking or idle."""
         self._conv_state = state or "idle"
-
-    def set_gaze(self, yaw_deg: float | None, pitch_deg: float | None) -> None:
-        """Aim at a tracked visitor (degrees). None → recentre. Thread-safe:
-        called from the vision thread, consumed by the compositor."""
-        self._gaze_target = None if yaw_deg is None else (yaw_deg, pitch_deg or 0.0)
 
     # ── tool commands (compositor-safe; enqueue only) ─────────────────
     #
@@ -317,17 +283,11 @@ class MotionController:
 
     # ── library ──────────────────────────────────────────────────────
     def _load_library(self) -> None:
-        try:
-            from reachy_mini.motion.recorded_move import RecordedMoves
-
-            self._libs = [RecordedMoves(EMOTIONS_DATASET), RecordedMoves(DANCES_DATASET)]
-            self._move_names = set()
-            for lib in self._libs:
-                self._move_names |= set(lib.list_moves())
-        except Exception as e:  # noqa: BLE001 — degrade to antenna wag
-            logger.warning("official move libraries unavailable (%s); using wag", e)
-            self._libs = []
-            self._move_names = set()
+        # The Jetson-safe motion stack deliberately does not load the official
+        # full-body recorded move libraries. They drive body/head/antennas as one
+        # animation, which breaks the motor partition needed to avoid twitching.
+        self._libs = []
+        self._move_names = set()
 
     def _resolve(self, name: str):  # noqa: ANN201 — returns a Move or None
         for lib in self._libs:
@@ -367,12 +327,12 @@ class MotionController:
                 if self._probe_link():
                     logger.info("motion: daemon link recovered; resuming")
                     self._link_down = False
-                    self._gaze_cur = [0.0, 0.0]
                     self._cmd_yaw = self._cmd_pitch = self._cmd_roll = self._cmd_body = 0.0
                     self._sent_head = self._sent_body = self._sent_ant = None
                 continue
 
             listening = self._conv_state in _FREEZE_STATES
+            speaking = self._conv_state == "speaking" or self._speaking()
 
             # 1) explicit emotion from the LLM (a designed move). Only burst while
             #    SPEAKING/idle — never a big fast move while listening (that's what
@@ -404,43 +364,24 @@ class MotionController:
                         if self._pending_cmd is None:
                             self._pending_cmd = cmd
 
-            # While LISTENING: do NOT freeze (the robot should stay engaged), but
-            # only allow the GENTLE, slow gaze track (look at / follow the visitor)
-            # — slow servos are quiet, and the XMOS NS/AEC handles the residue. No
-            # presence, no fast/large moves while listening.
-            if listening:
+            # SPEAKING owns the head + antennas. Do not run vision/body motion
+            # here; this is the hard partition that prevents the "services fight"
+            # behaviour seen on the live robot.
+            if speaking:
                 self._last_activity = time.monotonic()
                 if create_head_pose is not None:
-                    self._tick_ambient(create_head_pose, gentle=True)
+                    self._tick_speech(create_head_pose)
                 time.sleep(dt)
                 continue
 
-            now = time.monotonic()
-            speaking = self._conv_state == "speaking" or self._speaking()
-            tracking = self._gaze_target is not None
-            if speaking or tracking:
-                # someone is interacting / being followed — not "idle"
-                self._last_activity = now
-
-            # 2) periodic presence ONLY when truly idle (nobody, not speaking) —
-            #    the "show off alone" behaviour; never while serving a visitor.
-            if (
-                self._conv_state == "idle"
-                and not speaking
-                and not tracking
-                and self._presence_pool()
-                and (now - self._last_activity) >= self._next_gap
-            ):
-                self._play_presence()
+            # While LISTENING/THINKING: no motor output.
+            if listening:
                 self._last_activity = time.monotonic()
-                self._next_gap = random.uniform(_PRESENCE_GAP_MIN, _PRESENCE_GAP_MAX)
+                time.sleep(dt)
                 continue
 
-            # 3) speech wobble (while speaking) + gaze (orient toward a visitor).
-            #    No always-on breathing — when there's nothing to do this commands
-            #    neutral and the deadband holds the head still (quiet servos).
-            if create_head_pose is not None:
-                self._tick_ambient(create_head_pose)
+            # No idle/listening motor output. Vision must never recenter or track
+            # through the motor stack.
             time.sleep(dt)
 
     def _mark_link_down(self) -> None:
@@ -449,6 +390,7 @@ class MotionController:
         if not self._link_down:
             logger.warning("motion: lost daemon link — pausing motion until it recovers")
             self._link_down = True
+            self._motors_enabled = False
 
     def _probe_link(self) -> bool:
         """Cheap read to test whether the daemon link is back."""
@@ -456,6 +398,21 @@ class MotionController:
             self.reachy.get_current_head_pose()
             return True
         except Exception:  # noqa: BLE001
+            return False
+
+    def _ensure_motors_enabled(self) -> bool:
+        """Enable torque lazily, only when a real motion command is about to be
+        sent. Starting the app with torque enabled but no user-visible motion can
+        still tickle the motor bus on this Jetson setup."""
+        if self._motors_enabled:
+            return True
+        try:
+            self.reachy.enable_motors()
+            self._motors_enabled = True
+            return True
+        except Exception:  # noqa: BLE001
+            logger.warning("enable_motors() failed; motion paused", exc_info=True)
+            self._mark_link_down()
             return False
 
     def _speaking(self) -> bool:
@@ -467,94 +424,55 @@ class MotionController:
             return False
 
     def _presence_pool(self) -> list[str]:
-        return [m for m in _PRESENCE_MOVES if m in self._move_names]
+        # Disabled in the Jetson-safe architecture. Official presence moves are
+        # full-body recorded animations; they can write body/head/antennas at the
+        # same time and reintroduce the twitchy multi-owner behaviour.
+        return []
 
-    def _play_presence(self) -> None:
-        pool = self._presence_pool()
-        if not pool:
+    def _tick_speech(self, create_head_pose) -> None:  # noqa: ANN001
+        now = time.monotonic()
+        if now < self._next_speech_step:
             return
-        name = random.choice(pool)
-        move = self._resolve(name)
-        if move is None:
+        self._speech_goto_step(create_head_pose, label="speech")
+
+    def _speech_goto_step(self, create_head_pose, label: str = "speech") -> None:  # noqa: ANN001
+        """Speech/emotion owns head + antennas only, with slow non-overlapping
+        goto commands. No body_yaw is sent from this path."""
+        now = time.monotonic()
+        if self._playing or (now - self._last_move_start) < 0.25:
             return
-        logger.info("presence -> official move '%s'", name)
+        scale = 1.0
+        if any(word in label for word in ("excited", "happy", "surprised", "dance")):
+            scale = 1.1
+        yaw = random.uniform(1.8, _SPEECH_HEAD_YAW_DEG) * random.choice((-1.0, 1.0)) * scale
+        pitch = random.uniform(-_SPEECH_HEAD_PITCH_DEG, _SPEECH_HEAD_PITCH_DEG) * scale
+        roll = random.uniform(1.8, _SPEECH_HEAD_ROLL_DEG) * random.choice((-1.0, 1.0)) * scale
+        duration = random.uniform(_SPEECH_STEP_MIN_S, _SPEECH_STEP_MAX_S)
+        head = create_head_pose(
+            z=random.uniform(16.0, 18.0),
+            yaw=yaw,
+            pitch=pitch,
+            roll=roll,
+            mm=True,
+            degrees=True,
+        )
+        antennas = [
+            random.uniform(0.10, _SPEECH_ANTENNA_RAD) * random.choice((-1.0, 1.0)),
+            random.uniform(0.10, _SPEECH_ANTENNA_RAD) * random.choice((-1.0, 1.0)),
+        ]
         try:
+            if not self._ensure_motors_enabled():
+                return
             self._playing = True
-            self._last_move_start = time.monotonic()
-            self.reachy.play_move(move, initial_goto_duration=0.4, sound=False)
-        except ConnectionError:  # daemon link dropped — pause, don't flood
+            self._last_move_start = now
+            self.reachy.goto_target(head=head, antennas=antennas, duration=duration)
+            self._sent_head = self._sent_ant = None
+            self._last_speech_step = now
+            self._next_speech_step = now + duration
+        except Exception:  # noqa: BLE001
             self._mark_link_down()
-        except Exception:  # noqa: BLE001 — cancelled (someone spoke) or error
-            logger.debug("presence move '%s' interrupted/failed", name, exc_info=True)
         finally:
             self._playing = False
-            # the move repositioned the robot — force the next ambient send
-            self._sent_head = self._sent_body = self._sent_ant = None
-
-    def _tick_ambient(self, create_head_pose, gentle: bool = False) -> None:  # noqa: ANN001
-        t = time.monotonic() - self._t0
-        # No always-on breathing: the head rests at neutral unless it's speaking
-        # (wobble) or following a visitor (gaze). Keeps servos quiet when idle.
-        yaw = pitch = roll = 0.0
-        # speech wobble — scales with live TTS loudness. Skipped in gentle mode
-        # (listening) so the only motion is the slow gaze track.
-        if not gentle and self.audio is not None:
-            try:
-                rms = float(self.audio.play_rms())
-            except Exception:  # noqa: BLE001
-                rms = 0.0
-            if rms > 0.01:
-                amp = min(1.0, rms * 6.0)
-                roll += amp * 4.0 * math.sin(t * 3.0)
-                pitch += amp * 3.0 * math.sin(t * 5.0 + 0.5)
-                yaw += amp * 2.0 * math.sin(t * 2.0)
-        # gaze: ease toward the tracked visitor (or back to centre). Gentle mode
-        # (listening) eases slower → slower servos → quieter mic.
-        ga = 0.05 if gentle else 0.12
-        gtgt = self._gaze_target or (0.0, 0.0)
-        self._gaze_cur[0] += ga * (gtgt[0] - self._gaze_cur[0])
-        self._gaze_cur[1] += ga * (gtgt[1] - self._gaze_cur[1])
-        # Horizontal aim is SHARED: the head turns first (up to its share, so it
-        # visibly "looks" at you), the body carries the remainder. Total facing =
-        # head_yaw + body_yaw = the desired aim — a natural head-leads-body turn.
-        gh = self._gaze_cur[0]
-        head_share = max(-_HEAD_YAW_SHARE_DEG, min(_HEAD_YAW_SHARE_DEG, gh))
-        yaw += head_share
-        body_yaw = gh - head_share
-        pitch += self._gaze_cur[1]
-        # clamp to a safe envelope
-        yaw = max(-20.0, min(20.0, yaw))
-        pitch = max(-20.0, min(20.0, pitch))
-        roll = max(-16.0, min(16.0, roll))
-        body_yaw = max(-40.0, min(40.0, body_yaw))
-        # HARD SAFETY: slew-limit every target so no single tick slams a motor.
-        # Gentle mode (listening) halves the step → slower, quieter servos.
-        hstep = _MAX_HEAD_STEP_DEG * (0.5 if gentle else 1.0)
-        bstep = _MAX_BODY_STEP_DEG * (0.5 if gentle else 1.0)
-        self._cmd_yaw = _slew(self._cmd_yaw, yaw, hstep)
-        self._cmd_pitch = _slew(self._cmd_pitch, pitch, hstep)
-        self._cmd_roll = _slew(self._cmd_roll, roll, hstep)
-        self._cmd_body = _slew(self._cmd_body, body_yaw, bstep)
-        # Deadband-gated drive: only send targets that meaningfully changed since
-        # the last send. Cuts serial-bus traffic ~10x when idle (the main lever
-        # against motor-comms errors) without affecting visible motion. Uses the
-        # same separate calls async_play_move relies on (proven to actuate).
-        head = (self._cmd_yaw, self._cmd_pitch, self._cmd_roll)
-        ant = _REST_ANTENNAS  # fixed relaxed pose; the deadband sends it once
-        try:
-            if self._sent_head is None or _max_delta(head, self._sent_head) >= _SEND_DEADBAND_DEG:
-                self.reachy.set_target_head_pose(
-                    create_head_pose(yaw=head[0], pitch=head[1], roll=head[2], degrees=True)
-                )
-                self._sent_head = head
-            if self._sent_body is None or abs(self._cmd_body - self._sent_body) >= _SEND_DEADBAND_DEG:
-                self.reachy.set_target_body_yaw(math.radians(self._cmd_body))
-                self._sent_body = self._cmd_body
-            if self._sent_ant is None or _max_delta(ant, self._sent_ant) >= _SEND_DEADBAND_ANT_RAD:
-                self.reachy.set_target_antenna_joint_positions(ant)
-                self._sent_ant = ant
-        except Exception:  # noqa: BLE001 — link loss; pause (don't flood)
-            self._mark_link_down()
 
 
     def _run_command(self, cmd: tuple[str, tuple]) -> None:
@@ -567,6 +485,8 @@ class MotionController:
         except Exception:  # noqa: BLE001
             create_head_pose = None
         try:
+            if not self._ensure_motors_enabled():
+                return
             self._playing = True
             self._last_move_start = time.monotonic()
             if kind == "head" and create_head_pose is not None:
@@ -585,12 +505,14 @@ class MotionController:
                 )
             elif kind == "dance":
                 (name,) = args
-                move = self._resolve(name)
-                if move is None:
-                    logger.info("tool dance '%s' -> no library move; skipped", name)
+                logger.info("tool dance '%s' -> safe head/antenna steps", name)
+                if create_head_pose is None:
                     return
-                logger.info("tool dance -> official move '%s'", name)
-                self.reachy.play_move(move, initial_goto_duration=0.4, sound=False)
+                for _ in range(3):
+                    if self._stop.is_set():
+                        break
+                    self._speech_goto_step(create_head_pose, label=f"dance:{name}")
+                    time.sleep(random.uniform(_SPEECH_STEP_MIN_S, _SPEECH_STEP_MAX_S))
         except ConnectionError:
             self._mark_link_down()
         except Exception:  # noqa: BLE001 — cancelled or playback error
@@ -600,32 +522,16 @@ class MotionController:
             self._sent_head = self._sent_body = self._sent_ant = None
 
     def _run_expression(self, emotion: str) -> None:
-        name = self._pick_move(emotion)
-        if name is not None:
-            move = self._resolve(name)
-            if move is not None:
-                logger.info("emotion [%s] -> official move '%s'", emotion, name)
-                try:
-                    self._playing = True
-                    self._last_move_start = time.monotonic()
-                    # sound=False: the daemon's audio path would fight our duplex
-                    # stream on the same USB card. initial_goto eases in from the
-                    # current ambient pose so there's no snap.
-                    self.reachy.play_move(move, initial_goto_duration=0.3, sound=False)
-                    return
-                except ConnectionError:  # daemon link dropped — pause, don't flood
-                    self._mark_link_down()
-                    return
-                except Exception:  # noqa: BLE001 — cancelled or playback error
-                    logger.debug("official move '%s' interrupted/failed", name, exc_info=True)
-                    return
-                finally:
-                    self._playing = False
-                    # the move repositioned the robot — force the next ambient send
-                    self._sent_head = self._sent_body = self._sent_ant = None
-        # fallback: antenna wag
-        logger.info("emotion [%s] -> antenna wag (no official move)", emotion)
-        self._wag()
+        try:
+            from reachy_mini.utils import create_head_pose
+        except Exception:  # noqa: BLE001
+            create_head_pose = None
+        if create_head_pose is None:
+            logger.info("emotion [%s] -> antenna wag (no head pose helper)", emotion)
+            self._wag()
+            return
+        logger.info("emotion [%s] -> safe speech head/antenna step", emotion)
+        self._speech_goto_step(create_head_pose, label=emotion)
 
     def _wag(self) -> None:
         center, amp, freq, phase, dur = _WAG

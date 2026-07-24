@@ -23,7 +23,7 @@ from fastapi import Body, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from reachy_mini import ReachyMini, ReachyMiniApp
 
-from reachy_voice import overrides, tier_a
+from reachy_voice import overrides, speech_runtime, tier_a
 from reachy_voice.config import load_config
 from reachy_voice.conversation import ConversationEngine
 from reachy_voice.dashboard import DashboardHub
@@ -155,6 +155,17 @@ class ReachyVoiceApp(ReachyMiniApp):
             except Exception as e:  # noqa: BLE001 — report back to the UI
                 return {"error": str(e)}
 
+        @self.settings_app.get("/api/speech/provider")
+        def get_speech_provider() -> dict:
+            return speech_runtime.read_settings()
+
+        @self.settings_app.post("/api/speech/provider")
+        def set_speech_provider(payload: dict = Body(...)) -> dict:
+            try:
+                return speech_runtime.save_settings(payload)
+            except Exception as e:  # noqa: BLE001
+                return {"error": str(e)}
+
         # ── live dashboard feed (bidirectional): broadcast events out, AND
         #    handle control messages in (set_volume / get_volume) ──
         @self.settings_app.websocket("/ws")
@@ -216,6 +227,9 @@ class ReachyVoiceApp(ReachyMiniApp):
                         await ws.send_json(
                             {"type": "history", "turns": overrides.read_history(self._engine)}
                         )
+                    elif kind == "set_vlm":
+                        enabled = bool(data.get("enabled", True))
+                        self._hub.publish({"type": "vlm_state", "enabled": enabled})
                     elif kind == "get_conversation_language":
                         await ws.send_json(self._language_msg())
                     elif kind == "set_conversation_language":
@@ -293,8 +307,6 @@ class ReachyVoiceApp(ReachyMiniApp):
                 return {"error": "engine not ready"}
             return {
                 "conv_state": m._conv_state,
-                "gaze_target": m._gaze_target,
-                "gaze_cur": [round(v, 2) for v in m._gaze_cur],
                 "cmd_deg": [round(m._cmd_yaw, 2), round(m._cmd_pitch, 2),
                             round(m._cmd_roll, 2), round(m._cmd_body, 2)],
                 "playing": m._playing,
@@ -318,14 +330,6 @@ class ReachyVoiceApp(ReachyMiniApp):
             m.play_emotion(emotion)
             return {"emotion": emotion}
 
-        @self.settings_app.post("/debug/gaze")
-        def debug_gaze(yaw: float = Body(...), pitch: float = Body(0.0)) -> dict:
-            m = _motion()
-            if m is None:
-                return {"error": "engine not ready"}
-            m.set_gaze(yaw, pitch)
-            return {"gaze": [yaw, pitch]}
-
         @self.settings_app.post("/debug/say")
         def debug_say(text: str = Body(..., embed=True)) -> dict:
             # Inject text straight into the SLV TTS (makes the robot speak) so we
@@ -347,37 +351,14 @@ class ReachyVoiceApp(ReachyMiniApp):
             except Exception as e:  # noqa: BLE001
                 return {"error": str(e)}
 
-        @self.settings_app.post("/debug/face")
-        def debug_face(cx: float = Body(...), cy: float = Body(0.5),
-                       area: float = Body(0.05)) -> dict:
-            # Inject a synthetic face into the attention tracker → exercises the
-            # full vision→attention(lock/smooth/gate)→SDK-gaze→motion path with
-            # no real person. Call repeatedly to simulate a present face.
-            eng = self._engine
-            att = getattr(eng, "_attention", None) if eng is not None else None
-            if att is None:
-                return {"error": "attention not active"}
-            h = (max(area, 1e-4) ** 0.5) / 2.0
-            att.update([{
-                "bbox": [cx - h, cy - h, cx + h, cy + h],
-                "identity": None, "emotion": "neutral",
-            }])
-            m = getattr(eng, "_motion", None)
-            return {"injected": {"cx": cx, "cy": cy, "area": area},
-                    "gaze_target": m._gaze_target if m is not None else None}
-
         @self.settings_app.get("/debug/vision")
         def debug_vision() -> dict:
-            # What vision sees right now + whether a face is close enough to be
-            # tracked + what gaze the attention layer is driving. Tells us if
-            # "not following" is a no-face problem vs a motion problem.
+            # What vision sees right now. Vision is dashboard-only; it no
+            # longer feeds attention/gaze or drives motors.
             eng = self._engine
             if eng is None:
                 return {"error": "engine not ready"}
             vision = getattr(eng, "_vision", None)
-            motion = getattr(eng, "_motion", None)
-            cfg = getattr(eng, "config", None)
-            min_area = getattr(cfg, "attention_min_area", 0.018)
             faces = []
             for f in (vision.snapshot() if vision is not None else []):
                 b = f.get("bbox")
@@ -385,17 +366,14 @@ class ReachyVoiceApp(ReachyMiniApp):
                     area = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
                     faces.append({
                         "area": round(area, 4),
-                        "close_enough": area >= min_area,
                         "center": [round((b[0] + b[2]) / 2, 2), round((b[1] + b[3]) / 2, 2)],
                         "id": f.get("identity"),
-                        "emotion": f.get("emotion"),
                     })
             return {
                 "vision_fresh": bool(vision.faces_fresh()) if vision is not None else False,
                 "faces_seen": len(faces),
                 "faces": faces,
-                "min_area_gate": min_area,
-                "gaze_target": motion._gaze_target if motion is not None else None,
+                "motor_control": "disabled",
             }
 
     async def _restart_services(self) -> None:
@@ -454,10 +432,11 @@ class ReachyVoiceApp(ReachyMiniApp):
                 "ollama_model": getattr(cfg, "edge_llm_model", ""),
                 "ollama_url": getattr(cfg, "edge_llm_url", ""),
                 "silero_threshold": overrides.read_vad(eng),
-                "vlm_enabled": False,
+                "vlm_enabled": True,
                 "barge_in_enabled": overrides.read_bargein(eng),
                 "capture_count": 0,
             },
+            {"type": "speech_provider", **speech_runtime.read_settings()},
             {"type": "history", "turns": overrides.read_history(eng)},
             {"type": "volume", "volume": get_volume()},  # real speaker volume
         ]

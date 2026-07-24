@@ -20,11 +20,15 @@ import yaml
 class Config:
     # ── SLV V2V engine (streaming ASR + TTS over WebSocket) ──────────
     v2v_url: str = "ws://localhost:8621/v2v/stream"
-    # Canonical Realtime V2 server-loop.  The gateway owns the local/cloud
-    # provider and the LLM/tool loop; Reachy remains a provider-neutral device
-    # client.  Disable only as a temporary fallback to the legacy client-loop.
-    server_loop: bool = True
+    # Local default: Reachy owns the LLM text stream and sanitizes it before TTS.
+    # Server-loop can be re-enabled for providers that support clean tool calls,
+    # but the current local Jetson image can leak control text into speech.
+    server_loop: bool = False
     realtime_protocol_version: int = 2
+    # Local edge-llm currently cannot render OpenAI tool schemas for this model
+    # image, returning tools_render_failed and dropping otherwise valid ASR
+    # turns. Keep tools opt-in until the local model image supports schemas.
+    tools_enabled: bool = False
     # Locked exhibition language: "zh" or "en". Drives ASR + TTS + a hard
     # "reply only in <language>" prompt instruction. Switchable at runtime via
     # the settings UI / POST /language. Deliberately NOT "auto": a curated
@@ -42,8 +46,11 @@ class Config:
     session_max_input_tokens: int = 3500
     # Reset the conversation after this many seconds of no user speech, so each
     # visitor starts with a fresh (small → warm → <1s) context. 0 disables.
-    # Keeps the always-on / open-mic UX (no wake word).
     session_reset_idle_s: float = 90.0
+    # Wake gate. Empty disables the gate; default requires "你好 mini" before
+    # a visitor turn is allowed to reach the model.
+    wake_word: str = "你好mini"
+    wake_session_timeout_s: float = 18.0
 
     # ── Audio ────────────────────────────────────────────────────────
     # NB trailing colon: the Reachy camera re-enumerates its own
@@ -77,23 +84,9 @@ class Config:
     # ── Vision (remote face/emotion tracker, separate container) ─────
     vision_url: str = "tcp://127.0.0.1:8631"            # ZMQ PUB (faces/emotions)
     vision_mjpeg: str = "http://127.0.0.1:8630/stream"  # camera MJPEG (dashboard)
-
-    # ── Attention & gaze (Wave B) ────────────────────────────────────
-    # The robot follows + engages a visitor who comes CLOSE and lingers — not
-    # someone merely walking past. "Close" = face bbox covering at least this
-    # fraction of the frame; "lingers" = present continuously for stable_s.
-    attention_enabled: bool = True
-    attention_min_area: float = 0.018   # face bbox area / frame area to count as "close"
-    #   calibrated on the robot: passer-by faces ≈0.007, a visitor at interaction
-    #   distance ≈0.025-0.033 — 0.018 splits them.
-    attention_stable_s: float = 1.2     # must stay this long before we engage (greet)
-    attention_cooldown_s: float = 15.0  # don't re-greet the same lingering visitor
-    gaze_max_yaw: float = 35.0          # deg of body turn at the image edge (slew-limited for safety)
-    gaze_max_pitch: float = 20.0        # deg of head pitch at the image edge
-    gaze_lost_s: float = 3.5            # HOLD aim this long through detection gaps, then re-center
-    gaze_deadzone: float = 0.03         # ignore tiny off-centre (normalised) to avoid jitter
-    gaze_invert_x: bool = False         # flip if the head turns away from the visitor
-    gaze_invert_y: bool = False
+    vlm_base_url: str = "http://localhost:11435/v1"
+    vlm_model: str = "Qwen/Qwen3-4B-AWQ"
+    vlm_timeout_s: float = 20.0
 
     # ── Conversation profile (prompts/tools live as data files) ──────
     profile: str = "exhibition"
@@ -116,6 +109,7 @@ _ENV = {
     "v2v_url": "REACHY_V2V_URL",
     "server_loop": "REACHY_SERVER_LOOP",
     "realtime_protocol_version": "REACHY_REALTIME_PROTOCOL_VERSION",
+    "tools_enabled": "REACHY_TOOLS_ENABLED",
     "edge_llm_url": "REACHY_EDGE_LLM_URL",
     "edge_llm_model": "REACHY_EDGE_LLM_MODEL",
     "audio_device": "REACHY_AUDIO_DEVICE",
@@ -123,14 +117,13 @@ _ENV = {
     "tts_speed": "REACHY_TTS_SPEED",
     "session_max_input_tokens": "REACHY_SESSION_MAX_INPUT_TOKENS",
     "session_reset_idle_s": "REACHY_SESSION_RESET_IDLE_S",
+    "wake_word": "REACHY_WAKE_WORD",
+    "wake_session_timeout_s": "REACHY_WAKE_SESSION_TIMEOUT_S",
+    "vlm_base_url": "REACHY_VLM_BASE_URL",
+    "vlm_model": "REACHY_VLM_MODEL",
+    "vlm_timeout_s": "REACHY_VLM_TIMEOUT_S",
     "profile": "REACHY_PROFILE",
     "language": "REACHY_LANGUAGE",
-    # attention/gaze tunables — handy to adjust on the robot without a rebuild
-    "attention_enabled": "REACHY_ATTENTION_ENABLED",
-    "attention_min_area": "REACHY_ATTENTION_MIN_AREA",
-    "gaze_max_yaw": "REACHY_GAZE_MAX_YAW",
-    "gaze_invert_x": "REACHY_GAZE_INVERT_X",
-    "gaze_invert_y": "REACHY_GAZE_INVERT_Y",
 }
 
 

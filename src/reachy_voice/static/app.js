@@ -58,6 +58,7 @@ let modelFetchPending = false;
 let lastModelFetchUrl = '';
 let lastModelFetchTime = 0;
 const defaultOllamaModels = ["qwen3.5:0.8b", "qwen3.5:2b-q4_K_M", "qwen3.5:4b"];
+let speechProvider = null;
 
 function updateModelSelect(models) {
     const el = document.getElementById('ollama-model');
@@ -91,6 +92,80 @@ async function fetchOllamaModels(baseUrl, force) {
         updateModelSelect(defaultOllamaModels);
     } finally {
         modelFetchPending = false;
+    }
+}
+
+function updateSpeechProviderVisibility() {
+    const modeEl = document.getElementById('speech-mode');
+    const fields = document.getElementById('speech-online-fields');
+    const online = modeEl && modeEl.value === 'online';
+    if (fields) fields.style.display = online ? '' : 'none';
+}
+
+function syncSpeechProviderUI(data) {
+    speechProvider = data || speechProvider || {};
+    const modeEl = document.getElementById('speech-mode');
+    const urlEl = document.getElementById('speech-qwen-url');
+    const modelEl = document.getElementById('speech-qwen-model');
+    const voiceEl = document.getElementById('speech-qwen-voice');
+    const compatEl = document.getElementById('speech-qwen-compat-url');
+    const visionModelEl = document.getElementById('speech-qwen-vision-model');
+    const keyEl = document.getElementById('speech-api-key');
+    const statusEl = document.getElementById('speech-provider-status');
+    if (modeEl && speechProvider.mode) modeEl.value = speechProvider.mode;
+    if (urlEl && speechProvider.qwen_url) urlEl.value = speechProvider.qwen_url;
+    if (modelEl && speechProvider.qwen_model) modelEl.value = speechProvider.qwen_model;
+    if (voiceEl && speechProvider.qwen_voice) voiceEl.value = speechProvider.qwen_voice;
+    if (compatEl && speechProvider.qwen_compat_url) compatEl.value = speechProvider.qwen_compat_url;
+    if (visionModelEl && speechProvider.qwen_vision_model) visionModelEl.value = speechProvider.qwen_vision_model;
+    if (keyEl) keyEl.value = '';
+    updateSpeechProviderVisibility();
+    if (statusEl) {
+        const mode = speechProvider.mode === 'online'
+            ? t('speechProvider.online')
+            : t('speechProvider.local');
+        const key = speechProvider.api_key_present
+            ? t('speechProvider.keySaved')
+            : t('speechProvider.keyMissing');
+        const restart = speechProvider.restart_required
+            ? ` · ${t('speechProvider.restartRequired')}`
+            : '';
+        statusEl.textContent = `${t('speechProvider.current', { mode })} · ${key}${restart}`;
+    }
+}
+
+async function loadSpeechProvider() {
+    try {
+        const res = await fetch('/api/speech/provider');
+        syncSpeechProviderUI(await res.json());
+    } catch (e) {
+        showToast(t('speechProvider.loadFailed'), true);
+    }
+}
+
+async function saveSpeechProvider() {
+    const modeEl = document.getElementById('speech-mode');
+    const payload = {
+        mode: modeEl ? modeEl.value : 'local',
+        qwen_url: document.getElementById('speech-qwen-url')?.value || '',
+        qwen_model: document.getElementById('speech-qwen-model')?.value || '',
+        qwen_voice: document.getElementById('speech-qwen-voice')?.value || '',
+        qwen_compat_url: document.getElementById('speech-qwen-compat-url')?.value || '',
+        qwen_vision_model: document.getElementById('speech-qwen-vision-model')?.value || '',
+        api_key: document.getElementById('speech-api-key')?.value || '',
+    };
+    try {
+        const res = await fetch('/api/speech/provider', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        syncSpeechProviderUI(data);
+        showToast(t('speechProvider.saved'));
+    } catch (e) {
+        showToast(`${t('speechProvider.saveFailed')}: ${e.message || e}`, true);
     }
 }
 
@@ -341,6 +416,10 @@ function handleDashboardMsg(msg) {
             syncLlmUI(msg.backend, msg.model, msg.ollama_url, msg.gateway_host, msg.gateway_port);
             break;
 
+        case 'speech_provider':
+            syncSpeechProviderUI(msg);
+            break;
+
         case 'volume':
             setVolumeUI(msg.volume);
             isMuted = msg.volume === 0;
@@ -445,6 +524,12 @@ function resetAsrIdleTimer() {
 
 // ── Emotion display (center column) ─────────────────────────────────
 function updateEmotionDisplay() {
+    emotionPill.textContent = t('emotion.disabled');
+    emotionLabel.textContent = t('emotionLabel.disabled');
+    emotionPill.style.borderColor = EMOTION_COLORS.neutral;
+    emotionPill.style.color = EMOTION_COLORS.neutral;
+    return;
+
     // Use vision_faces from dashboard WS, or fall back to direct vision WS data
     const faces = (latestVisionFaces && latestVisionFaces.length > 0)
         ? latestVisionFaces
@@ -746,7 +831,7 @@ function drawOverlay() {
 
     for (const face of latestFaces) {
         const [x1, y1, x2, y2] = face.bbox;
-        const color = EMOTION_COLORS[face.emotion] || '#3498db';
+        const color = face.emotion ? (EMOTION_COLORS[face.emotion] || '#3498db') : '#8BC34A';
 
         const bx = ox + x1 * cw;
         const by = oy + y1 * ch;
@@ -792,30 +877,31 @@ function drawOverlay() {
             ctx.fillText(identity, idX + 6, idY + 13);
         }
 
-        // Emotion pill below bbox
-        const emotion = face.emotion || 'neutral';
-        const conf = ((face.emotion_confidence || 0) * 100).toFixed(0);
-        const pillText = conf > 0 ? `${emotion} ${conf}%` : emotion;
-        ctx.font = 'bold 14px sans-serif';
-        const pillMetrics = ctx.measureText(pillText);
-        const pillW = pillMetrics.width + 20;
-        const pillH = 24;
-        const pillX = bx + (bw - pillW) / 2;
-        let pillY = by + bh + 6;
-        if (pillY + pillH > oy + ch - 4) pillY = by + bh - pillH - 4;
+        if (face.emotion) {
+            const emotion = face.emotion;
+            const conf = ((face.emotion_confidence || 0) * 100).toFixed(0);
+            const pillText = conf > 0 ? `${emotion} ${conf}%` : emotion;
+            ctx.font = 'bold 14px sans-serif';
+            const pillMetrics = ctx.measureText(pillText);
+            const pillW = pillMetrics.width + 20;
+            const pillH = 24;
+            const pillX = bx + (bw - pillW) / 2;
+            let pillY = by + bh + 6;
+            if (pillY + pillH > oy + ch - 4) pillY = by + bh - pillH - 4;
 
-        ctx.globalAlpha = 0.7;
-        ctx.fillStyle = hexToRgba(color, 0.25);
-        roundRect(ctx, pillX, pillY, pillW, pillH, 10);
-        ctx.fill();
-        ctx.strokeStyle = hexToRgba(color, 0.5);
-        ctx.lineWidth = 1;
-        roundRect(ctx, pillX, pillY, pillW, pillH, 10);
-        ctx.stroke();
+            ctx.globalAlpha = 0.7;
+            ctx.fillStyle = hexToRgba(color, 0.25);
+            roundRect(ctx, pillX, pillY, pillW, pillH, 10);
+            ctx.fill();
+            ctx.strokeStyle = hexToRgba(color, 0.5);
+            ctx.lineWidth = 1;
+            roundRect(ctx, pillX, pillY, pillW, pillH, 10);
+            ctx.stroke();
 
-        ctx.globalAlpha = 1.0;
-        ctx.fillStyle = color;
-        ctx.fillText(pillText, pillX + 10, pillY + 17);
+            ctx.globalAlpha = 1.0;
+            ctx.fillStyle = color;
+            ctx.fillText(pillText, pillX + 10, pillY + 17);
+        }
 
         // Landmarks
         if (face.landmarks) {
@@ -942,6 +1028,7 @@ function initSettings() {
     document.getElementById('settings-open').onclick = () => {
         overlay.classList.add('open');
         loadFaces();
+        loadSpeechProvider();
         if (window.bindRestSettings) window.bindRestSettings();
         if (dashboardWs && dashboardWs.readyState === 1) {
             dashboardWs.send(JSON.stringify({ type: 'get_volume' }));
@@ -965,6 +1052,7 @@ function initSettings() {
             document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
             if (tab.dataset.tab === 'faces') loadCaptureInfo();
             if (tab.dataset.tab === 'detail') {
+                loadSpeechProvider();
                 if (dashboardWs && dashboardWs.readyState === 1) {
                     dashboardWs.send(JSON.stringify({ type: 'get_voice' }));
                     dashboardWs.send(JSON.stringify({ type: 'get_motor' }));
@@ -1019,6 +1107,11 @@ function initSettings() {
             showToast(t('conversationLanguage.applying'));
         };
     }
+
+    const speechMode = document.getElementById('speech-mode');
+    if (speechMode) speechMode.onchange = updateSpeechProviderVisibility;
+    const applySpeechProviderBtn = document.getElementById('apply-speech-provider-btn');
+    if (applySpeechProviderBtn) applySpeechProviderBtn.onclick = saveSpeechProvider;
 
     // LLM backend/model selection
     const llmBackend = document.getElementById('llm-backend');

@@ -20,8 +20,10 @@ services:
     image: sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:v0.9.0-ondemand-20260721c
     runtime: nvidia
     ipc: host
-    ports:
-      - "8621:8000"
+    network_mode: host
+    env_file:
+      - path: ${REACHY_VOICE_HOST_DATA_DIR:-/home/recomputer/reachy-voice-data}/speech.env
+        required: false
     environment:
       - OVS_PROFILE=${OVS_PROFILE:-jetson-edgellm-v090-moss}
       - OVS_PROFILE_JSON=${OVS_PROFILE_JSON:-}
@@ -34,7 +36,7 @@ services:
       # (bridge → http://172.17.0.1:11435/v1, host-net → http://localhost:11435/v1).
       - OVS_V2V_ENGINE=${OVS_V2V_ENGINE:-voxedge}
       - OVS_V2V_SERVER_LOOP=${OVS_V2V_SERVER_LOOP:-1}
-      - EDGE_LLM_BASE_URL=${EDGE_LLM_BASE_URL:-http://172.17.0.1:11435/v1}
+      - EDGE_LLM_BASE_URL=${EDGE_LLM_BASE_URL:-http://localhost:11435/v1}
       - EDGE_LLM_MODEL=${EDGE_LLM_MODEL:-Qwen/Qwen3-4B-AWQ}
       # SLV runs bridge-net here, so host calls are not loopback → admin key
       # is required for the gateway's own control calls.

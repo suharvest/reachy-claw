@@ -1,17 +1,15 @@
-"""Vision client — consumes the vision-trt face/emotion stream over ZMQ.
+"""Vision client — consumes the vision-trt face stream over ZMQ.
 
-vision-trt (separate container) detects faces + emotions and publishes
+vision-trt (separate container) detects faces and publishes
 msgpack messages on a ZMQ PUB socket (topic ``vision``). This client keeps the
 latest snapshot and provides:
 
-  * ``faces_context()`` — the ``[Faces: …]`` text injected into the LLM prompt
-    (same format as the old reachy-claw, e.g. "Alice looks happy, a stranger").
+  * ``faces_context()`` — the ``[Faces: …]`` text injected into the LLM prompt.
   * a listener callback per message — the dashboard pushes face boxes live.
 
 Message schema (from vision-trt):
   {"timestamp": float, "frame_id": int,
-   "faces": [{"bbox":[x1,y1,x2,y2] normalized, "emotion": "Happiness",
-              "emotion_confidence": float, "identity": str|None, ...}, ...]}
+   "faces": [{"bbox":[x1,y1,x2,y2] normalized, "identity": str|None, ...}, ...]}
 """
 
 from __future__ import annotations
@@ -23,13 +21,6 @@ from typing import Callable
 
 logger = logging.getLogger("reachy_voice.vision")
 
-# HSEmotion labels → our emotion slugs (same remap as the old app)
-_EMOTION_REMAP = {
-    "Anger": "angry", "Contempt": "angry", "Disgust": "angry",
-    "Fear": "fear", "Happiness": "happy", "Neutral": "neutral",
-    "Sadness": "sad", "Surprise": "surprised",
-}
-
 FACE_FRESH_S = 2.0  # snapshot older than this counts as "no faces"
 
 
@@ -39,7 +30,7 @@ class VisionClient:
         self._thread: threading.Thread | None = None
         self._running = False
         self._lock = threading.Lock()
-        self._faces: list[dict] = []      # latest [{identity, emotion, bbox, conf}]
+        self._faces: list[dict] = []      # latest [{identity, bbox, conf}]
         self._last_time = 0.0
         self._listener: Callable[[dict], None] | None = None
 
@@ -75,21 +66,19 @@ class VisionClient:
             return list(self._faces) if self.faces_fresh() else []
 
     def faces_context(self) -> str:
-        """'[Faces: …]' body — '' when nobody is visible. Same wording as the
-        old exhibition so the prompt examples keep working."""
+        """'[Faces: …]' body — '' when nobody is visible."""
         faces = self.snapshot()
         if not faces:
             return ""
-        named: dict[str, str] = {}
+        named: set[str] = set()
         strangers = 0
         for f in faces:
             name = f.get("identity")
-            emo = f.get("emotion", "neutral")
             if name:
-                named[name] = emo
+                named.add(str(name))
             else:
                 strangers += 1
-        descs = [f"{n} looks {e}" for n, e in named.items()]
+        descs = sorted(named)
         if strangers == 1:
             descs.append("a stranger")
         elif strangers > 1:
@@ -129,8 +118,6 @@ class VisionClient:
         faces = [
             {
                 "identity": f.get("identity"),
-                "emotion": _EMOTION_REMAP.get(f.get("emotion", ""), "neutral"),
-                "emotion_confidence": float(f.get("emotion_confidence", 0.0)),
                 "bbox": f.get("bbox"),
             }
             for f in faces_in[:5]

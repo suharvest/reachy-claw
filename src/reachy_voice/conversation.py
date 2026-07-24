@@ -19,18 +19,19 @@ import asyncio
 import logging
 import os
 import re
+import time
 from typing import Awaitable, Callable
 
 from ovs_agent.apps.companion_robot.app import CompanionRobotApp
 from ovs_agent.config import Config as OvsConfig
 
-from reachy_voice.attention import AttentionTracker
 from reachy_voice.audio import DuplexAudioIO
 from reachy_voice.config import Config
 from reachy_voice.dashboard import DashboardHub, DashboardPlugin
 from reachy_voice.motion import MotionController
 from reachy_voice.plugins import ReachyMotionToolsPlugin
 from reachy_voice.vision import VisionClient
+from reachy_voice.vision_analysis import VisionAnalysisError, describe_current_view
 
 logger = logging.getLogger("reachy_voice.conversation")
 
@@ -39,6 +40,46 @@ _TAG_RE = re.compile(r"\[([a-zA-Z_]+)\]")
 # LLMs sometimes echo it into their reply — strip it from TTS/history so it is
 # never spoken. NOT an emotion tag (it has a space/colon, so _TAG_RE misses it).
 _FACES_RE = re.compile(r"\[Faces:[^\]]*\]", re.IGNORECASE)
+_CONTROL_LINE_RE = re.compile(
+    r"(?im)^\s*(?:emotion|mood|action|gesture|play[_ -]?emotion|expression)\s*"
+    r"[:=：-]?\s*[a-z_ -]*\s*[.!?。！？,，;；]*\s*$"
+)
+_CONTROL_PREFIX_RE = re.compile(
+    r"(?is)^\s*(?:emotion|mood|action|gesture|play[_ -]?emotion|expression)\s*"
+    r"[:=：-]?\s*(?:happy|sad|neutral|excited|curious|surprised|angry|fearful|"
+    r"thinking|laugh(?:ing)?|smile|contemplative)?\s*[.!?。！？,，;；-]*\s*"
+)
+_BARE_EMOTION_WORD_RE = re.compile(
+    r"(?is)^\s*(?:happy|sad|neutral|excited|curious|surprised|angry|fearful|"
+    r"thinking|laugh(?:ing)?|smile|contemplative)\s*[.!?。！？,，;；-]*\s*"
+)
+_VISION_REQUEST_RE = re.compile(
+    r"(看(一下|看)?|拍(张|一张)?照|摄像头|你.*看.*到|看到.*什么|"
+    r"what.*(see|seeing)|take.*photo|camera)",
+    re.IGNORECASE,
+)
+_STOP_SPEAKING_RE = re.compile(r"(停止说话|不要说话|别说话|闭嘴|stop speaking|be quiet)", re.IGNORECASE)
+
+
+def _compact_text(text: str) -> str:
+    return re.sub(r"\s+", "", text).lower()
+
+
+def _strip_wake_word(text: str, wake_word: str) -> tuple[bool, str]:
+    """Return (woke, remainder), matching wake words despite spaces/case."""
+    if not wake_word:
+        return True, text
+    compact_wake = _compact_text(wake_word)
+    compact_text = _compact_text(text)
+    if compact_wake not in compact_text:
+        return False, text
+
+    # Also strip the common spaced/non-spaced surface forms for clean prompts.
+    variants = {wake_word, wake_word.replace(" ", ""), "你好mini", "你好 mini"}
+    remainder = text
+    for variant in variants:
+        remainder = re.sub(re.escape(variant), "", remainder, flags=re.IGNORECASE)
+    return True, remainder.strip(" ，,。.!！？?")
 
 
 class _TtsTagFilter:
@@ -51,9 +92,12 @@ class _TtsTagFilter:
         self,
         send_text: Callable[[str], Awaitable[None]],
         on_emotion: Callable[[str], None],
+        *,
+        emit_emotions: bool = False,
     ) -> None:
         self._send = send_text
         self._on_emotion = on_emotion
+        self._emit_emotions = emit_emotions
         self._buf = ""
 
     async def __call__(self, token: str) -> None:
@@ -66,18 +110,30 @@ class _TtsTagFilter:
             head, self._buf = self._buf, ""
 
         def _strip(m: re.Match) -> str:
-            try:
-                self._on_emotion(m.group(1).lower())
-            except Exception:  # noqa: BLE001 — motion must never break TTS
-                logger.debug("emotion callback failed", exc_info=True)
+            if self._emit_emotions:
+                try:
+                    self._on_emotion(m.group(1).lower())
+                except Exception:  # noqa: BLE001 — motion must never break TTS
+                    logger.debug("emotion callback failed", exc_info=True)
             return ""
 
-        # Drop any echoed [Faces: ...] vision-context tag silently (no emotion
-        # callback), THEN strip [emotion] tags (firing _on_emotion per tag).
+        # Drop any echoed [Faces: ...] context and naked control-text leaks
+        # before they reach TTS. The local model sometimes emits fragments like
+        # "Emotion happy" when tools are disabled; those are control metadata,
+        # never visitor-facing speech.
         head = _FACES_RE.sub("", head)
+        head = _CONTROL_LINE_RE.sub("", head)
+        head = _CONTROL_PREFIX_RE.sub("", head)
+        head = _BARE_EMOTION_WORD_RE.sub("", head)
         cleaned = _TAG_RE.sub(_strip, head)
         if cleaned:
             await self._send(cleaned)
+
+    async def flush(self) -> None:
+        if not self._buf:
+            return
+        tail, self._buf = self._buf, ""
+        await self(tail)
 
 SUPPORTED_LANGUAGES = ("zh", "en")
 
@@ -86,9 +142,8 @@ SUPPORTED_LANGUAGES = ("zh", "en")
 # one consistent language.
 _LANGUAGE_LOCK = {
     "zh": (
-        "Reply ONLY in Chinese (简体中文). Never switch languages, even if the "
-        "visitor speaks another language.\n"
-        'Example spoken reply: "欢迎，很高兴见到你。"'
+        "只能用简体中文回复。不要切换语言，即使访客使用其他语言。"
+        "只说一句面向访客的话，例如：欢迎，很高兴见到你。"
     ),
     "en": (
         "Reply ONLY in English. Never switch languages, even if the visitor "
@@ -97,11 +152,25 @@ _LANGUAGE_LOCK = {
     ),
 }
 
+_MOTION_TOOL_PROMPT = (
+    "Before each spoken reply, call play_emotion exactly once with the emotion "
+    "that best fits it. Never write bracketed emotion tags in the reply."
+)
+_NO_CONTROL_TEXT_PROMPT = (
+    "不要输出任何动作、表情、状态、工具、JSON、XML、方括号标签或英文控制前缀。"
+    "不要描述自己的表情。只输出一句可以直接说给访客听的中文。"
+)
+
 
 def build_system_prompt(cfg: Config) -> str:
     """Profile base prompt + the hard language-lock instruction."""
     lang = cfg.language if cfg.language in _LANGUAGE_LOCK else "zh"
-    return f"{cfg.system_prompt()}\n\n{_LANGUAGE_LOCK[lang]}"
+    motion_instruction = (
+        _MOTION_TOOL_PROMPT
+        if bool(getattr(cfg, "tools_enabled", False))
+        else _NO_CONTROL_TEXT_PROMPT
+    )
+    return f"{cfg.system_prompt()}\n{motion_instruction}\n\n{_LANGUAGE_LOCK[lang]}"
 
 
 class ReachyCompanionApp(CompanionRobotApp):
@@ -119,8 +188,61 @@ class ReachyCompanionApp(CompanionRobotApp):
     # ConversationEngine from cfg.session_reset_idle_s). 0 disables.
     session_reset_idle_s: float = 0.0
     _idle_reset_task: asyncio.Task | None = None
+    wake_word: str = ""
+    wake_session_timeout_s: float = 0.0
+    _awake_until: float = 0.0
+
+    def _is_awake(self) -> bool:
+        if not self.wake_word:
+            return True
+        return time.monotonic() < self._awake_until
+
+    def _mark_awake(self) -> None:
+        timeout = max(1.0, float(self.wake_session_timeout_s or 0.0))
+        self._awake_until = time.monotonic() + timeout
+
+    async def _speak_direct(self, text: str) -> None:
+        await self.slv.send_text(text)
+        flush = getattr(self.slv, "flush_tts", None)
+        if flush is not None:
+            await flush()
+
+    async def _handle_visual_request(self) -> bool:
+        try:
+            reply = await describe_current_view(self.reachy_config)
+        except VisionAnalysisError as exc:
+            logger.warning("visual analysis failed: %s", exc)
+            reply = "我现在还看不清楚画面，视觉分析服务可能没有准备好。"
+        await self._speak_direct(reply)
+        self._arm_session_idle_reset()
+        return True
 
     async def on_user_utterance(self, text: str, detected_language: str | None = None) -> None:
+        raw_text = (text or "").strip()
+        woke, stripped = _strip_wake_word(raw_text, self.wake_word)
+        if woke:
+            self._mark_awake()
+            raw_text = stripped or raw_text
+        elif not self._is_awake():
+            logger.info("ignoring utterance before wake word: %r", raw_text)
+            return
+        else:
+            self._mark_awake()
+
+        if _STOP_SPEAKING_RE.search(raw_text):
+            await self._speak_direct("好的。")
+            self._awake_until = 0.0
+            return
+
+        if not raw_text:
+            await self._speak_direct("我在。")
+            self._arm_session_idle_reset()
+            return
+
+        if _VISION_REQUEST_RE.search(raw_text):
+            await self._handle_visual_request()
+            return
+
         prompt = self.base_prompt or self.config.system_prompt
         if self.vision is not None:
             faces = self.vision.faces_context()
@@ -238,7 +360,7 @@ def build_ovs_config(cfg: Config) -> OvsConfig:
         default_mode="chat",
         server_loop=cfg.server_loop,
         realtime_protocol_version=cfg.realtime_protocol_version,
-        tools_enabled=True,
+        tools_enabled=bool(getattr(cfg, "tools_enabled", False)),
         tools_default_allowlist=[],
         tools_max_iterations=3,
         log_level="INFO",
@@ -265,30 +387,32 @@ class ConversationEngine:
         self._task: asyncio.Task | None = None
         self._motion = MotionController(reachy_mini)
         self._vision = VisionClient(config.vision_url)
-        self._attention: AttentionTracker | None = None
 
     def _on_emotion(self, emotion: str) -> None:
         """Emotion tag from the LLM → motion + dashboard."""
         self._motion.play_emotion(emotion)
         self.hub.publish({"type": "emotion", "emotion": emotion})
 
-    def _on_visitor_engaged(self) -> None:
-        """A visitor came close and lingered → greet them (once, then cooldown)."""
-        logger.info("visitor engaged — greeting")
-        self._motion.play_emotion("welcoming")
-        self.hub.publish({"type": "emotion", "emotion": "welcoming"})
-
     def _on_faces(self, payload: dict) -> None:
-        """Vision frame → dashboard boxes + attention/gaze (runs on the vision thread)."""
+        """Vision frame → dashboard boxes only.
+
+        Vision no longer drives motors: no person engagement, no gaze tracking,
+        and no automatic greeting. The camera stream remains available for the
+        dashboard and for explicit visual analysis requests.
+        """
         self.hub.publish({"type": "vision_faces", **payload})
-        if self._attention is not None:
-            self._attention.update(payload.get("faces") or [])
 
     async def start(self) -> None:
         ovs_cfg = build_ovs_config(self.config)
         self._app = ReachyCompanionApp(ovs_cfg)
+        if not bool(getattr(self.config, "tools_enabled", False)):
+            from ovs_agent.tools import ToolRegistry
+            self._app.tool_registry = ToolRegistry()
         # Hand the live robot handle to the app so motion can use it.
         self._app.reachy = self.reachy
+        self._app.reachy_config = self.config
+        self._app.wake_word = self.config.wake_word
+        self._app.wake_session_timeout_s = self.config.wake_session_timeout_s
         # Idle session-reset (fresh context per visitor; keeps open-mic UX).
         self._app.session_reset_idle_s = self.config.session_reset_idle_s
         # The Reachy USB sound card breaks if separate input+output streams are
@@ -313,52 +437,46 @@ class ConversationEngine:
             self._motion.start()
         else:
             logger.warning("MOTION DISABLED (kill-switch) — voice-only diagnostic mode")
-        # Legacy client-loop fallback may still emit old [emotion] tags.  A
-        # native speech-to-speech response cannot be filtered after synthesis,
-        # so Realtime V2 server-loop uses the structured play_emotion tool.
+        # Filter all model text before it reaches TTS. This is intentionally
+        # installed for client-loop mode, which we use on the local Jetson so
+        # no server-side generated control text can bypass the sanitizer.
         if not self._app.config.server_loop_enabled():
-            self._app.slv.send_text = _TtsTagFilter(
-                self._app.slv.send_text, self._on_emotion
+            tts_filter = _TtsTagFilter(
+                self._app.slv.send_text,
+                self._on_emotion,
+                emit_emotions=bool(getattr(self.config, "tools_enabled", False)),
             )
-        # Vision: faces → per-turn [Faces:] prompt context, dashboard boxes, and
-        # attention/gaze (follow + greet a close, lingering visitor).
+            original_flush_tts = self._app.slv.flush_tts
+
+            async def _flush_tts() -> None:
+                await tts_filter.flush()
+                await original_flush_tts()
+
+            self._app.slv.send_text = tts_filter
+            self._app.slv.flush_tts = _flush_tts
+        # Vision: publish face telemetry to the dashboard only. It must not
+        # drive motors or inject person identity into turns.
         self._app.base_prompt = build_system_prompt(self.config)
         if self._vision.start():
-            self._app.vision = self._vision
-            if getattr(self.config, "attention_enabled", True):
-                from reachy_voice.gaze import FaceGaze
-
-                fg = FaceGaze()  # SDK-calibrated face→yaw/pitch (Lite camera)
-                self._attention = AttentionTracker(
-                    on_gaze=self._motion.set_gaze,
-                    on_engage=self._on_visitor_engaged,
-                    min_area=self.config.attention_min_area,
-                    stable_s=self.config.attention_stable_s,
-                    cooldown_s=self.config.attention_cooldown_s,
-                    max_yaw=self.config.gaze_max_yaw,
-                    max_pitch=self.config.gaze_max_pitch,
-                    lost_s=self.config.gaze_lost_s,
-                    deadzone=self.config.gaze_deadzone,
-                    invert_x=self.config.gaze_invert_x,
-                    invert_y=self.config.gaze_invert_y,
-                    gaze_fn=fg.yaw_pitch if fg.ok else None,
-                )
             self._vision.set_listener(self._on_faces)
         # Conversation feed → dashboard (ASR/LLM/state events) AND → motion, so
         # motion freezes while listening (keeps the mic free of servo noise).
         self._app.register(
             DashboardPlugin(self._app, self.hub, on_state=self._motion.set_conv_state)
         )
-        # Local motion tools (move_head/move_antennas/play_emotion/dance):
-        # register BEFORE _app.run() so the tools are on the registry before the
-        # first turn. Bodies dispatch into the single-writer compositor.
-        self._app.register(
-            ReachyMotionToolsPlugin(
-                self._app,
-                motion=self._motion,
-                on_emotion=self._on_emotion,
+        # Local edge-llm on this image currently 500s when OpenAI tool schemas
+        # are present (tools_render_failed). Keep motion tools opt-in so normal
+        # voice replies work in the default local mode.
+        if bool(getattr(self.config, "tools_enabled", False)):
+            self._app.register(
+                ReachyMotionToolsPlugin(
+                    self._app,
+                    motion=self._motion,
+                    on_emotion=self._on_emotion,
+                )
             )
-        )
+        else:
+            logger.info("motion tools disabled; not advertising tool schemas")
         logger.info(
             "Starting conversation: SLV=%s  LLM=%s (%s)",
             ovs_cfg.slv_url, ovs_cfg.llm_base_url, ovs_cfg.llm_model,

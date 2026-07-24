@@ -5,6 +5,7 @@ services:
     runtime: nvidia
     privileged: true
     restart: unless-stopped
+    network_mode: host
     # TRT inference can need more than docker's default 64MB /dev/shm for
     # intermediate buffers under concurrent requests.
     shm_size: "512m"
@@ -34,7 +35,7 @@ services:
       # name the engine repo's config declares, NOT the weight generation. The
       # reachy-voice client's edge_llm_model must match this exactly.
       EDGELLM_MODEL_NAME: Qwen/Qwen3-4B-AWQ
-      PORT: "8000"
+      PORT: "11435"
       WARMUP_TIMEOUT: ${WARMUP_TIMEOUT:-180}
       WARMUP_INFERENCE_TIMEOUT: ${WARMUP_INFERENCE_TIMEOUT:-300}
       PYTHONUNBUFFERED: "1"
@@ -44,7 +45,5 @@ services:
       - /usr/local/cuda/targets/aarch64-linux/lib:/host-cudla:ro
       - /usr/lib/aarch64-linux-gnu/nvidia:/host-nvidia-libs:ro
       - /lib/aarch64-linux-gnu:/host-libs:ro
-    ports:
-      - "11435:8000"
     # Healthcheck is defined in the Dockerfile (start-period=900s) which already
     # accommodates engine download + warmup inference on first run.

@@ -217,7 +217,7 @@ class TRTEngine:
 
 
 def load_engines(model_dir: str, engine_dir: str) -> dict[str, TRTEngine]:
-    """Load all model engines (SCRFD, MobileFaceNet, HSEmotion)."""
+    """Load face engines, plus HSEmotion only when explicitly enabled."""
     model_dir = Path(model_dir)
     engine_dir = Path(engine_dir)
     engine_dir.mkdir(parents=True, exist_ok=True)
@@ -227,8 +227,14 @@ def load_engines(model_dir: str, engine_dir: str) -> dict[str, TRTEngine]:
         # name: (onnx_file, input_shape_override_or_None)
         "scrfd": ("scrfd_2.5g_bnkps.onnx", (1, 3, 640, 640)),
         "arcface": ("w600k_mbf.onnx", (1, 3, 112, 112)),
-        "emotion": ("enet_b0_8_best_afew.onnx", (1, 3, 224, 224)),
     }
+    emotion_enabled = os.getenv("EMOTION_ENABLED", "0").lower() in (
+        "1", "true", "yes", "on",
+    )
+    if emotion_enabled:
+        model_specs["emotion"] = ("enet_b0_8_best_afew.onnx", (1, 3, 224, 224))
+    else:
+        logger.info("Emotion engine disabled (EMOTION_ENABLED=0)")
 
     for name, (onnx_file, input_shape) in model_specs.items():
         onnx_path = model_dir / onnx_file
