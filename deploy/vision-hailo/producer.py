@@ -14,17 +14,16 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import cv2
 import msgpack
 import numpy as np
 import zmq
-from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-
-from hailo_pipeline import init_pipeline, HailoPipeline
 from face_db import FaceDatabase
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from hailo_pipeline import HailoPipeline, init_pipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,13 +49,13 @@ FACE_DB_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class State:
-    last_frame: Optional[np.ndarray] = None
-    last_jpeg: Optional[bytes] = None
+    last_frame: np.ndarray | None = None
+    last_jpeg: bytes | None = None
     capture_count: int = 0
     fps: float = 0.0
     inference_ms: float = 0.0
-    pipeline: Optional[HailoPipeline] = None
-    face_db: Optional[FaceDatabase] = None
+    pipeline: HailoPipeline | None = None
+    face_db: FaceDatabase | None = None
     # Smile capture dedup
     identity_last_capture: dict[str, float] = {}
     anonymous_last_capture: float = 0.0
@@ -358,6 +357,19 @@ async def mjpeg_stream():
             await asyncio.sleep(1.0 / max(TARGET_FPS, 5))
 
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.get("/snapshot")
+async def snapshot():
+    """Return the latest camera frame as a JPEG for one-shot vision requests."""
+    jpg = state.last_jpeg
+    if not jpg and state.last_frame is not None:
+        ok, encoded = cv2.imencode(".jpg", state.last_frame)
+        if ok:
+            jpg = encoded.tobytes()
+    if not jpg:
+        raise HTTPException(status_code=503, detail="no camera frame available")
+    return Response(content=jpg, media_type="image/jpeg")
 
 
 # Face DB endpoints

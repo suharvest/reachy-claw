@@ -20,7 +20,7 @@ import logging
 import os
 import re
 import time
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 from ovs_agent.apps.companion_robot.app import CompanionRobotApp
 from ovs_agent.config import Config as OvsConfig
@@ -62,20 +62,51 @@ _STOP_SPEAKING_RE = re.compile(r"(停止说话|不要说话|别说话|闭嘴|sto
 
 
 def _compact_text(text: str) -> str:
-    return re.sub(r"\s+", "", text).lower()
+    return re.sub(r"[\s,，.。!！?？:：;；、-]+", "", text).lower()
+
+
+def _wake_aliases(wake_word: str) -> set[str]:
+    compact = _compact_text(wake_word)
+    aliases = {
+        compact,
+        "你好mini",
+        "你好迷你",
+        "你好米妮",
+        "哈喽mini",
+        "hello mini",
+        "hey mini",
+        "mini",
+        "迷你",
+        "你好",
+    }
+    return {_compact_text(alias) for alias in aliases if alias}
 
 
 def _strip_wake_word(text: str, wake_word: str) -> tuple[bool, str]:
     """Return (woke, remainder), matching wake words despite spaces/case."""
     if not wake_word:
         return True, text
-    compact_wake = _compact_text(wake_word)
     compact_text = _compact_text(text)
-    if compact_wake not in compact_text:
+    aliases = _wake_aliases(wake_word)
+    matched = next((alias for alias in aliases if alias and alias in compact_text), "")
+    if not matched:
         return False, text
 
     # Also strip the common spaced/non-spaced surface forms for clean prompts.
-    variants = {wake_word, wake_word.replace(" ", ""), "你好mini", "你好 mini"}
+    variants = {
+        wake_word,
+        wake_word.replace(" ", ""),
+        "你好mini",
+        "你好 mini",
+        "你好迷你",
+        "你好米妮",
+        "哈喽mini",
+        "hello mini",
+        "hey mini",
+        "mini",
+        "迷你",
+        "你好",
+    }
     remainder = text
     for variant in variants:
         remainder = re.sub(re.escape(variant), "", remainder, flags=re.IGNORECASE)
@@ -113,7 +144,7 @@ class _TtsTagFilter:
             if self._emit_emotions:
                 try:
                     self._on_emotion(m.group(1).lower())
-                except Exception:  # noqa: BLE001 — motion must never break TTS
+                except Exception:
                     logger.debug("emotion callback failed", exc_info=True)
             return ""
 
@@ -207,6 +238,21 @@ class ReachyCompanionApp(CompanionRobotApp):
         if flush is not None:
             await flush()
 
+    async def _cancel_unwoken_response(self) -> None:
+        if not self.config.server_loop_enabled():
+            return
+        send_json = getattr(self.slv, "_send_json", None)
+        if not callable(send_json):
+            return
+        for event in (
+            {"type": "response.cancel"},
+            {"type": "input_audio_buffer.clear"},
+        ):
+            try:
+                await send_json(event)
+            except Exception:
+                logger.debug("failed to cancel unwoken realtime response", exc_info=True)
+
     async def _handle_visual_request(self) -> bool:
         try:
             reply = await describe_current_view(self.reachy_config)
@@ -225,6 +271,7 @@ class ReachyCompanionApp(CompanionRobotApp):
             raw_text = stripped or raw_text
         elif not self._is_awake():
             logger.info("ignoring utterance before wake word: %r", raw_text)
+            await self._cancel_unwoken_response()
             return
         else:
             self._mark_awake()
@@ -501,7 +548,7 @@ class ConversationEngine:
         # drop history + stale prefix cache so the new prompt/language take hold
         try:
             await app.reset_conversation()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.debug("session.reset() failed during language switch", exc_info=True)
         await app.slv.reconnect()
         if app.config.server_loop_enabled():
@@ -525,8 +572,8 @@ class ConversationEngine:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=10.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 self._task.cancel()
-            except Exception:  # noqa: BLE001 — never let teardown raise
+            except Exception:
                 logger.exception("conversation task errored during shutdown")
         logger.info("ConversationEngine stopped.")

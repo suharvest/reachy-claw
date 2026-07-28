@@ -15,6 +15,8 @@ import os
 import re
 import subprocess
 import threading
+import traceback
+from urllib.parse import urlparse
 
 # NOTE: FastAPI resolves endpoint type hints via the module globals; with
 # `from __future__ import annotations` these names MUST be importable at module
@@ -139,6 +141,7 @@ class ReachyVoiceApp(ReachyMiniApp):
                 "app": "reachy-voice",
                 "state": getattr(self, "_engine_state", "?"),
                 "language": getattr(self._config, "language", "?"),
+                "error": getattr(self, "error", ""),
             }
 
         @self.settings_app.post("/language")
@@ -275,7 +278,7 @@ class ReachyVoiceApp(ReachyMiniApp):
 
         # ── camera: proxy the vision service's MJPEG stream ──
         @self.settings_app.get("/stream")
-        async def stream():  # noqa: ANN202
+        async def stream():
             import httpx
 
             upstream = getattr(self._config, "vision_mjpeg", "http://127.0.0.1:8630/stream")
@@ -296,7 +299,7 @@ class ReachyVoiceApp(ReachyMiniApp):
         tier_a.register_http_routes(self.settings_app, lambda: self._config)
 
         # ── debug API: drive motion / TTS programmatically (no voice needed) ──
-        def _motion():  # noqa: ANN202
+        def _motion():
             eng = self._engine
             return getattr(eng, "_motion", None) if eng is not None else None
 
@@ -485,6 +488,27 @@ def main() -> None:
         # wrapped_run as **kwargs) so we connect to localhost:38001, not the
         # SDK default reachy-mini.local:8000.
         app.wrapped_run(host=DAEMON_HOST, port=DAEMON_PORT)
+    except Exception:
+        app.error = traceback.format_exc()
+        if os.environ.get("REACHY_DASHBOARD_FALLBACK", "1") != "1":
+            raise
+        if app.settings_app is None or app.custom_app_url is None:
+            raise
+        app._engine_state = "dashboard_only"
+        logger.error(
+            "Robot runtime failed; serving dashboard-only fallback on %s",
+            app.custom_app_url,
+            exc_info=True,
+        )
+        import uvicorn
+
+        url = urlparse(app.custom_app_url)
+        uvicorn.run(
+            app.settings_app,
+            host=url.hostname or "0.0.0.0",
+            port=url.port or 8042,
+            log_level=os.environ.get("UVICORN_LOG_LEVEL", "info").lower(),
+        )
     except KeyboardInterrupt:
         app.stop()
 

@@ -21,7 +21,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-
 LOG_LEVEL = os.environ.get("REACHY_FACE_TRACKER_LOG_LEVEL", "INFO").upper()
 DAEMON_HOST = os.environ.get("REACHY_DAEMON_HOST", "127.0.0.1")
 DAEMON_PORT = int(os.environ.get("REACHY_DAEMON_PORT", "8000"))
@@ -36,12 +35,12 @@ ANTENNA_ENABLED = os.environ.get("REACHY_ANTENNA_MOTION_ENABLED", "1") == "1"
 USE_LIBRARY = os.environ.get("REACHY_USE_MOTION_LIBRARY", "1") == "1"
 OWNER_STALE_S = float(os.environ.get("REACHY_MOTION_OWNER_STALE_S", "8.0"))
 SETTLE_DURATION_S = float(os.environ.get("REACHY_MOTION_SETTLE_S", "1.0"))
-STEP_MIN_S = float(os.environ.get("REACHY_SPEECH_MOTION_STEP_MIN_S", "0.75"))
-STEP_MAX_S = float(os.environ.get("REACHY_SPEECH_MOTION_STEP_MAX_S", "1.15"))
-MAX_YAW_DEG = float(os.environ.get("REACHY_SPEECH_MAX_HEAD_YAW_DEG", "4.0"))
-MAX_PITCH_DEG = float(os.environ.get("REACHY_SPEECH_MAX_HEAD_PITCH_DEG", "3.0"))
-MAX_ROLL_DEG = float(os.environ.get("REACHY_SPEECH_MAX_HEAD_ROLL_DEG", "4.0"))
-MAX_ANTENNA_RAD = float(os.environ.get("REACHY_SPEECH_MAX_ANTENNA_RAD", "0.23"))
+STEP_MIN_S = float(os.environ.get("REACHY_SPEECH_MOTION_STEP_MIN_S", "1.6"))
+STEP_MAX_S = float(os.environ.get("REACHY_SPEECH_MOTION_STEP_MAX_S", "2.4"))
+MAX_YAW_DEG = float(os.environ.get("REACHY_SPEECH_MAX_HEAD_YAW_DEG", "3.2"))
+MAX_PITCH_DEG = float(os.environ.get("REACHY_SPEECH_MAX_HEAD_PITCH_DEG", "0.9"))
+MAX_ROLL_DEG = float(os.environ.get("REACHY_SPEECH_MAX_HEAD_ROLL_DEG", "2.0"))
+MAX_ANTENNA_RAD = float(os.environ.get("REACHY_SPEECH_MAX_ANTENNA_RAD", "0.18"))
 
 EMOTION_HINTS = {
     "happy": ("happy", "joy", "smile", "excited"),
@@ -287,14 +286,14 @@ class SpeechMotionPlayer:
     def _play_fallback_step(self, label: str) -> None:
         scale = 1.0
         if label.startswith("dance"):
-            scale = 1.15
+            scale = 1.05
         elif any(word in label for word in ("excited", "happy", "surprised")):
-            scale = 1.1
-        yaw = random.uniform(2.2, MAX_YAW_DEG) * random.choice((-1.0, 1.0)) * scale
+            scale = 1.03
+        yaw = random.uniform(1.2, MAX_YAW_DEG) * random.choice((-1.0, 1.0)) * scale
         pitch = random.uniform(-MAX_PITCH_DEG, MAX_PITCH_DEG) * scale
-        roll = random.uniform(2.0, MAX_ROLL_DEG) * random.choice((-1.0, 1.0)) * scale
+        roll = random.uniform(0.4, MAX_ROLL_DEG) * random.choice((-1.0, 1.0)) * scale
         head = self._create_head_pose(
-            z=random.uniform(16.0, 18.0),
+            z=17.0,
             yaw=yaw,
             pitch=pitch,
             roll=roll,
@@ -302,8 +301,8 @@ class SpeechMotionPlayer:
             degrees=True,
         )
         antennas = [
-            random.uniform(0.12, MAX_ANTENNA_RAD) * random.choice((-1.0, 1.0)),
-            random.uniform(0.12, MAX_ANTENNA_RAD) * random.choice((-1.0, 1.0)),
+            random.uniform(0.06, MAX_ANTENNA_RAD) * random.choice((-1.0, 1.0)),
+            random.uniform(0.06, MAX_ANTENNA_RAD) * random.choice((-1.0, 1.0)),
         ]
         step_duration = random.uniform(STEP_MIN_S, STEP_MAX_S)
         self._send(

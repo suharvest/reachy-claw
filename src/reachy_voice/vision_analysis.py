@@ -8,8 +8,8 @@ from typing import Any
 
 import httpx
 
-from reachy_voice.config import Config
 from reachy_voice import speech_runtime, tier_a
+from reachy_voice.config import Config
 
 logger = logging.getLogger("reachy_voice.vision_analysis")
 
