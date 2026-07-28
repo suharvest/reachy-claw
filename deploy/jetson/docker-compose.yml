@@ -64,6 +64,8 @@ services:
       - ZMQ_PUB_PORT=8631
       - HTTP_PORT=8630
       - STREAM_PORT=8632
+      - EMOTION_ENABLED=${EMOTION_ENABLED:-0}
+      - SMILE_CAPTURE_ENABLED=${SMILE_CAPTURE_ENABLED:-0}
     labels:
       # Opt into autoheal: vision-trt has a history of camera-lock deadlocks
       # (see commit ee5406f) where a fresh container is the only fix.

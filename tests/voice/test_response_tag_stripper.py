@@ -18,14 +18,14 @@ from reachy_voice.conversation import _TtsTagFilter
 from reachy_voice.dashboard import DashboardPlugin, DashboardHub
 
 
-def _run_tts_filter(tokens: list[str]) -> tuple[str, list[str]]:
+def _run_tts_filter(tokens: list[str], *, emit_emotions: bool = True) -> tuple[str, list[str]]:
     spoken: list[str] = []
     emotions: list[str] = []
 
     async def send(t: str) -> None:
         spoken.append(t)
 
-    f = _TtsTagFilter(send, emotions.append)
+    f = _TtsTagFilter(send, emotions.append, emit_emotions=emit_emotions)
 
     async def main() -> None:
         for tok in tokens:

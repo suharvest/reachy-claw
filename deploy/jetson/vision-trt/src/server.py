@@ -326,8 +326,13 @@ class VisionService:
         # Face database
         self.face_db = FaceDatabase(config.DATA_DIR)
 
-        # Smile capture tracker
-        self.smile_tracker = SmileCaptureTracker(config.DATA_DIR)
+        # Smile capture depends on emotion classification, so keep it disabled
+        # unless both switches are explicitly enabled.
+        if config.EMOTION_ENABLED and config.SMILE_CAPTURE_ENABLED:
+            self.smile_tracker = SmileCaptureTracker(config.DATA_DIR)
+        else:
+            self.smile_tracker = None
+            logger.info("Smile capture disabled")
 
         # Video streamer (simple JPEG buffer now)
         self.streamer = VideoStreamer(config.STREAM_PORT)
@@ -417,26 +422,27 @@ class VisionService:
             return float(v) if v is not None else 0.0
 
         # NOTE: 512-float embeddings are intentionally excluded from per-frame
-        # broadcasts. Downstream consumers (reachy-claw vision_client_plugin,
-        # browser dashboard) only need bbox/emotion/identity for control and
-        # display. Code paths that legitimately need the embedding (face
-        # enrollment) go through dedicated endpoints (/api/faces/enroll*).
+        # broadcasts. Downstream consumers only need bbox/identity for display.
+        # Code paths that legitimately need the embedding (face enrollment) go
+        # through dedicated endpoints (/api/faces/enroll*).
+        def _face_payload(r):
+            payload = {
+                "center": [float(c) for c in r.center],
+                "bbox": [float(b) for b in r.bbox],
+                "landmarks": [[float(x) for x in pt] for pt in r.landmarks],
+                "confidence": _f(r.confidence),
+                "identity": r.identity,
+                "identity_distance": _f(r.identity_distance),
+            }
+            if self.config.EMOTION_ENABLED:
+                payload["emotion"] = r.emotion
+                payload["emotion_confidence"] = _f(r.emotion_confidence)
+            return payload
+
         zmq_msg = {
             "timestamp": t0,
             "frame_id": frame_id,
-            "faces": [
-                {
-                    "center": [float(c) for c in r.center],
-                    "bbox": [float(b) for b in r.bbox],
-                    "landmarks": [[float(x) for x in pt] for pt in r.landmarks],
-                    "confidence": _f(r.confidence),
-                    "emotion": r.emotion,
-                    "emotion_confidence": _f(r.emotion_confidence),
-                    "identity": r.identity,
-                    "identity_distance": _f(r.identity_distance),
-                }
-                for r in results
-            ],
+            "faces": [_face_payload(r) for r in results],
         }
         if capture_info:
             zmq_msg["capture"] = capture_info
@@ -462,11 +468,9 @@ class VisionService:
                 "frame_id": frame_id,
                 "faces": [
                     {
-                        "bbox": r.bbox,
-                        "landmarks": r.landmarks,
-                        "emotion": r.emotion,
-                        "emotion_confidence": r.emotion_confidence,
-                        "identity": r.identity,
+                        key: value
+                        for key, value in _face_payload(r).items()
+                        if key in ("bbox", "landmarks", "identity", "emotion", "emotion_confidence")
                     }
                     for r in results
                 ],
@@ -686,8 +690,9 @@ async def snapshot(target: str = "inference"):
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         for lx, ly in r.landmarks:
             cv2.circle(frame, (int(lx * w), int(ly * h)), 3, (0, 0, 255), -1)
-        label = f"{r.emotion} {r.emotion_confidence:.0%}"
-        cv2.putText(frame, label, (x1, max(y1-5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        if service.config.EMOTION_ENABLED:
+            label = f"{r.emotion} {r.emotion_confidence:.0%}"
+            cv2.putText(frame, label, (x1, max(y1-5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
     # Add frame info
     cv2.putText(frame, f"{w}x{h}", (5, h-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
     _, jpg = cv2.imencode(".jpg", frame)

@@ -10,7 +10,12 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 try:
-    from hailo_platform import HEF, VDevice, FormatType, HailoSchedulingAlgorithm  # noqa: F401
+    from hailo_platform import (  # noqa: F401
+        HEF,
+        FormatType,
+        HailoSchedulingAlgorithm,
+        VDevice,
+    )
 except ImportError:
     raise ImportError("hailo_platform not installed. Install: sudo apt install hailo-all")
 

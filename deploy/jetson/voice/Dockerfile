@@ -31,6 +31,7 @@ RUN pip install --no-cache-dir --no-deps --upgrade \
     /tmp/vendor/openvoicestream_agent-0.2.0-py3-none-any.whl \
     /tmp/vendor/voxedge-0.0.5a0-py3-none-any.whl \
     && rm -rf /tmp/vendor
+RUN pip install --no-cache-dir "msgpack>=1.0" "pyzmq>=25.0"
 
 # Package now lives under src/ after the reachy-claw <- reachy-voice merge; it is
 # still mounted at /opt/reachy-voice/reachy_voice so PYTHONPATH resolution is

@@ -69,8 +69,20 @@ asyncio_mode = "auto"
 # (root) target the moved-away code in legacy/ and are kept only for reference.
 testpaths = ["tests/voice"]
 
+[tool.ruff]
+extend-exclude = [
+    "legacy",
+    "tests/*.py",
+    "tests/e2e",
+    "scripts",
+    "deploy/jetson/vision-trt",
+    "deploy/vision-cm4",
+    "deploy/vision-stub",
+]
+
 [tool.ruff.lint]
-ignore = ["E402", "E702", "E741", "E731", "E721"]
+select = ["E", "F", "I"]
+ignore = ["E402", "E501", "E702", "E741", "E731", "E721"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["F841"]

@@ -20,6 +20,7 @@ services:
       # and hf-hub (both repo-root-relative).
       context: ../../..
       dockerfile: deploy/jetson/voice/Dockerfile
+      network: host
     container_name: reachy-voice
     restart: unless-stopped
     network_mode: host
@@ -33,14 +34,18 @@ services:
       # from the dashboard. Bind-mounted to a stable host path so they survive
       # `docker restart` AND image rebuilds, and stay hand-inspectable over SSH.
       # Applying this mount needs one `compose up` (not just a restart).
-      - /home/recomputer/reachy-voice-data:/data
+      - ${REACHY_VOICE_HOST_DATA_DIR:-/home/recomputer/reachy-voice-data}:/data
     environment:
       - NO_PROXY=localhost,127.0.0.1
       - REACHY_DAEMON_PORT=38001
       - REACHY_LOG_LEVEL=INFO
-      - REACHY_SERVER_LOOP=1
+      - REACHY_SERVER_LOOP=0
       - REACHY_REALTIME_PROTOCOL_VERSION=2
+      - REACHY_V2V_URL=${REACHY_V2V_URL:-ws://localhost:8000/v2v/stream}
       - REACHY_VOICE_DATA_DIR=/data
+      # Keep the Jetson deployment from auto-driving motors when a face appears.
+      # Manual speech/motion can be re-enabled after the motor bus is stable.
+      - REACHY_ATTENTION_ENABLED=${REACHY_ATTENTION_ENABLED:-0}
       # - REACHY_LANGUAGE=zh    # default; switchable at runtime via :8042
     logging:
       driver: json-file

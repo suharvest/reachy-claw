@@ -29,6 +29,8 @@ services:
       --serialport ${SERIAL_PORT:-auto}
       --localhost-only
       --deactivate-audio
+      --no-wake-up-on-start
+      --no-goto-sleep-on-stop
       --fastapi-port 38001
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:38001/', timeout=2)"]
@@ -108,6 +110,8 @@ services:
       - ZMQ_PUB_PORT=8631
       - HTTP_PORT=8630
       - STREAM_PORT=8632
+      - EMOTION_ENABLED=${EMOTION_ENABLED:-0}
+      - SMILE_CAPTURE_ENABLED=${SMILE_CAPTURE_ENABLED:-0}
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8630/health', timeout=2)"]
       interval: 10s

@@ -70,7 +70,13 @@ class VisionConfig:
     INPUT_HEIGHT: int = int(os.getenv("INPUT_HEIGHT", "640"))
 
     # Emotion smoothing
+    EMOTION_ENABLED: bool = os.getenv("EMOTION_ENABLED", "0").lower() in (
+        "1", "true", "yes", "on",
+    )
     EMOTION_WINDOW_SIZE: int = int(os.getenv("EMOTION_WINDOW_SIZE", "5"))
+    SMILE_CAPTURE_ENABLED: bool = os.getenv("SMILE_CAPTURE_ENABLED", "0").lower() in (
+        "1", "true", "yes", "on",
+    )
 
     # Performance
     # 5 Hz is enough for face / gesture tasks and roughly halves GPU duty
